@@ -1,0 +1,275 @@
+// Update pill — small capsule in the workspace drawer, under the
+// Settings button.
+//
+// Two modes:
+//   * Urgent — surfaces a real status (Checking / Update available
+//     / Downloading / Error). Renders the accent-colored styles.
+//   * Compact — when [alwaysShow] is true and there's no urgent
+//     status, renders a subdued "Octodo · 1.0.0+1 · info" row that
+//     reuses the dialog as an About panel.
+
+import 'package:flutter/material.dart';
+
+import '../../src/app_info.dart';
+import '../../src/update/update_controller.dart';
+import '../../src/update/update_state.dart';
+import 'update_popover_view.dart';
+
+class UpdatePill extends StatelessWidget {
+  final UpdateStateModel model;
+  final UpdateController controller;
+  final bool collapsed;
+
+  /// When true, the pill renders even when there's no urgent update
+  /// status — uses a low-key style so the same dialog stays
+  /// reachable as an About panel.
+  final bool alwaysShow;
+
+  const UpdatePill({
+    super.key,
+    required this.model,
+    required this.controller,
+    this.collapsed = false,
+    this.alwaysShow = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: model,
+      builder: (context, _) {
+        final urgent = model.showsPill;
+        if (!urgent && !alwaysShow) return const SizedBox.shrink();
+        if (collapsed) {
+          return _CollapsedPill(
+            model: model,
+            controller: controller,
+            urgent: urgent,
+          );
+        }
+        return _ExpandedPill(
+          model: model,
+          controller: controller,
+          urgent: urgent,
+        );
+      },
+    );
+  }
+}
+
+class _ExpandedPill extends StatelessWidget {
+  final UpdateStateModel model;
+  final UpdateController controller;
+  final bool urgent;
+  const _ExpandedPill({
+    required this.model,
+    required this.controller,
+    required this.urgent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isError = model.state == UpdateState.error;
+    final isAvailable = model.state == UpdateState.updateAvailable;
+    final isChecking = model.state == UpdateState.checking;
+
+    Color bg;
+    Color fg;
+    Color border;
+    String label;
+
+    if (urgent) {
+      if (isError) {
+        bg = const Color(0xFF313244);
+        fg = const Color(0xFFF9E2AF);
+        border = const Color(0xFF45475A);
+      } else if (isAvailable) {
+        bg = const Color(0xFF89B4FA).withValues(alpha: 0.15);
+        fg = const Color(0xFF89B4FA);
+        border = const Color(0xFF89B4FA).withValues(alpha: 0.5);
+      } else {
+        bg = const Color(0xFF1E1E2E);
+        fg = const Color(0xFFBAC2DE);
+        border = const Color(0xFF45475A);
+      }
+      label = model.text;
+    } else {
+      bg = const Color(0xFF1E1E2E);
+      fg = const Color(0xFFBAC2DE);
+      border = const Color(0xFF313244);
+      label = '$kAppName · ${model.currentVersion}';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => showUpdatePopover(
+            context,
+            model: model,
+            controller: controller,
+          ),
+          behavior: HitTestBehavior.opaque,
+          child: Tooltip(
+            message: urgent
+                ? model.text
+                : 'About $kAppName',
+            waitDuration: const Duration(milliseconds: 400),
+              child: Container(
+                height: 28,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: bg,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: border, width: 1),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _Badge(
+                      state: model.state,
+                      color: fg,
+                      isChecking: isChecking,
+                      urgent: urgent,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      label,
+                      style: TextStyle(
+                        color: fg,
+                        fontSize: 11,
+                        fontWeight: urgent
+                            ? FontWeight.w500
+                            : FontWeight.w400,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                    ),
+                  ],
+                ),
+              ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CollapsedPill extends StatelessWidget {
+  final UpdateStateModel model;
+  final UpdateController controller;
+  final bool urgent;
+  const _CollapsedPill({
+    required this.model,
+    required this.controller,
+    required this.urgent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isAvailable = model.state == UpdateState.updateAvailable;
+    final isError = model.state == UpdateState.error;
+    final isChecking = model.state == UpdateState.checking;
+
+    final Color fg = isError
+        ? const Color(0xFFF9E2AF)
+        : isAvailable
+            ? const Color(0xFF89B4FA)
+            : urgent
+                ? const Color(0xFFBAC2DE)
+                : const Color(0xFF6C7086);
+    final Color border = isAvailable
+        ? const Color(0xFF89B4FA).withValues(alpha: 0.5)
+        : urgent
+            ? const Color(0xFF45475A)
+            : const Color(0xFF313244);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 4, 6, 2),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => showUpdatePopover(
+            context,
+            model: model,
+            controller: controller,
+          ),
+          behavior: HitTestBehavior.opaque,
+          child: Tooltip(
+            message: urgent ? model.text : 'About $kAppName',
+            waitDuration: const Duration(milliseconds: 400),
+            child: Container(
+              height: 28,
+              decoration: BoxDecoration(
+                color: isAvailable
+                    ? const Color(0xFF89B4FA).withValues(alpha: 0.15)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: border, width: 1),
+              ),
+              child: Center(
+                child: _Badge(
+                  state: model.state,
+                  color: fg,
+                  isChecking: isChecking,
+                  urgent: urgent,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Badge extends StatelessWidget {
+  final UpdateState state;
+  final Color color;
+  final bool isChecking;
+  final bool urgent;
+  const _Badge({
+    required this.state,
+    required this.color,
+    required this.isChecking,
+    required this.urgent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (isChecking) {
+      return SizedBox(
+        width: 14,
+        height: 14,
+        child: CircularProgressIndicator(
+          strokeWidth: 1.6,
+          valueColor: AlwaysStoppedAnimation<Color>(color),
+        ),
+      );
+    }
+    if (!urgent) {
+      return const Icon(Icons.info_outline, size: 14, color: Color(0xFF6C7086));
+    }
+    return Icon(_iconFor(state), size: 14, color: color);
+  }
+
+  IconData _iconFor(UpdateState s) {
+    switch (s) {
+      case UpdateState.idle:
+      case UpdateState.notFound:
+        return Icons.check_circle_outline;
+      case UpdateState.checking:
+        return Icons.sync;
+      case UpdateState.updateAvailable:
+        return Icons.system_update_alt;
+      case UpdateState.downloading:
+        return Icons.downloading;
+      case UpdateState.downloaded:
+      case UpdateState.installing:
+        return Icons.restart_alt;
+      case UpdateState.error:
+        return Icons.error_outline;
+    }
+  }
+}

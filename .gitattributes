@@ -1,0 +1,26 @@
+# Auto-detect text files and normalise line endings on commit.
+* text=auto eol=lf
+
+# Dart source: keep LF, and force Linguist to tag it as Dart.
+*.dart text eol=lf linguist-language=Dart
+
+# Generated Windows artifacts.
+*.rc        text eol=crlf
+*.manifest  text eol=crlf
+*.ico       binary
+*.png       binary
+*.jpg       binary
+*.gif       binary
+*.dll       binary
+*.exe       binary
+*.pdb       binary
+*.lib       binary
+*.exp       binary
+*.dill      binary
+*.bin       binary
+*.so        binary
+
+# Shell scripts (if any).
+*.sh text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

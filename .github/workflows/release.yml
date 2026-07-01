@@ -1,0 +1,121 @@
+name: release
+
+# Triggered by pushing a tag like v1.2.3. The runner reads
+# github.ref_name (always includes the "v" prefix) and turns it into:
+#   - --build-name=1.2.3  (semver, no "v" — what package_info_plus reports)
+#   - octodo-v1.2.3-windows-x64.zip      (asset on the release page)
+#   - octodo-v1.2.3-windows-x64.zip.sha256 (sidecar for the in-app updater)
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # softprops/action-gh-release creates the release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to a version that matches your dev environment for
+      # reproducible builds. cache: true preserves ~/.pub-cache across
+      # runs of the same Flutter version.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.4'
+          channel: stable
+          cache: true
+
+      # Install the Rust toolchain (stable). Required because
+      # `flutter_alacritty` pulls in `rust_lib_flutter_alacritty` as a
+      # transitive dep — that plugin declares `ffiPlugin: true`, which
+      # makes Flutter invoke `cargo build --target
+      # x86_64-pc-windows-msvc` during `flutter build windows` to
+      # compile the Alacritty Rust crate to a cdylib. Without rustc +
+      # cargo on PATH the build fails at the plugin-build step.
+      #
+      # dtolnay/rust-toolchain@stable installs the toolchain and adds
+      # it to PATH; the implicit cache step restores ~/.cargo from a
+      # previous run, which matters because `rust_lib_flutter_alacritty`
+      # pulls in vte / alacritty_terminal / similar crates that take
+      # ~3 min to compile cold.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify toolchain
+        shell: pwsh
+        run: |
+          Write-Host "--- Flutter ---"
+          flutter --version
+          Write-Host "--- Rust ---"
+          rustc --version
+          cargo --version
+
+      - name: Build, zip, sidecar SHA-256
+        id: build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # github.ref_name is e.g. "v1.2.3". Strip the leading "v" for
+          # --build-name (Dart compares as semver; "v1.2.3" fails parse)
+          # but keep it in the asset filename so GitHub assets and the
+          # git tag stay in lockstep.
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag -replace '^v',''
+
+          # Refuse malformed tags up front — better than paying 6–8 min
+          # for a build whose assets the in-app updater's compareSemver
+          # would fail to parse. Accepts "1.2.3" or "1.2.3-rc.1".
+          if ($ver -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') {
+            throw "Tag '$tag' is not semver-shaped (expected vX.Y.Z or vX.Y.Z-prerelease)"
+          }
+
+          Write-Host "Building octodo $ver (build $env:GITHUB_RUN_NUMBER)"
+
+          flutter pub get
+          flutter build windows --release `
+            --build-name=$ver `
+            --build-number=$env:GITHUB_RUN_NUMBER
+
+          $src = 'build\windows\x64\runner\Release'
+          $zip = "octodo-$ver-windows-x64.zip"
+          $sha = "$zip.sha256"
+
+          if (-not (Test-Path $src)) {
+            throw "Build output not found at $src"
+          }
+
+          # Enumerate the Release/ contents explicitly so we zip files
+          # at the archive root (no "Release/" parent directory) and
+          # so single-file edge cases don't slip through PS's array
+          # unwrapping. -LiteralPath defeats wildcard interpretation.
+          $files = @(Get-ChildItem -LiteralPath $src -File |
+                    Select-Object -ExpandProperty FullName)
+          Compress-Archive `
+            -Path $files `
+            -DestinationPath $zip `
+            -CompressionLevel Optimal
+
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          [System.IO.File]::WriteAllText($sha, $hash)
+
+          # Expose the stripped version so the next step can name the
+          # upload correctly (action expressions don't regex-strip "v").
+          "ver=$ver" | Out-File -Append -Encoding ascii -FilePath $env:GITHUB_OUTPUT
+
+          Write-Host "Wrote $zip ($hash)"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          # Mark as pre-release whenever the tag carries a "-prerelease"
+          # suffix. GitHub's /releases/latest endpoint already filters out
+          # pre-releases, so this is enough to keep stable users from
+          # being prompted to "update" to a v1.2.0-rc.1 build.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            octodo-${{ steps.build.outputs.ver }}-windows-x64.zip
+            octodo-${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
