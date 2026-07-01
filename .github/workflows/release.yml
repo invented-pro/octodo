@@ -118,5 +118,5 @@ jobs:
           # being prompted to "update" to a v1.2.0-rc.1 build.
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            octodo-${{ steps.build.outputs.ver }}-windows-x64.zip
-            octodo-${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
+            octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip
+            octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
