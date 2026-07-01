@@ -80,7 +80,7 @@ jobs:
             --build-number=$env:GITHUB_RUN_NUMBER
 
           $src = 'build\windows\x64\runner\Release'
-          $zip = "octodo-$ver-windows-x64.zip"
+          $zip = "octodo-v$ver-windows-x64.zip"
           $sha = "$zip.sha256"
 
           if (-not (Test-Path $src)) {
