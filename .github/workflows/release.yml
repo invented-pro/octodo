@@ -87,16 +87,17 @@ jobs:
             throw "Build output not found at $src"
           }
 
-          # Enumerate the Release/ contents explicitly so we zip files
-          # at the archive root (no "Release/" parent directory) and
-          # so single-file edge cases don't slip through PS's array
-          # unwrapping. -LiteralPath defeats wildcard interpretation.
-          $files = @(Get-ChildItem -LiteralPath $src -File |
-                    Select-Object -ExpandProperty FullName)
+          # Enumerate the Release/ contents with a wildcard so we zip
+          # at the archive root (no "Release/" parent directory) AND
+          # include subdirectories like data/ that the Flutter Windows
+          # embedder requires next to the exe. -LiteralPath defeats
+          # wildcard interpretation of the path itself, while $src\*
+          # is the actual pattern Compress-Archive expands.
           Compress-Archive `
-            -Path $files `
+            -Path "$src\*" `
             -DestinationPath $zip `
-            -CompressionLevel Optimal
+            -CompressionLevel Optimal `
+            -Force
 
           $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
           [System.IO.File]::WriteAllText($sha, $hash)
