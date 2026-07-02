@@ -231,6 +231,12 @@ class TerminalViewState extends State<TerminalView> {
   final Signal<bool> _hasReceivedOutput = signal(false);
   final Signal<bool> _showSlowHint = signal(false);
 
+  // Captured by the pty.exitCode.then callback so _markExited can show
+  // the exit code in its "Process exited" banner. Stays null if exit
+  // was detected via pty.output.onDone (the reader thread saw EOF)
+  // before the wait-exit thread posted the code.
+  int? _lastExitCode;
+
   // After this many ms without any output, show an extra hint in the
   // placeholder so the user knows WSL cold-start can take 10-30 s.
   static const Duration _slowHintAfter = Duration(seconds: 8);
@@ -487,14 +493,16 @@ class TerminalViewState extends State<TerminalView> {
     // _bellMode / _fontSize changes automatically.
   }
 
-  /// Re-quote [s] so it survives `cmd.exe`'s `/c` parser as a single token.
+  /// Re-quote [s] so it survives CommandLineToArgvW parsing of the
+  /// concatenated command line that flutter_pty's `build_command`
+  /// produces.
   ///
-  /// We launch every shell as `cmd.exe /c "<exe>" <args...>` (see [_start]
-  /// for why). flutter_pty's Windows `build_command` joins `program` and each
-  /// arg with a bare space — no quoting — so any token containing a space
-  /// (e.g. `C:\Program Files\…`) must be wrapped here, or cmd/CreateProcessW
-  /// would split it into `C:\Program` + `Files\…` and the shell would fail to
-  /// find its own executable (the historical "C: Program" first-click crash).
+  /// flutter_pty's Windows `build_command` joins `program` and each arg
+  /// with a bare space — no quoting — so any token containing a space
+  /// (e.g. `C:\Program Files\…\pwsh.exe`) must be wrapped here, or
+  /// CommandLineToArgvW will split it into `C:\Program` + `Files\…` and
+  /// the shell will fail to find its own executable (the historical
+  /// "C: Program" first-click crash).
   ///
   /// Backslashes are left alone — paths like `C:\Program Files\pwsh\pwsh.exe`
   /// round-trip cleanly because no backslash immediately precedes a quote in
@@ -508,24 +516,24 @@ class TerminalViewState extends State<TerminalView> {
 
 /// Spawn the configured shell via [fa.FlutterPtyBackend].
   void _start() {
-    // Workaround for a Windows-only flutter_pty 0.4.2 spawn quirk: the
-    // native `build_command` (flutter_pty/src/flutter_pty_win.c) emits
-    // `<executable> <executable> <args...>` because the Dart binding sets
-    // `argv[0] = executable` AND `build_command` also iterates `arguments`
-    // starting at index 0. CreateProcessW with a NULL lpApplicationName
-    // takes the first token as the child's argv[0] and passes the rest as
-    // argv[1..n]. cmd.exe and Windows PowerShell tolerate the stray extra
-    // positional; pwsh, wsl.exe, and bash do not:
-    //   pwsh → "Processing -File '<own path>' failed: no .ps1 extension"
-    //   wsl  → runs the path as a Linux command → "command not found"
-    //   bash → "<own path>: cannot execute binary file"
+    // We launch the shell DIRECTLY (not via `cmd.exe /c <shell>`). The
+    // historical reason to wrap in `cmd.exe /c` was a flutter_pty 0.4.2
+    // spawn quirk where its native `build_command` emitted
+    // `<executable> <executable> <args...>` (argv[0] doubled), which
+    // crashed pwsh / wsl / bash. The local flutter_pty fork
+    // (../flutter_pty_pkg, commit 99951b0) fixes that by starting the
+    // concatenation at `arguments[1]`, so the wrapper is no longer
+    // needed.
     //
-    // We therefore launch every shell wrapped in `cmd.exe /c "<real>
-    // <args>"`. The doubled token becomes a harmless extra `cmd.exe`
-    // before `/c` (cmd ignores positionals before `/c`), and the real
-    // invocation rides untouched in the /c payload. Verified:
-    // `cmd.exe cmd.exe /c "<exe>" <args>` launches pwsh / bash / wsl
-    // correctly.
+    // Why this matters for the "terminal dies when opencode exits"
+    // symptom: `cmd /c` runs the command and exits, so the PTY's
+    // child process is `cmd.exe` (which exits) — not pwsh. When
+    // opencode exits inside pwsh, cmd.exe is already gone, the PTY
+    // reports the opencode crash exit code, the pipes are torn down,
+    // and the still-running pwsh is left orphaned and unreachable.
+    // Launching pwsh directly makes pwsh the PTY's child, and pwsh
+    // stays alive across child-process exits — opencode comes and goes
+    // but the terminal keeps running.
     final String ptyProgram;
     final List<String> ptyArgs;
     if (widget.surface.program.isEmpty) {
@@ -544,12 +552,11 @@ class TerminalViewState extends State<TerminalView> {
         ...widget.surface.args,
         if (isPowerShell) '-NoProfile',
       ];
-      ptyProgram = 'cmd.exe';
-      ptyArgs = <String>[
-        '/c',
-        _quoteForCmd(realProgram),
-        ...realArgs.map(_quoteForCmd),
-      ];
+      // Quote the executable so paths with spaces
+      // (`C:\Program Files\PowerShell\7\pwsh.exe`) survive
+      // CommandLineToArgvW parsing of the concatenated command line.
+      ptyProgram = _quoteForCmd(realProgram);
+      ptyArgs = realArgs.map(_quoteForCmd).toList();
     }
 
     _log.fine('_start: ptyProgram=$ptyProgram ptyArgs=$ptyArgs (program="${widget.surface.program}") cwd=${widget.workingDirectory}');
@@ -565,7 +572,23 @@ class TerminalViewState extends State<TerminalView> {
     _pty = pty;
     _log.fine('_start: PTY backend created');
 
-    _engineOutputSub = _engine.output.listen(pty.write);
+    _engineOutputSub = _engine.output.listen(
+      (bytes) {
+        // Gate host→PTY writes after the PTY has exited. flutter_pty's
+        // `pty_write` calls `WriteFile(handle->inputWriteSide, ...)` on
+        // the ConPTY input pipe; once the ConPTY's client process
+        // (cmd.exe wrapper) is gone, the kernel does NOT return
+        // `ERROR_BROKEN_PIPE` until `ClosePseudoConsole` is invoked,
+        // and we never invoke it. So `WriteFile` blocks the UI thread
+        // indefinitely on any post-exit keystroke. Dropping the bytes
+        // here is safe — there is no PTY to receive them anyway.
+        _log.info('engine.output listener fired bytes=${bytes.length} _exited=${_exited.value}');
+        if (_exited.value) return;
+        _log.info('engine.output listener pre-pty.write bytes=${bytes.length}');
+        pty.write(bytes);
+        _log.info('engine.output listener post-pty.write bytes=${bytes.length}');
+      },
+    );
     _outputSub = pty.output.listen(
       (bytes) {
         if (!_hasReceivedOutput.value) {
@@ -573,7 +596,17 @@ class TerminalViewState extends State<TerminalView> {
           _slowHintTimer?.cancel();
           _log.info('FIRST PTY OUTPUT: ${bytes.length} bytes (after ${DateTime.now().millisecondsSinceEpoch - _startTimeMs}ms)');
         }
-        _engine.feed(bytes);
+        _log.info('pty.output listener fired bytes=${bytes.length} _exited=${_exited.value}');
+        if (_exited.value) return;
+        // `feedWithKitty` answers Kitty keyboard-protocol capability
+        // queries (`CSI ? u`) and applies flag pushes (`CSI > ... u`),
+        // writing responses back via `engine.write` (= PTY input). Apps
+        // like opencode / Claude Code / Codex CLI enable flag 1
+        // ("disambiguate escape codes") in response, which makes
+        // Shift+Enter arrive as `CSI 13 ; 2 u` instead of legacy `\r` —
+        // matching how real alacritty behaves and giving those TUIs a
+        // way to bind multiline entry to Shift+Enter.
+        _engine.feedWithKitty(bytes);
       },
       onDone: () {
         _log.info('PTY output stream done; calling _markExited');
@@ -582,6 +615,7 @@ class TerminalViewState extends State<TerminalView> {
     );
     pty.exitCode.then((code) {
       _log.info('PTY exitCode=$code');
+      _lastExitCode = code;
       _markExited();
     });
   }
@@ -592,7 +626,38 @@ class TerminalViewState extends State<TerminalView> {
     if (_exited.value || !mounted) return;
     _log.fine('_markExited fired');
     _exited.value = true;
+    // Tear down the ConPTY properly. The local flutter_pty fork
+    // (../flutter_pty_pkg) decouples the C-side read thread from
+    // Dart_PostCObject_DL via a bounded ring buffer, so pty.close() can
+    // CancelIoEx the in-flight conout read and ClosePseudoConsole
+    // unblocks — no more orphaned ConPTY leaking the input pipe and no
+    // more whole-app UI freeze on the next keystroke. The close is
+    // synchronous from Dart's perspective but bounded (a worker thread
+    // may outlive the handle briefly if blocked in the Dart message
+    // port; the OS reclaims it on isolate shutdown).
+    _log.fine('_markExited pre-pty.close()');
+    try {
+      _pty?.close();
+    } catch (e) {
+      _log.warning('pty.close() threw: $e');
+    }
+    _log.fine('_markExited post-pty.close()');
+
+    // Feed a one-line "process exited" banner into the grid so the
+    // user can see *what* happened and *when* the terminal went dead
+    // (the listener gate below silently drops post-exit keystrokes,
+    // which otherwise makes the terminal feel hung without any visible
+    // signal). Uses dim SGR so it doesn't fight with the user's
+    // prompt colors. CR/LF at both ends forces the banner onto its
+    // own line regardless of where the cursor was when the shell died.
+    final codeStr = _lastExitCode?.toString() ?? '?';
+    _engine.feed(Uint8List.fromList(utf8.encode(
+      '\r\n\x1b[2m─── Process exited (code=$codeStr). '
+      'Terminal is read-only; close this pane to recover. ───\x1b[0m\r\n',
+    )));
+
     widget.onExited?.call();
+    _log.fine('_markExited post-onExited');
   }
 
   // ── Engine → host signal forwarding ──────────────────────────────
