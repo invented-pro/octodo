@@ -618,15 +618,22 @@ class TerminalViewState extends State<TerminalView> {
     if (_exited.value || !mounted) return;
     _log.fine('_markExited fired');
     _exited.value = true;
-    // We intentionally do NOT call _pty?.close() here. On Windows,
-    // ClosePseudoConsole blocks the caller while the C-side read thread
-    // is still in ReadFile on the ConPTY output pipe, and that read only
-    // unwinds once the pipe handle is closed by the kernel — which the
-    // read thread itself owns. The pty_write liveness check (C-side
-    // WaitForSingleObject on the duplicated process handle) already
-    // makes post-exit writes a no-op, so the orphaned-ConPTY blocking
-    // issue is addressed without needing to call pty.close. The OS
-    // reclaims the ConPTY handle when the host process exits.
+    // Tear down the ConPTY properly. The local flutter_pty fork
+    // (../flutter_pty_pkg) decouples the C-side read thread from
+    // Dart_PostCObject_DL via a bounded ring buffer, so pty.close() can
+    // CancelIoEx the in-flight conout read and ClosePseudoConsole
+    // unblocks — no more orphaned ConPTY leaking the input pipe and no
+    // more whole-app UI freeze on the next keystroke. The close is
+    // synchronous from Dart's perspective but bounded (a worker thread
+    // may outlive the handle briefly if blocked in the Dart message
+    // port; the OS reclaims it on isolate shutdown).
+    _log.fine('_markExited pre-pty.close()');
+    try {
+      _pty?.close();
+    } catch (e) {
+      _log.warning('pty.close() threw: $e');
+    }
+    _log.fine('_markExited post-pty.close()');
     widget.onExited?.call();
     _log.fine('_markExited post-onExited');
   }
