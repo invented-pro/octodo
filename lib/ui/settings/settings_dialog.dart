@@ -17,6 +17,7 @@ import '../../src/log.dart';
 import '../../src/settings/setting.dart';
 import '../../src/settings/settings_catalog.dart';
 import '../../src/settings/settings_runtime.dart';
+import '../../src/theme/palette_context.dart';
 import 'chrome/settings_card.dart';
 import 'chrome/settings_row.dart';
 import 'widgets/trailing_widgets.dart';
@@ -69,12 +70,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
   Widget build(BuildContext context) {
     final runtime = SettingsRuntime.instance;
     final catalog = runtime.catalog;
+    final palette = context.palette;
     return Dialog(
-      backgroundColor: const Color(0xFF1A1A24),
+      backgroundColor: palette.dialogSurface,
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        side: const BorderSide(color: Color(0xFF45475A), width: 1),
+        side: BorderSide(color: palette.outline, width: 1),
       ),
       child: SizedBox(
         width: 900,
@@ -93,7 +95,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                       onSelect: (s) => setState(() => _section = s),
                     ),
                   ),
-                  Container(width: 1, color: const Color(0xFF313244)),
+                  Container(width: 1, color: palette.rowSurface),
                   Expanded(
                     child: _Detail(
                       section: _section,
@@ -122,16 +124,17 @@ class _Header extends StatelessWidget {
   const _Header({required this.showJsonPaths, required this.onToggleJsonPaths});
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Container(
       height: 52,
       padding: const EdgeInsets.symmetric(horizontal: 18),
-      decoration: const BoxDecoration(
-        color: Color(0xFF242430),
-        borderRadius: BorderRadius.only(
+      decoration: BoxDecoration(
+        color: palette.popupSurface,
+        borderRadius: const BorderRadius.only(
           topLeft: Radius.circular(12),
           topRight: Radius.circular(12),
         ),
-        border: Border(bottom: BorderSide(color: Color(0xFF45475A), width: 1)),
+        border: Border(bottom: BorderSide(color: palette.outline, width: 1)),
       ),
       child: Row(
         children: [
@@ -139,27 +142,28 @@ class _Header extends StatelessWidget {
             width: 28,
             height: 28,
             decoration: BoxDecoration(
-              color: const Color(0xFF89B4FA).withValues(alpha: 0.15),
+              color: palette.accentBlue.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(6),
             ),
-            child: const Icon(Icons.settings, size: 16, color: Color(0xFF89B4FA)),
+            child: Icon(Icons.settings,
+                size: 16, color: palette.accentBlue),
           ),
           const SizedBox(width: 10),
-          const Text('Settings',
+          Text('Settings',
               style: TextStyle(
-                  color: Color(0xFFEFF1F5),
+                  color: palette.textPrimary,
                   fontSize: 14,
                   fontWeight: FontWeight.w600)),
           const SizedBox(width: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
             decoration: BoxDecoration(
-              color: const Color(0xFF313244),
+              color: palette.rowSurface,
               borderRadius: BorderRadius.circular(3),
             ),
             child: Text(kAppName,
-                style: const TextStyle(
-                    color: Color(0xFFBAC2DE),
+                style: TextStyle(
+                    color: palette.textSecondary,
                     fontSize: 10,
                     fontFamily: 'monospace')),
           ),
@@ -167,8 +171,8 @@ class _Header extends StatelessWidget {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('Show JSON paths',
-                  style: TextStyle(color: Color(0xFFBAC2DE), fontSize: 11)),
+              Text('Show JSON paths',
+                  style: TextStyle(color: palette.textSecondary, fontSize: 11)),
               const SizedBox(width: 6),
               Switch(
                 value: showJsonPaths,
@@ -178,7 +182,7 @@ class _Header extends StatelessWidget {
           ),
           IconButton(
             icon: const Icon(Icons.close, size: 18),
-            color: const Color(0xFFBAC2DE),
+            color: palette.textSecondary,
             visualDensity: VisualDensity.compact,
             onPressed: () => Navigator.of(context).pop(),
           ),
@@ -201,8 +205,9 @@ class _Sidebar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Container(
-      color: const Color(0xFF20202A),
+      color: palette.drawerSurface,
       child: ListView(
         padding: const EdgeInsets.symmetric(vertical: 8),
         children: [
@@ -233,6 +238,7 @@ class _SidebarItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
@@ -243,12 +249,12 @@ class _SidebarItem extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           decoration: BoxDecoration(
             color: selected
-                ? const Color(0xFF89B4FA).withValues(alpha: 0.20)
+                ? palette.accentBlue.withValues(alpha: 0.20)
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(6),
             border: Border.all(
               color: selected
-                  ? const Color(0xFF89B4FA).withValues(alpha: 0.6)
+                  ? palette.accentBlue.withValues(alpha: 0.6)
                   : Colors.transparent,
               width: 1,
             ),
@@ -257,14 +263,14 @@ class _SidebarItem extends StatelessWidget {
             children: [
               Icon(icon, size: 15,
                   color: selected
-                      ? const Color(0xFF89B4FA)
-                      : const Color(0xFF7F849C)),
+                      ? palette.accentBlue
+                      : palette.textMuted),
               const SizedBox(width: 10),
               Text(label,
                   style: TextStyle(
                       color: selected
-                          ? const Color(0xFFEFF1F5)
-                          : const Color(0xFFBAC2DE),
+                          ? palette.textPrimary
+                          : palette.textSecondary,
                       fontSize: 12,
                       fontWeight:
                           selected ? FontWeight.w600 : FontWeight.w500)),
@@ -288,8 +294,9 @@ class _Detail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Container(
-      color: const Color(0xFF1A1A24),
+      color: palette.dialogSurface,
       child: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(vertical: 4),
         // Eager (non-lazy) — every row is built upfront so any can
@@ -330,8 +337,12 @@ class _Detail extends StatelessWidget {
       children: [
         const SettingsSectionHeader('GENERAL'),
         SettingsCard(children: [
-          _rowFor(catalog.general.drawerDefaultCollapsed, showJsonPaths, store),
-          _rowFor(catalog.general.confirmOnExit, showJsonPaths, store),
+          // Iterate `catalog.general.all` so the row order is owned
+          // by the catalog (single source of truth) — keeps the UI
+          // and the catalog tests in sync without duplicating the
+          // declaration in two places.
+          for (final s in catalog.general.all)
+            _rowFor(s, showJsonPaths, store),
         ]),
       ],
     );
@@ -341,6 +352,7 @@ class _Detail extends StatelessWidget {
     final runtime = SettingsRuntime.instance;
     final store = runtime.store;
     final path = store.path;
+    final palette = context.palette;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -371,6 +383,7 @@ class _Detail extends StatelessWidget {
               final confirm = await showDialog<bool>(
                 context: context,
                 builder: (ctx) => AlertDialog(
+                  backgroundColor: palette.dialogSurface,
                   title: const Text('Reset all settings?'),
                   content: const Text(
                       'This clears every value in the settings file. Defaults will be used.'),
@@ -379,6 +392,9 @@ class _Detail extends StatelessWidget {
                         onPressed: () => Navigator.of(ctx).pop(false),
                         child: const Text('Cancel')),
                     TextButton(
+                        style: TextButton.styleFrom(
+                          foregroundColor: palette.accentPink,
+                        ),
                         onPressed: () => Navigator.of(ctx).pop(true),
                         child: const Text('Reset')),
                   ],
@@ -433,6 +449,13 @@ class _Detail extends StatelessWidget {
       if (setting.key == 'terminal.fontFamily') {
         return FontFamilyDropdownTrailing(setting: setting, store: store);
       }
+      // Theme picker: dropdown of the registered palette ids, with
+      // each palette's display name shown plus a sun/moon icon for
+      // brightness. Driving the dropdown off [AppPalettes.all] means
+      // new palettes automatically show up in the UI.
+      if (setting.key == 'appearance.themeName') {
+        return ThemeDropdownTrailing(setting: setting, store: store);
+      }
       return StringTextFieldTrailing(setting: setting, store: store);
     } else if (setting is EnumSetting) {
       return EnumDropdownTrailing(setting: setting, store: store);
@@ -453,6 +476,7 @@ class _PathRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return SettingsCardRow(
       title: isPrimary ? '★ Settings file' : 'Layer',
       subtitle: store.path,
@@ -462,7 +486,7 @@ class _PathRow extends StatelessWidget {
         children: [
           IconButton(
             icon: const Icon(Icons.folder_open, size: 14),
-            color: const Color(0xFF89B4FA),
+            color: palette.accentBlue,
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints.tightFor(width: 26, height: 26),
@@ -472,7 +496,7 @@ class _PathRow extends StatelessWidget {
           ),
           IconButton(
             icon: const Icon(Icons.copy, size: 14),
-            color: const Color(0xFF89B4FA),
+            color: palette.accentBlue,
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints.tightFor(width: 26, height: 26),
@@ -503,6 +527,7 @@ class _ActionRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return SettingsCardRow(
       title: title,
       subtitle: subtitle,
@@ -510,7 +535,7 @@ class _ActionRow extends StatelessWidget {
       trailing: Icon(
         Icons.chevron_right,
         size: 16,
-        color: destructive ? const Color(0xFFF38BA8) : const Color(0xFF6C7086),
+        color: destructive ? palette.accentPink : palette.textOverlay,
       ),
       onTap: onTap,
     );
@@ -539,16 +564,17 @@ class _Footer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final path = runtime.store.path;
+    final palette = context.palette;
     return Container(
       height: 44,
       padding: const EdgeInsets.symmetric(horizontal: 18),
-      decoration: const BoxDecoration(
-        color: Color(0xFF242430),
-        borderRadius: BorderRadius.only(
+      decoration: BoxDecoration(
+        color: palette.popupSurface,
+        borderRadius: const BorderRadius.only(
           bottomLeft: Radius.circular(12),
           bottomRight: Radius.circular(12),
         ),
-        border: Border(top: BorderSide(color: Color(0xFF45475A), width: 1)),
+        border: Border(top: BorderSide(color: palette.outline, width: 1)),
       ),
       child: Row(
         children: [
@@ -558,13 +584,13 @@ class _Footer extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
               color: pulse
-                  ? const Color(0xFFA6E3A1).withValues(alpha: 0.20)
-                  : const Color(0xFF313244),
+                  ? palette.accentGreen.withValues(alpha: 0.20)
+                  : palette.rowSurface,
               borderRadius: BorderRadius.circular(4),
               border: Border.all(
                 color: pulse
-                    ? const Color(0xFFA6E3A1)
-                    : const Color(0xFF45475A),
+                    ? palette.accentGreen
+                    : palette.outline,
                 width: 1,
               ),
             ),
@@ -575,16 +601,16 @@ class _Footer extends StatelessWidget {
                   pulse ? Icons.check_circle : Icons.save_outlined,
                   size: 12,
                   color: pulse
-                      ? const Color(0xFFA6E3A1)
-                      : const Color(0xFF7F849C),
+                      ? palette.accentGreen
+                      : palette.textMuted,
                 ),
                 const SizedBox(width: 5),
                 Text(
                   pulse ? 'Saved' : 'Last saved: ${_ago(lastWrite)}',
                   style: TextStyle(
                     color: pulse
-                        ? const Color(0xFFA6E3A1)
-                        : const Color(0xFFBAC2DE),
+                        ? palette.accentGreen
+                        : palette.textSecondary,
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
                   ),
@@ -595,7 +621,7 @@ class _Footer extends StatelessWidget {
           const SizedBox(width: 12),
 
           // ── Write target path (clickable) ──────────────────────
-          const Icon(Icons.edit_note, size: 14, color: Color(0xFF7F849C)),
+          Icon(Icons.edit_note, size: 14, color: palette.textMuted),
           const SizedBox(width: 4),
           Expanded(
             child: MouseRegion(
@@ -605,12 +631,12 @@ class _Footer extends StatelessWidget {
                     runtime.hostActions.revealInFileManager(path),
                 child: Text(
                   path,
-                  style: const TextStyle(
-                    color: Color(0xFFBAC2DE),
+                  style: TextStyle(
+                    color: palette.textSecondary,
                     fontSize: 11,
                     fontFamily: 'monospace',
                     decoration: TextDecoration.underline,
-                    decorationColor: Color(0xFF45475A),
+                    decorationColor: palette.outline,
                   ),
                   overflow: TextOverflow.ellipsis,
                   maxLines: 1,

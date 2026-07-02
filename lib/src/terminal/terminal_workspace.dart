@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../settings/settings_catalog.dart';
 import '../settings/settings_runtime.dart';
+import '../theme/palettes.dart';
 import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart';
@@ -152,15 +153,19 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     final runtime = SettingsRuntime.instance;
     final catalog = runtime.catalog;
     final t = catalog.terminal;
+    final palette = _resolvePalette(runtime);
     _terminalSettings = TerminalSettings(
       fontFamily: runtime.store.get<String>(t.fontFamily),
       fontSize: runtime.store.get<double>(t.fontSize),
-      backgroundColor: runtime.store.get<Color>(t.backgroundColor),
+      backgroundColor: palette.surface0,
       cursorStyle: runtime.store.get<CursorStyle>(t.cursorStyle),
       cursorBlink: runtime.store.get<bool>(t.cursorBlink),
       scrollbackLines: runtime.store.get<int>(t.scrollbackLines),
       copyOnSelect: runtime.store.get<bool>(t.copyOnSelect),
       bellMode: runtime.store.get<BellMode>(t.bellMode),
+      terminalForeground: palette.terminalForeground,
+      terminalSelection: palette.terminalSelection,
+      terminalAnsiColors: palette.terminalAnsiColors,
     );
 
     void bump() {
@@ -172,14 +177,6 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       if (mounted) {
         setState(() {
           _terminalSettings = _terminalSettings.copyWith(fontSize: v);
-        });
-      }
-    }));
-    _settingsSubs
-        .add(runtime.store.watch<Color>(t.backgroundColor).listen((v) {
-      if (mounted) {
-        setState(() {
-          _terminalSettings = _terminalSettings.copyWith(backgroundColor: v);
         });
       }
     }));
@@ -218,7 +215,35 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
         });
       }
     }));
+
+    // Theme (palette) change → swap terminal foreground, selection,
+    // background, and the 16 ANSI colors from the new palette. The
+    // background always tracks `palette.surface0` (the previous
+    // `terminal.backgroundColor` user override was removed because
+    // it defeated the "theme change retints the terminal" goal —
+    // an explicit override always won over the palette).
+    _settingsSubs.add(runtime.store
+        .watch<String>(catalog.general.themeName)
+        .listen((_) {
+      if (mounted) {
+        final p = _resolvePalette(runtime);
+        setState(() {
+          _terminalSettings = _terminalSettings.copyWith(
+            backgroundColor: p.surface0,
+            terminalForeground: p.terminalForeground,
+            terminalSelection: p.terminalSelection,
+            terminalAnsiColors: p.terminalAnsiColors,
+          );
+        });
+      }
+    }));
   }
+
+  /// Resolve the palette currently selected by the user. Cheap —
+  /// `AppPalettes.byId` walks the registry's 9-entry list.
+  static ThemePalette _resolvePalette(SettingsRuntime runtime) =>
+      AppPalettes.byId(
+          runtime.store.get(runtime.catalog.general.themeName));
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {

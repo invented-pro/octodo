@@ -19,6 +19,8 @@ import 'src/update/installer/apply_main.dart';
 import 'src/update/update_controller.dart';
 import 'src/update/update_state.dart';
 import 'src/theme/app_theme.dart';
+import 'src/theme/palette_context.dart';
+import 'src/theme/palettes.dart';
 import 'ui/settings/settings_dialog.dart';
 import 'ui/update/update_pill.dart';
 
@@ -32,14 +34,24 @@ late final String kAppVersion;
 
 final Logger _log = moduleLogger('main');
 
-/// Resolves the `terminal.backgroundColor` setting against the live
+/// Resolves the effective terminal background color against the live
 /// settings store. Used by both the Flutter window (via
 /// [WindowOptions.backgroundColor]) and the Material [ThemeData]
 /// scaffold background, so they always match the alacritty
-/// renderer's background (which reads the same setting in
+/// renderer's background (which reads the same value in
 /// `TerminalView._buildConfig`).
-Color get kTerminalBackground => SettingsRuntime.instance.store
-    .get<Color>(SettingsRuntime.instance.catalog.terminal.backgroundColor);
+///
+/// Always tracks the active palette's `surface0` — the previous
+/// `terminal.backgroundColor` user override has been removed (it
+/// defeated the "theme change retints the terminal" goal, since an
+/// explicit override always won over the palette).
+Color get kTerminalBackground {
+  final store = SettingsRuntime.instance.store;
+  final catalog = SettingsRuntime.instance.catalog;
+  return AppPalettes
+      .byId(store.get(catalog.general.themeName))
+      .surface0;
+}
 
 
 Future<void> main() async {
@@ -65,8 +77,8 @@ Future<void> main() async {
   // ensureInitialized() and before runApp().
   await RustLib.init();
   // Settings must be live before windowManager so the native window
-  // background picks up `terminal.backgroundColor` — the same value
-  // drives the alacritty renderer (see TerminalView._buildConfig)
+  // background picks up the active palette's `surface0` — the same
+  // value drives the alacritty renderer (see TerminalView._buildConfig)
   // and the Scaffold theme (see OctodoApp.build). All three must
   // agree so the chrome never flashes a different shade around the
   // terminal grid.
@@ -138,22 +150,21 @@ class OctodoApp extends StatefulWidget {
 }
 
 class _OctodoAppState extends State<OctodoApp> {
-  /// Subscribes to `terminal.backgroundColor` so the Scaffold theme
-  /// tracks the user's choice live. The window's native background
-  /// (`WindowOptions.backgroundColor` in `main()`) is set once at
-  /// startup — `window_manager` has no API to retint an open window
-  /// without recreating it, so live changes affect the Scaffold
-  /// background only; restarting the app is required to repaint the
-  /// window frame itself.
-  StreamSubscription<Color>? _bgSub;
+  /// Subscribes to `appearance.themeName` so the MaterialApp rebuilds
+  /// whenever the user picks a new palette. The window's native
+  /// background (`WindowOptions.backgroundColor` in `main()`) is
+  /// set once at startup — `window_manager` has no API to retint
+  /// an open window without recreating it, so live changes affect
+  /// the Scaffold background only; restarting the app is required
+  /// to repaint the window frame itself.
+  StreamSubscription<String>? _themeSub;
 
   @override
   void initState() {
     super.initState();
-    _bgSub = SettingsRuntime.instance.store
-        .watch<Color>(
-          SettingsRuntime.instance.catalog.terminal.backgroundColor,
-        )
+    final catalog = SettingsRuntime.instance.catalog;
+    _themeSub = SettingsRuntime.instance.store
+        .watch<String>(catalog.general.themeName)
         .listen((_) {
       if (mounted) setState(() {});
     });
@@ -161,17 +172,27 @@ class _OctodoAppState extends State<OctodoApp> {
 
   @override
   void dispose() {
-    _bgSub?.cancel();
+    _themeSub?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final backgroundColor = kTerminalBackground;
+    final palette = AppPalettes.byId(
+      SettingsRuntime.instance.store
+          .get(SettingsRuntime.instance.catalog.general.themeName),
+    );
+    // The same palette is provided to both `theme` and `darkTheme`;
+    // Material picks which one to use based on `themeMode`, which
+    // we derive from the palette's brightness.
     return MaterialApp(
       title: kAppName,
       debugShowCheckedModeBanner: false,
-      theme: buildAppTheme(backgroundColor: backgroundColor),
+      theme: buildAppTheme(palette: palette),
+      darkTheme: buildAppTheme(palette: palette),
+      themeMode: palette.brightness == Brightness.dark
+          ? ThemeMode.dark
+          : ThemeMode.light,
       home: const AppShell(),
     );
   }
@@ -721,10 +742,12 @@ class _AppShellState extends State<AppShell>
     String name, {
     required bool isLast,
   }) async {
+    final palette = context.palette;
     final result = await showDialog<bool>(
       context: context,
       barrierDismissible: true,
       builder: (ctx) => AlertDialog(
+        backgroundColor: palette.dialogSurface,
         title: const Text('Close workspace?'),
         content: Text(
           isLast
@@ -736,11 +759,11 @@ class _AppShellState extends State<AppShell>
           // no button "wins" by static styling, so the *focused*
           // button is the only thing drawing the eye. autofocus on
           // Cancel makes Enter / Space dismiss safely by default;
-          // its bright Mocha-Blue focus wash (from the global
+          // its bright accent focus wash (from the global
           // textButtonTheme override) makes the active choice
-          // unmistakable. The destructive Close keeps Mocha-Pink
-          // text so it stays identifiable as destructive without
-          // being loud in its default state.
+          // unmistakable. The destructive Close keeps the palette's
+          // pink accent text so it stays identifiable as destructive
+          // without being loud in its default state.
           TextButton(
             autofocus: true,
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -748,7 +771,7 @@ class _AppShellState extends State<AppShell>
           ),
           TextButton(
             style: TextButton.styleFrom(
-              foregroundColor: const Color(0xFFF38BA8),
+              foregroundColor: palette.accentPink,
             ),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Close'),
@@ -960,10 +983,12 @@ class _AppShellState extends State<AppShell>
     final ctx = _shellContext;
     if (ctx == null || !mounted) return;
     final messenger = ScaffoldMessenger.maybeOf(ctx);
+    final palette = ctx.palette;
     final confirmed = await showDialog<bool>(
       context: ctx,
       barrierDismissible: true,
       builder: (dctx) => AlertDialog(
+        backgroundColor: palette.dialogSurface,
         title: Text('Exit $kAppName?'),
         content: const Text(
           'All workspaces and shell sessions will be terminated.',
@@ -981,7 +1006,7 @@ class _AppShellState extends State<AppShell>
           ),
           TextButton(
             style: TextButton.styleFrom(
-              foregroundColor: const Color(0xFFF38BA8),
+              foregroundColor: palette.accentPink,
             ),
             onPressed: () => Navigator.of(dctx).pop(true),
             child: const Text('Exit'),
@@ -1152,11 +1177,12 @@ class _WorkspaceDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeInOut,
       width: collapsed ? _collapsedWidth : _expandedWidth,
-      color: const Color(0xFF11111B),
+      color: palette.drawerSurface,
       child: Column(
         children: [
           // Full-width toggle button (collapsed → chevron_right,
@@ -1182,7 +1208,7 @@ class _WorkspaceDrawer extends StatelessWidget {
                           ? Icons.chevron_right
                           : Icons.chevron_left,
                       size: 18,
-                      color: Colors.grey.shade400,
+                      color: palette.textMuted,
                     ),
                   ),
                 ),
@@ -1228,21 +1254,21 @@ class _WorkspaceDrawer extends StatelessWidget {
                   height: 36,
                   margin: const EdgeInsets.fromLTRB(4, 4, 4, 2),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF1E1E2E),
+                    color: palette.surface2,
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(Icons.add,
-                          size: 16, color: Colors.grey.shade400),
+                          size: 16, color: palette.textMuted),
                       if (!collapsed) ...[
                         const SizedBox(width: 6),
                         Text(
                           'New',
                           style: TextStyle(
                             fontSize: 12,
-                            color: Colors.grey.shade300,
+                            color: palette.textSecondary,
                           ),
                         ),
                       ],
@@ -1277,7 +1303,7 @@ class _WorkspaceDrawer extends StatelessWidget {
                     color: Colors.transparent,
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(
-                      color: const Color(0xFF313244),
+                      color: palette.rowSurface,
                       width: 1,
                     ),
                   ),
@@ -1285,14 +1311,14 @@ class _WorkspaceDrawer extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(Icons.settings,
-                          size: 14, color: Colors.grey.shade500),
+                          size: 14, color: palette.textMuted),
                       if (!collapsed) ...[
                         const SizedBox(width: 6),
                         Text(
                           'Settings',
                           style: TextStyle(
                             fontSize: 11,
-                            color: Colors.grey.shade400,
+                            color: palette.textSecondary,
                           ),
                         ),
                       ],
@@ -1406,6 +1432,7 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
   Widget build(BuildContext context) {
     final isActive = widget.isActive;
     final showClose = isActive || _hovered;
+    final palette = context.palette;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
@@ -1474,21 +1501,26 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                             },
                             style: TextStyle(
                               color: isActive
-                                  ? Colors.white
-                                  : Colors.grey.shade400,
+                                  ? palette.textPrimary
+                                  : palette.textMuted,
                               fontSize: 13,
                               fontWeight: isActive
                                   ? FontWeight.w500
                                   : FontWeight.normal,
                             ),
-                            decoration: const InputDecoration(
+                            decoration: InputDecoration(
                               border: InputBorder.none,
                               isDense: true,
                               contentPadding: EdgeInsets.zero,
                               hintText: 'Workspace',
                               counterText: '',
+                              hintStyle: TextStyle(
+                                color: palette.textMuted,
+                                fontSize: 13,
+                              ),
                             ),
                             maxLength: _maxNameLength,
+                            cursorColor: palette.accentBlue,
                             textInputAction: TextInputAction.done,
                           ),
                         )
@@ -1496,8 +1528,8 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                           widget.name,
                           style: TextStyle(
                             color: isActive
-                                ? Colors.white
-                                : Colors.grey.shade400,
+                                ? palette.textPrimary
+                                : palette.textMuted,
                             fontSize: 13,
                             fontWeight: isActive
                                 ? FontWeight.w500
@@ -1517,12 +1549,12 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                     cursor: SystemMouseCursors.click,
                     child: GestureDetector(
                       onTap: widget.onClose,
-                      child: const Padding(
-                        padding: EdgeInsets.all(2),
+                      child: Padding(
+                        padding: const EdgeInsets.all(2),
                         child: Icon(
                           Icons.close,
                           size: 14,
-                          color: Color(0xFF6C7086),
+                          color: palette.textOverlay,
                         ),
                       ),
                     ),
@@ -1687,6 +1719,7 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
   @override
   Widget build(BuildContext context) {
     final w = widget.workspace;
+    final palette = context.palette;
     final tile = _ExpandedWorkspaceTile(
       name: w.name,
       color: w.color,
@@ -1721,7 +1754,7 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
           padding:
               const EdgeInsets.only(left: 10, right: 4, top: 6, bottom: 6),
           decoration: BoxDecoration(
-            color: const Color(0xFF1E1E2E),
+            color: palette.surface2,
             borderRadius: BorderRadius.circular(4),
             border: Border(
               left: BorderSide(color: w.color, width: 3),
@@ -1748,8 +1781,8 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
               Expanded(
                 child: Text(
                   w.name,
-                  style: const TextStyle(
-                    color: Colors.white,
+                  style: TextStyle(
+                    color: palette.textPrimary,
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                   ),
@@ -1757,10 +1790,10 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
                   maxLines: 1,
                 ),
               ),
-              const Padding(
-                padding: EdgeInsets.all(2),
-                child:
-                    Icon(Icons.close, size: 14, color: Color(0xFF6C7086)),
+              Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(Icons.close,
+                    size: 14, color: palette.textOverlay),
               ),
             ],
           ),
@@ -1794,23 +1827,22 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
         builder: (context, candidate, rejected) {
           final showAbove = _insertAfter == false && _localDragActive;
           final showBelow = _insertAfter && _localDragActive;
+          final palette = context.palette;
           return Stack(
             clipBehavior: Clip.none,
             children: [
               tile,
-              if (showAbove) const _InsertionLineIndicator(above: true),
-              if (showBelow) const _InsertionLineIndicator(above: false),
+              if (showAbove) _InsertionLineIndicator(above: true, color: palette.accentBlue),
+              if (showBelow) _InsertionLineIndicator(above: false, color: palette.accentBlue),
               if (candidate.isNotEmpty)
                 Positioned.fill(
                   child: IgnorePointer(
                     child: Container(
                       decoration: BoxDecoration(
-                        color:
-                            const Color(0xFF89B4FA).withValues(alpha: 0.10),
+                        color: palette.accentBlue.withValues(alpha: 0.10),
                         borderRadius: BorderRadius.circular(4),
                         border: Border.all(
-                          color: const Color(0xFF89B4FA)
-                              .withValues(alpha: 0.35),
+                          color: palette.accentBlue.withValues(alpha: 0.35),
                           width: 1,
                         ),
                       ),
@@ -1827,13 +1859,13 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
 
 /// A prominent full-width insertion line shown above or below a
 /// workspace tile during drag. The line is 3px thick, has a soft
-/// blue glow, and small "handle" dots at each end so users can see
-/// at a glance where the dragged workspace will land.
+/// glow tinted with [color] (the palette's accent blue by default),
+/// and small "handle" dots at each end so users can see at a glance
+/// where the dragged workspace will land.
 class _InsertionLineIndicator extends StatelessWidget {
   final bool above;
-  const _InsertionLineIndicator({required this.above});
-
-  static const _lineColor = Color(0xFF89B4FA);
+  final Color color;
+  const _InsertionLineIndicator({required this.above, required this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -1855,10 +1887,10 @@ class _InsertionLineIndicator extends StatelessWidget {
               child: IgnorePointer(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: _lineColor.withValues(alpha: 0.35),
+                    color: color.withValues(alpha: 0.35),
                     boxShadow: [
                       BoxShadow(
-                        color: _lineColor.withValues(alpha: 0.7),
+                        color: color.withValues(alpha: 0.7),
                         blurRadius: 6,
                       ),
                     ],
@@ -1867,8 +1899,8 @@ class _InsertionLineIndicator extends StatelessWidget {
               ),
             ),
             // Solid line on top.
-            const Positioned.fill(
-              child: ColoredBox(color: _lineColor),
+            Positioned.fill(
+              child: ColoredBox(color: color),
             ),
             // Left handle dot.
             Positioned(
@@ -1877,8 +1909,8 @@ class _InsertionLineIndicator extends StatelessWidget {
               child: Container(
                 width: 5,
                 height: 5,
-                decoration: const BoxDecoration(
-                  color: _lineColor,
+                decoration: BoxDecoration(
+                  color: color,
                   shape: BoxShape.circle,
                 ),
               ),
@@ -1890,8 +1922,8 @@ class _InsertionLineIndicator extends StatelessWidget {
               child: Container(
                 width: 5,
                 height: 5,
-                decoration: const BoxDecoration(
-                  color: _lineColor,
+                decoration: BoxDecoration(
+                  color: color,
                   shape: BoxShape.circle,
                 ),
               ),
@@ -1920,6 +1952,7 @@ class _WorkspaceEndDropZone extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return DragTarget<_WorkspaceDragData>(
       onWillAcceptWithDetails: (_) => true,
       onAcceptWithDetails: (details) => onAccept(details.data.workspaceId),
@@ -1935,7 +1968,7 @@ class _WorkspaceEndDropZone extends StatelessWidget {
                   child: IgnorePointer(
                     child: Container(
                       decoration: BoxDecoration(
-                        color: const Color(0xFF89B4FA)
+                        color: palette.accentBlue
                             .withValues(alpha: 0.10),
                         borderRadius: BorderRadius.circular(4),
                       ),
@@ -1946,11 +1979,12 @@ class _WorkspaceEndDropZone extends StatelessWidget {
               // list (only shown when a drag is in flight, since
               // the [DragTarget.candidate] is the source of truth).
               if (candidate.isNotEmpty)
-                const Positioned(
+                Positioned(
                   left: 0,
                   right: 0,
                   bottom: 0,
-                  child: _InsertionLineIndicator(above: false),
+                  child: _InsertionLineIndicator(
+                      above: false, color: palette.accentBlue),
                 ),
             ],
           ),

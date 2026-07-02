@@ -3,6 +3,7 @@
 // 1px dividers. A section is a vertical stack of cards.
 
 import 'package:flutter/material.dart';
+import '../../../src/theme/palette_context.dart';
 
 class SettingsCard extends StatelessWidget {
   final List<Widget> children;
@@ -15,12 +16,18 @@ class SettingsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Container(
       margin: margin,
       decoration: BoxDecoration(
-        color: const Color(0xFF2A2A36),
+        // Card surface sits one tier above the dialog so a row's
+        // hover/focus overlay (which uses surface1 with alpha) has
+        // somewhere to fade toward. Outline + shadow stay constant
+        // across palettes so the chrome reads as "elevated" the same
+        // way in light and dark themes.
+        color: palette.surface2,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF45475A), width: 1),
+        border: Border.all(color: palette.outline, width: 1),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.4),
@@ -49,7 +56,7 @@ class SettingsCardDivider extends StatelessWidget {
     return Container(
       height: 1,
       margin: const EdgeInsets.symmetric(horizontal: 14),
-      color: const Color(0xFF45475A),
+      color: context.palette.outline,
     );
   }
 }
@@ -59,6 +66,7 @@ class SettingsSectionHeader extends StatelessWidget {
   const SettingsSectionHeader(this.text, {super.key});
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Padding(
       padding: const EdgeInsets.fromLTRB(22, 18, 22, 6),
       child: Row(
@@ -67,15 +75,15 @@ class SettingsSectionHeader extends StatelessWidget {
             width: 3,
             height: 12,
             decoration: BoxDecoration(
-              color: const Color(0xFF89B4FA),
+              color: palette.accentBlue,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
           const SizedBox(width: 8),
           Text(
             text,
-            style: const TextStyle(
-              color: Color(0xFFBAC2DE),
+            style: TextStyle(
+              color: palette.textSecondary,
               fontSize: 11,
               fontWeight: FontWeight.w700,
               letterSpacing: 1.2,

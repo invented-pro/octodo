@@ -9,7 +9,8 @@ import 'package:flutter/services.dart';
 import '../../../src/settings/setting.dart';
 import '../../../src/settings/setting_codec.dart';
 import '../../../src/settings/settings_store.dart';
-import '../../../src/theme/app_theme.dart';
+import '../../../src/theme/palette_context.dart';
+import '../../../src/theme/palettes.dart';
 
 // ── Bool toggle ─────────────────────────────────────────────────────
 
@@ -91,21 +92,22 @@ class _EnumDropdownTrailingState<T extends Enum> extends State<EnumDropdownTrail
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Semantics(
       label: widget.setting.title,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-          color: const Color(0xFF1A1A24),
+          color: palette.dialogSurface,
           borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: const Color(0xFF45475A), width: 1),
+          border: Border.all(color: palette.outline, width: 1),
         ),
         child: DropdownButton<T>(
           value: _value,
           isDense: true,
           underline: const SizedBox.shrink(),
-          dropdownColor: const Color(0xFF242430),
-          style: const TextStyle(color: Color(0xFFEFF1F5), fontSize: 12),
+          dropdownColor: palette.popupSurface,
+          style: TextStyle(color: palette.textPrimary, fontSize: 12),
           items: [
             for (final v in widget.setting.values)
               DropdownMenuItem<T>(
@@ -242,6 +244,7 @@ class _IntInputTrailingState extends State<IntInputTrailing> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Semantics(
       label: widget.setting.title,
       child: Row(
@@ -263,28 +266,28 @@ class _IntInputTrailingState extends State<IntInputTrailing> {
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: _errorText != null
-                    ? AppColors.accentPink
-                    : AppColors.textPrimary,
+                    ? palette.accentPink
+                    : palette.textPrimary,
                 fontSize: 12,
               ),
               keyboardType: TextInputType.number,
               inputFormatters: [
                 FilteringTextInputFormatter.allow(RegExp(r'[0-9]')),
               ],
-              cursorColor: AppColors.accentBlue,
+              cursorColor: palette.accentBlue,
               decoration: InputDecoration(
                 isDense: true,
                 contentPadding:
                     const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                 filled: true,
-                fillColor: AppColors.dialogSurface,
+                fillColor: palette.dialogSurface,
                 errorText: _errorText,
                 errorStyle: const TextStyle(fontSize: 10, height: 1.2),
                 errorMaxLines: 2,
-                border: _border(focused: false, hasError: false),
-                enabledBorder: _border(focused: false, hasError: false),
+                border: _border(palette: palette, focused: false, hasError: false),
+                enabledBorder: _border(palette: palette, focused: false, hasError: false),
                 focusedBorder:
-                    _border(focused: true, hasError: _errorText != null),
+                    _border(palette: palette, focused: true, hasError: _errorText != null),
               ),
               onSubmitted: (_) => _submit(),
               onTapOutside: (_) => _handleFocusLoss(),
@@ -304,12 +307,16 @@ class _IntInputTrailingState extends State<IntInputTrailing> {
     );
   }
 
-  OutlineInputBorder _border({required bool focused, required bool hasError}) {
+  OutlineInputBorder _border({
+    required ThemePalette palette,
+    required bool focused,
+    required bool hasError,
+  }) {
     final color = hasError
-        ? AppColors.accentPink
+        ? palette.accentPink
         : focused
-            ? AppColors.accentBlue
-            : AppColors.outline;
+            ? palette.accentBlue
+            : palette.outline;
     return OutlineInputBorder(
       borderRadius: BorderRadius.circular(4),
       borderSide: BorderSide(color: color, width: 1),
@@ -413,6 +420,7 @@ class _DoubleInputTrailingState extends State<DoubleInputTrailing> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Semantics(
       label: widget.setting.title,
       child: SizedBox(
@@ -422,8 +430,8 @@ class _DoubleInputTrailingState extends State<DoubleInputTrailing> {
           textAlign: TextAlign.center,
           style: TextStyle(
             color: _errorText != null
-                ? AppColors.accentPink
-                : AppColors.textPrimary,
+                ? palette.accentPink
+                : palette.textPrimary,
             fontSize: 12,
           ),
           keyboardType:
@@ -433,20 +441,20 @@ class _DoubleInputTrailingState extends State<DoubleInputTrailing> {
               RegExp(r'[0-9.]'),
             ),
           ],
-          cursorColor: AppColors.accentBlue,
+          cursorColor: palette.accentBlue,
           decoration: InputDecoration(
             isDense: true,
             contentPadding:
                 const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             filled: true,
-            fillColor: AppColors.dialogSurface,
+            fillColor: palette.dialogSurface,
             errorText: _errorText,
             errorStyle: const TextStyle(fontSize: 10, height: 1.2),
             errorMaxLines: 2,
-            border: _border(focused: false, hasError: false),
-            enabledBorder: _border(focused: false, hasError: false),
+            border: _border(palette: palette, focused: false, hasError: false),
+            enabledBorder: _border(palette: palette, focused: false, hasError: false),
             focusedBorder:
-                _border(focused: true, hasError: _errorText != null),
+                _border(palette: palette, focused: true, hasError: _errorText != null),
           ),
           onSubmitted: (_) => _submit(),
           onTapOutside: (_) => _handleFocusLoss(),
@@ -456,12 +464,16 @@ class _DoubleInputTrailingState extends State<DoubleInputTrailing> {
     );
   }
 
-  OutlineInputBorder _border({required bool focused, required bool hasError}) {
+  OutlineInputBorder _border({
+    required ThemePalette palette,
+    required bool focused,
+    required bool hasError,
+  }) {
     final color = hasError
-        ? AppColors.accentPink
+        ? palette.accentPink
         : focused
-            ? AppColors.accentBlue
-            : AppColors.outline;
+            ? palette.accentBlue
+            : palette.outline;
     return OutlineInputBorder(
       borderRadius: BorderRadius.circular(4),
       borderSide: BorderSide(color: color, width: 1),
@@ -505,31 +517,32 @@ class _StringTextFieldTrailingState extends State<StringTextFieldTrailing> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Semantics(
       label: widget.setting.title,
       child: SizedBox(
         width: 160,
         child: TextField(
           controller: _controller,
-          style: const TextStyle(color: Color(0xFFEFF1F5), fontSize: 12),
-          cursorColor: const Color(0xFF89B4FA),
+          style: TextStyle(color: palette.textPrimary, fontSize: 12),
+          cursorColor: palette.accentBlue,
           decoration: InputDecoration(
             isDense: true,
             contentPadding:
                 const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             filled: true,
-            fillColor: const Color(0xFF1A1A24),
+            fillColor: palette.dialogSurface,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(4),
-              borderSide: const BorderSide(color: Color(0xFF45475A), width: 1),
+              borderSide: BorderSide(color: palette.outline, width: 1),
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(4),
-              borderSide: const BorderSide(color: Color(0xFF45475A), width: 1),
+              borderSide: BorderSide(color: palette.outline, width: 1),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(4),
-              borderSide: const BorderSide(color: Color(0xFF89B4FA), width: 1),
+              borderSide: BorderSide(color: palette.accentBlue, width: 1),
             ),
           ),
           onSubmitted: (v) => widget.store.set(widget.setting, v),
@@ -621,22 +634,23 @@ class _FontFamilyDropdownTrailingState
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Semantics(
       label: widget.setting.title,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-          color: const Color(0xFF1A1A24),
+          color: palette.dialogSurface,
           borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: const Color(0xFF45475A), width: 1),
+          border: Border.all(color: palette.outline, width: 1),
         ),
         child: DropdownButton<String>(
           value: _value,
           isDense: true,
           underline: const SizedBox.shrink(),
           isExpanded: false,
-          dropdownColor: const Color(0xFF242430),
-          style: const TextStyle(color: Color(0xFFEFF1F5), fontSize: 12),
+          dropdownColor: palette.popupSurface,
+          style: TextStyle(color: palette.textPrimary, fontSize: 12),
           items: [
             for (final f in _options())
               DropdownMenuItem<String>(
@@ -647,7 +661,7 @@ class _FontFamilyDropdownTrailingState
                 child: Text(
                   f,
                   style: TextStyle(
-                    color: const Color(0xFFEFF1F5),
+                    color: palette.textPrimary,
                     fontSize: 12,
                     fontFamily: f,
                   ),
@@ -746,6 +760,7 @@ class _ColorHexFieldTrailingState extends State<ColorHexFieldTrailing> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Semantics(
       label: widget.setting.title,
       child: SizedBox(
@@ -758,39 +773,39 @@ class _ColorHexFieldTrailingState extends State<ColorHexFieldTrailing> {
               decoration: BoxDecoration(
                 color: _value,
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: const Color(0xFF89B4FA), width: 1),
+                border: Border.all(color: palette.accentBlue, width: 1),
               ),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: TextField(
                 controller: _controller,
-                style: const TextStyle(
-                  color: Color(0xFFEFF1F5),
+                style: TextStyle(
+                  color: palette.textPrimary,
                   fontSize: 12,
                   fontFamily: 'monospace',
                 ),
-                cursorColor: const Color(0xFF89B4FA),
+                cursorColor: palette.accentBlue,
                 decoration: InputDecoration(
                   isDense: true,
                   contentPadding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                   filled: true,
-                  fillColor: const Color(0xFF1A1A24),
+                  fillColor: palette.dialogSurface,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(4),
                     borderSide:
-                        const BorderSide(color: Color(0xFF45475A), width: 1),
+                        BorderSide(color: palette.outline, width: 1),
                   ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(4),
                     borderSide:
-                        const BorderSide(color: Color(0xFF45475A), width: 1),
+                        BorderSide(color: palette.outline, width: 1),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(4),
                     borderSide:
-                        const BorderSide(color: Color(0xFF89B4FA), width: 1),
+                        BorderSide(color: palette.accentBlue, width: 1),
                   ),
                   errorText: _errorText,
                 ),
@@ -799,6 +814,171 @@ class _ColorHexFieldTrailingState extends State<ColorHexFieldTrailing> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Theme picker ────────────────────────────────────────────────────
+
+/// Dropdown that lists every built-in [ThemePalette] by display name,
+/// grouped by brightness (Dark themes first, then Light) with
+/// section headers in between. Editing this widget retints the whole
+/// chrome immediately (the top-level MaterialApp rebuilds via its
+/// `appearance.themeName` subscription).
+///
+/// Implementation note: Flutter's stock [DropdownButton] has no
+/// native section-header support, so the headers are injected as
+/// disabled [DropdownMenuItem]s whose text is rendered in the
+/// "muted" tier — they read as labels but cannot be selected, and
+/// Material's hover/click feedback still suppresses any focus ring
+/// because they're `enabled: false`.
+class ThemeDropdownTrailing extends StatefulWidget {
+  final StringSetting setting;
+  final SettingsStore store;
+  const ThemeDropdownTrailing({
+    super.key,
+    required this.setting,
+    required this.store,
+  });
+
+  @override
+  State<ThemeDropdownTrailing> createState() =>
+      _ThemeDropdownTrailingState();
+}
+
+class _ThemeDropdownTrailingState extends State<ThemeDropdownTrailing> {
+  late String _value = widget.store.get(widget.setting);
+  late final StreamSubscription<String> _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = widget.store.watch(widget.setting).listen((v) {
+      if (mounted && v != _value) setState(() => _value = v);
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub.cancel();
+    super.dispose();
+  }
+
+  /// Sentinel ids for the synthetic section headers we splice into
+  /// the dropdown item list. We pick ids the registry will never
+  /// produce (`__` prefix + lowercase hex) so they can't collide
+  /// with a real palette even by accident.
+  static const String _darkHeaderId = '__theme_section_dark';
+  static const String _lightHeaderId = '__theme_section_light';
+
+  /// Build the dropdown item list. Section headers come first (dark),
+  /// then the dark palettes in registry order; then the light header,
+  /// then the light palettes. Each section header is a disabled item
+  /// so it shows up in the popup but can't be picked.
+  List<DropdownMenuItem<String>> _items(BuildContext context) {
+    final palette = context.palette;
+    final dark = AppPalettes.all
+        .where((p) => p.brightness == Brightness.dark)
+        .toList(growable: false);
+    final light = AppPalettes.all
+        .where((p) => p.brightness == Brightness.light)
+        .toList(growable: false);
+    Widget header(String text) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                text == 'Dark' ? Icons.dark_mode : Icons.light_mode,
+                size: 11,
+                color: palette.textMuted,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                text.toUpperCase(),
+                style: TextStyle(
+                  color: palette.textMuted,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.6,
+                ),
+              ),
+            ],
+          ),
+        );
+    Widget item(ThemePalette p) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              p.brightness == Brightness.dark
+                  ? Icons.dark_mode
+                  : Icons.light_mode,
+              size: 13,
+              color: palette.textMuted,
+            ),
+            const SizedBox(width: 8),
+            Text(p.displayName),
+          ],
+        );
+    return [
+      DropdownMenuItem<String>(
+        value: _darkHeaderId,
+        enabled: false,
+        child: header('Dark'),
+      ),
+      for (final p in dark)
+        DropdownMenuItem<String>(value: p.id, child: item(p)),
+      DropdownMenuItem<String>(
+        value: _lightHeaderId,
+        enabled: false,
+        child: header('Light'),
+      ),
+      for (final p in light)
+        DropdownMenuItem<String>(value: p.id, child: item(p)),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Semantics(
+      label: widget.setting.title,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: palette.dialogSurface,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: palette.outline, width: 1),
+        ),
+        child: DropdownButton<String>(
+          value: _value,
+          isDense: true,
+          underline: const SizedBox.shrink(),
+          isExpanded: false,
+          dropdownColor: palette.popupSurface,
+          style: TextStyle(color: palette.textPrimary, fontSize: 12),
+          items: _items(context),
+          // Section-header ids must be filtered out of the
+          // `onChanged` callback: `DropdownButton` still emits a
+          // selection event for disabled items when their row is
+          // hovered (so the highlight ripple works), but here we
+          // must not commit a sentinel id to the store. The
+          // `enabled: false` flag already prevents the user from
+          // confirming a click on a header — this is belt-and-
+          // suspenders for keyboard activation (Enter on a focused
+          // header row still fires `onChanged` in some Flutter
+          // versions).
+          onChanged: (v) {
+            if (v == null ||
+                v == _darkHeaderId ||
+                v == _lightHeaderId) {
+              return;
+            }
+            setState(() => _value = v);
+            widget.store.set(widget.setting, v);
+          },
         ),
       ),
     );
@@ -820,14 +1000,15 @@ class ResetButtonTrailing extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Semantics(
       label: '${setting.title}, reset to default',
       child: IconButton(
         icon: Icon(Icons.refresh,
             size: 15,
             color: isAtDefault
-                ? const Color(0xFF45475A)
-                : const Color(0xFFBAC2DE)),
+                ? palette.outline
+                : palette.textSecondary),
         visualDensity: VisualDensity.compact,
         padding: EdgeInsets.zero,
         constraints: const BoxConstraints.tightFor(width: 28, height: 28),

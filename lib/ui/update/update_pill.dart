@@ -11,6 +11,7 @@
 import 'package:flutter/material.dart';
 
 import '../../src/app_info.dart';
+import '../../src/theme/palette_context.dart';
 import '../../src/update/update_controller.dart';
 import '../../src/update/update_state.dart';
 import 'update_popover_view.dart';
@@ -72,6 +73,7 @@ class _ExpandedPill extends StatelessWidget {
     final isError = model.state == UpdateState.error;
     final isAvailable = model.state == UpdateState.updateAvailable;
     final isChecking = model.state == UpdateState.checking;
+    final palette = context.palette;
 
     Color bg;
     Color fg;
@@ -80,23 +82,23 @@ class _ExpandedPill extends StatelessWidget {
 
     if (urgent) {
       if (isError) {
-        bg = const Color(0xFF313244);
-        fg = const Color(0xFFF9E2AF);
-        border = const Color(0xFF45475A);
+        bg = palette.rowSurface;
+        fg = palette.accentYellow;
+        border = palette.outline;
       } else if (isAvailable) {
-        bg = const Color(0xFF89B4FA).withValues(alpha: 0.15);
-        fg = const Color(0xFF89B4FA);
-        border = const Color(0xFF89B4FA).withValues(alpha: 0.5);
+        bg = palette.accentBlue.withValues(alpha: 0.15);
+        fg = palette.accentBlue;
+        border = palette.accentBlue.withValues(alpha: 0.5);
       } else {
-        bg = const Color(0xFF1E1E2E);
-        fg = const Color(0xFFBAC2DE);
-        border = const Color(0xFF45475A);
+        bg = palette.surface2;
+        fg = palette.textSecondary;
+        border = palette.outline;
       }
       label = model.text;
     } else {
-      bg = const Color(0xFF1E1E2E);
-      fg = const Color(0xFFBAC2DE);
-      border = const Color(0xFF313244);
+      bg = palette.surface2;
+      fg = palette.textSecondary;
+      border = palette.rowSurface;
       label = '$kAppName · ${model.currentVersion}';
     }
 
@@ -171,19 +173,20 @@ class _CollapsedPill extends StatelessWidget {
     final isAvailable = model.state == UpdateState.updateAvailable;
     final isError = model.state == UpdateState.error;
     final isChecking = model.state == UpdateState.checking;
+    final palette = context.palette;
 
     final Color fg = isError
-        ? const Color(0xFFF9E2AF)
+        ? palette.accentYellow
         : isAvailable
-            ? const Color(0xFF89B4FA)
+            ? palette.accentBlue
             : urgent
-                ? const Color(0xFFBAC2DE)
-                : const Color(0xFF6C7086);
+                ? palette.textSecondary
+                : palette.textOverlay;
     final Color border = isAvailable
-        ? const Color(0xFF89B4FA).withValues(alpha: 0.5)
+        ? palette.accentBlue.withValues(alpha: 0.5)
         : urgent
-            ? const Color(0xFF45475A)
-            : const Color(0xFF313244);
+            ? palette.outline
+            : palette.rowSurface;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(6, 4, 6, 2),
@@ -203,7 +206,7 @@ class _CollapsedPill extends StatelessWidget {
               height: 28,
               decoration: BoxDecoration(
                 color: isAvailable
-                    ? const Color(0xFF89B4FA).withValues(alpha: 0.15)
+                    ? palette.accentBlue.withValues(alpha: 0.15)
                     : Colors.transparent,
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(color: border, width: 1),
@@ -249,7 +252,8 @@ class _Badge extends StatelessWidget {
       );
     }
     if (!urgent) {
-      return const Icon(Icons.info_outline, size: 14, color: Color(0xFF6C7086));
+      return Icon(Icons.info_outline,
+          size: 14, color: context.palette.textOverlay);
     }
     return Icon(_iconFor(state), size: 14, color: color);
   }

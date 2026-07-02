@@ -5,6 +5,7 @@
 
 import 'package:flutter/material.dart';
 import 'setting.dart';
+import 'setting_codec.dart';
 
 enum CursorStyle { block, underline, bar }
 enum BellMode { none, visual, sound }
@@ -42,18 +43,6 @@ class TerminalSettingsSection {
     title: 'Font size',
     subtitle: 'Terminal cell height, in points.',
     icon: Icons.format_size,
-  );
-
-  /// Background color of the terminal grid. Driven to both the
-  /// alacritty renderer AND the Flutter window/theme background —
-  /// they must always match exactly so the chrome never flashes a
-  /// different shade around the terminal.
-  final backgroundColor = ColorSetting(
-    'terminal.backgroundColor',
-    defaultValue: const Color(0xFF181818),
-    title: 'Background color',
-    subtitle: 'Terminal background — also used by the surrounding chrome.',
-    icon: Icons.format_color_fill,
   );
 
   final cursorStyle = EnumSetting<CursorStyle>(
@@ -103,7 +92,6 @@ class TerminalSettingsSection {
   Iterable<Setting<dynamic>> get all sync* {
     yield fontFamily;
     yield fontSize;
-    yield backgroundColor;
     yield cursorStyle;
     yield cursorBlink;
     yield scrollbackLines;
@@ -113,6 +101,19 @@ class TerminalSettingsSection {
 }
 
 class GeneralSettingsSection {
+  /// Active theme palette id (Catppuccin Mocha, Catppuccin Latte,
+  /// Dracula, etc.). The [PaletteIdCodec] validates against the
+  /// built-in registry and falls back to the default for unknown
+  /// ids, so a stale settings file still boots into a known theme.
+  final themeName = StringSetting(
+    'appearance.themeName',
+    defaultValue: 'catppuccin-mocha',
+    codecOverride: const PaletteIdCodec(),
+    title: 'Theme',
+    subtitle: 'Color palette for chrome (drawer, dialogs, menus).',
+    icon: Icons.palette,
+  );
+
   final drawerDefaultCollapsed = BoolSetting(
     'appearance.drawerDefaultCollapsed',
     defaultValue: true,
@@ -136,6 +137,7 @@ class GeneralSettingsSection {
   );
 
   Iterable<Setting<dynamic>> get all sync* {
+    yield themeName;
     yield drawerDefaultCollapsed;
     yield confirmOnExit;
   }

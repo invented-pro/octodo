@@ -6,6 +6,7 @@
 // layer can scroll to it.
 
 import 'package:flutter/material.dart';
+import '../../../src/theme/palette_context.dart';
 import 'configuration_review_chip.dart';
 
 class SettingsCardRow extends StatelessWidget {
@@ -35,12 +36,13 @@ class SettingsCardRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final body = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       child: Row(
         children: [
           if (leadingIcon != null) ...[
-            Icon(leadingIcon, size: 16, color: const Color(0xFF89B4FA)),
+            Icon(leadingIcon, size: 16, color: palette.accentBlue),
             const SizedBox(width: 12),
           ],
           Expanded(
@@ -53,8 +55,8 @@ class SettingsCardRow extends StatelessWidget {
                     Flexible(
                       child: Text(
                         title,
-                        style: const TextStyle(
-                          color: Color(0xFFEFF1F5),
+                        style: TextStyle(
+                          color: palette.textPrimary,
                           fontSize: 13,
                           fontWeight: FontWeight.w500,
                         ),
@@ -71,8 +73,8 @@ class SettingsCardRow extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(
                     subtitle!,
-                    style: const TextStyle(
-                      color: Color(0xFF9CA0B0),
+                    style: TextStyle(
+                      color: palette.textMuted,
                       fontSize: 11,
                       height: 1.3,
                     ),

@@ -22,7 +22,8 @@ import 'pane_tree.dart' show Surface;
 final Logger _log = moduleLogger('terminal.terminal_view');
 
 /// Immutable snapshot of every user-facing setting that affects the terminal
-/// engine (font, background, cursor, scrollback, bell, copy-on-select).
+/// engine (font, background, cursor, scrollback, bell, copy-on-select, and the
+/// active palette's terminal color set).
 ///
 /// `TerminalWorkspace` rebuilds this whenever any of the underlying setting
 /// stores emits a change; it's then passed down to `PaneLayout` → `TerminalView`.
@@ -42,6 +43,9 @@ class TerminalSettings {
     required this.scrollbackLines,
     required this.copyOnSelect,
     required this.bellMode,
+    required this.terminalForeground,
+    required this.terminalSelection,
+    required this.terminalAnsiColors,
   });
 
   final String fontFamily;
@@ -53,6 +57,24 @@ class TerminalSettings {
   final bool copyOnSelect;
   final BellMode bellMode;
 
+  /// Default foreground color the alacritty renderer applies to cells
+  /// with no explicit SGR foreground. Sourced from the active palette's
+  /// [ThemePalette.terminalForeground] so picking a light theme also
+  /// retints the terminal text — otherwise light themes render light
+  /// text on light backgrounds (unreadable). See `palettes.dart`.
+  final Color terminalForeground;
+
+  /// Selection highlight color (translucent by convention). Sourced
+  /// from the active palette's [ThemePalette.terminalSelection].
+  final Color terminalSelection;
+
+  /// 16 ANSI colors in alacritty's canonical order (black, red,
+  /// green, yellow, blue, magenta, cyan, white, bright variants).
+  /// Sourced from [ThemePalette.terminalAnsiColors] so light-mode
+  /// palettes ship lighter ANSI tones that read against the light
+  /// surface0 instead of the dark stock defaults.
+  final List<Color> terminalAnsiColors;
+
   TerminalSettings copyWith({
     String? fontFamily,
     double? fontSize,
@@ -62,6 +84,9 @@ class TerminalSettings {
     int? scrollbackLines,
     bool? copyOnSelect,
     BellMode? bellMode,
+    Color? terminalForeground,
+    Color? terminalSelection,
+    List<Color>? terminalAnsiColors,
   }) =>
       TerminalSettings(
         fontFamily: fontFamily ?? this.fontFamily,
@@ -72,6 +97,9 @@ class TerminalSettings {
         scrollbackLines: scrollbackLines ?? this.scrollbackLines,
         copyOnSelect: copyOnSelect ?? this.copyOnSelect,
         bellMode: bellMode ?? this.bellMode,
+        terminalForeground: terminalForeground ?? this.terminalForeground,
+        terminalSelection: terminalSelection ?? this.terminalSelection,
+        terminalAnsiColors: terminalAnsiColors ?? this.terminalAnsiColors,
       );
 
   @override
@@ -85,7 +113,10 @@ class TerminalSettings {
           other.cursorBlink == cursorBlink &&
           other.scrollbackLines == scrollbackLines &&
           other.copyOnSelect == copyOnSelect &&
-          other.bellMode == bellMode);
+          other.bellMode == bellMode &&
+          other.terminalForeground == terminalForeground &&
+          other.terminalSelection == terminalSelection &&
+          _listEq(other.terminalAnsiColors, terminalAnsiColors));
 
   @override
   int get hashCode => Object.hash(
@@ -97,7 +128,23 @@ class TerminalSettings {
         scrollbackLines,
         copyOnSelect,
         bellMode,
+        terminalForeground,
+        terminalSelection,
+        Object.hashAll(terminalAnsiColors),
       );
+
+  /// List equality helper — Dart's `List` lacks a built-in `==`, so
+  /// `terminalAnsiColors` would compare by identity and miss any
+  /// palette change. Length+element compare is enough since the
+  /// palette always returns the same 16-tuple.
+  static bool _listEq(List<Color> a, List<Color> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }
 
 /// Map our `CursorStyle` enum (block / underline / bar) to alacritty's
@@ -110,6 +157,31 @@ int _cursorShapeFromEnum(CursorStyle s) => switch (s) {
       CursorStyle.underline => 1,
       CursorStyle.bar => 2,
     };
+
+/// Stock 16-color ANSI palette mirroring `fa.TerminalConfig.defaults()`
+/// (the canonical alacritty Tango-ish default). Only referenced by
+/// the bare-constructor default of [TerminalView] (the test path);
+/// production code always feeds a palette-derived snapshot via
+/// [TerminalSettings]. Kept top-level so it's `const`-constructible.
+const List<Color> _defaultAnsiColors = [
+  Color(0xFF000000), Color(0xFFCC0000), Color(0xFF4E9A06), Color(0xFFC4A000),
+  Color(0xFF3465A4), Color(0xFF75507B), Color(0xFF06989A), Color(0xFFD3D7CF),
+  Color(0xFF555753), Color(0xFFEF2929), Color(0xFF8AE234), Color(0xFFFCE94F),
+  Color(0xFF729FCF), Color(0xFFAD7FA8), Color(0xFF34E2E2), Color(0xFFEEEEEC),
+];
+
+/// Element-wise equality for the 16 ANSI color lists. Used in
+/// `didUpdateWidget` to detect a palette-driven reconfigure without
+/// falling back to identity comparison (two lists built from the
+/// same palette compare equal but are different instances).
+bool _ansiListEq(List<Color> a, List<Color> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
 
 /// Convert a Flutter [Color] (RGBA, 0xAARRGGBB) to the packed
 /// `0x00RRGGBB` int that `flutter_alacritty`'s [fa.TerminalColors]
@@ -189,6 +261,14 @@ class TerminalView extends StatefulWidget {
       scrollbackLines: 10000,
       copyOnSelect: false,
       bellMode: BellMode.visual,
+      // Defaults match fa.TerminalConfig.defaults().colors so a
+      // TerminalView constructed without a TerminalSettings snapshot
+      // (i.e. bypassing TerminalWorkspace — the test path) still
+      // looks like a stock alacritty. Production code always passes
+      // a snapshot resolved from the active palette.
+      terminalForeground: Color(0xFFD8D8D8),
+      terminalSelection: Color(0xFF3A6EA5),
+      terminalAnsiColors: _defaultAnsiColors,
     ),
     this.onTitleChanged,
     this.onPwdChanged,
@@ -230,12 +310,6 @@ class TerminalViewState extends State<TerminalView> {
   final Signal<bool> _exited = signal(false);
   final Signal<bool> _hasReceivedOutput = signal(false);
   final Signal<bool> _showSlowHint = signal(false);
-
-  // Captured by the pty.exitCode.then callback so _markExited can show
-  // the exit code in its "Process exited" banner. Stays null if exit
-  // was detected via pty.output.onDone (the reader thread saw EOF)
-  // before the wait-exit thread posted the code.
-  int? _lastExitCode;
 
   // After this many ms without any output, show an extra hint in the
   // placeholder so the user knows WSL cold-start can take 10-30 s.
@@ -362,14 +436,38 @@ class TerminalViewState extends State<TerminalView> {
     // process — `defaults()` allocates a full TerminalColors + 16-ANSI
     // array, and we previously called it twice in the same expression.
     final defaultColors = _defaultColors;
+    // Pack the palette's 16 ANSI colors into alacritty's wire format.
+    // The TerminalSettings snapshot guarantees length == 16 (asserted
+    // by the workspace when it builds the snapshot from a palette);
+    // we still check defensively before copyWith so a malformed
+    // extension of TerminalSettings can't crash every TerminalView.
+    assert(s.terminalAnsiColors.length == 16,
+        'terminalAnsiColors must be exactly 16 entries');
+    final ansiPacked = s.terminalAnsiColors
+        .map(_toAlacrittyColor)
+        .toList(growable: false);
     return fa.TerminalConfig.defaults().copyWith(
-      // Override the engine background to match `terminal.backgroundColor`.
-      // The Flutter window + scaffold background (see main.dart) use the
-      // same value so the chrome never flashes a different shade around
-      // the terminal grid. alpha is dropped — alacritty takes 0x00RRGGBB.
+      // Override the full color set: background / foreground / selection
+      // / ANSI all come from the active palette's [ThemePalette]
+      // terminal palette (resolved in `TerminalWorkspace._initSettings`).
+      //
+      // The Flutter window + scaffold background (see main.dart) read
+      // the same `palette.surface0` so the chrome never flashes a
+      // different shade around the terminal grid; the foreground/ANSI
+      // swap is what makes picking a light theme actually retint the
+      // grid (the previous dark stock defaults produced light text on
+      // light backgrounds).
+      //
+      // alpha is dropped for background/foreground — alacritty's
+      // grid is always opaque. The selection overlay keeps its
+      // alpha so it tints the cell underneath instead of replacing
+      // it (the conventional alacritty behavior).
       colors: defaultColors.copyWith(
-            background: _toAlacrittyColor(s.backgroundColor),
-          ),
+        background: _toAlacrittyColor(s.backgroundColor),
+        foreground: _toAlacrittyColor(s.terminalForeground),
+        selection: _toAlacrittyColor(s.terminalSelection),
+        ansi: ansiPacked,
+      ),
       font: fa.FontConfig(
         family: s.fontFamily,
         fallback: const [
@@ -454,8 +552,14 @@ class TerminalViewState extends State<TerminalView> {
 
     // Non-font settings need to flow into the engine's live state via
     // _engine.reconfigure (scrollback limit, cursor shape/blink, bell
-    // duration, font family). Re-apply unconditionally when any of
-    // those change — it's a cheap FFI call.
+    // duration, font family, AND the palette-driven terminal colors).
+    // Re-apply unconditionally when any of those change — it's a cheap
+    // FFI call. The terminal-color fields drive the light/dark retint
+    // when the user picks a new palette from the settings dropdown:
+    // a switch from Mocha to Latte swaps foreground + the 16 ANSI
+    // swatches, so shell apps that emit no SGR color (e.g. `cat`,
+    // `ls`) instantly read on the new surface0.
+    //
     // Skip reconfigure for font-size-only changes — fa.TerminalView
     // updates its own metrics from the new textStyle and LayoutBuilder
     // recomputes cols/rows. Calling reconfigure AND triggering a resize
@@ -463,11 +567,17 @@ class TerminalViewState extends State<TerminalView> {
     // WSL bash configs clear-on-resize via TIOCSWINSZ). For font-family
     // changes we DO reconfigure so the engine's stored config stays in
     // sync — otherwise new tabs use the old family until restart.
+    final colorsChanged = s.backgroundColor != oldWidget.settings.backgroundColor ||
+        s.terminalForeground != oldWidget.settings.terminalForeground ||
+        s.terminalSelection != oldWidget.settings.terminalSelection ||
+        !_ansiListEq(
+            s.terminalAnsiColors, oldWidget.settings.terminalAnsiColors);
     final engineSideChange = s.cursorStyle != oldWidget.settings.cursorStyle ||
         s.cursorBlink != oldWidget.settings.cursorBlink ||
         s.scrollbackLines != oldWidget.settings.scrollbackLines ||
         s.bellMode != oldWidget.settings.bellMode ||
-        s.fontFamily != oldWidget.settings.fontFamily;
+        s.fontFamily != oldWidget.settings.fontFamily ||
+        colorsChanged;
     if (engineSideChange) {
       _engine.reconfigure(_buildConfig());
     }
@@ -493,16 +603,14 @@ class TerminalViewState extends State<TerminalView> {
     // _bellMode / _fontSize changes automatically.
   }
 
-  /// Re-quote [s] so it survives CommandLineToArgvW parsing of the
-  /// concatenated command line that flutter_pty's `build_command`
-  /// produces.
+  /// Re-quote [s] so it survives `cmd.exe`'s `/c` parser as a single token.
   ///
-  /// flutter_pty's Windows `build_command` joins `program` and each arg
-  /// with a bare space — no quoting — so any token containing a space
-  /// (e.g. `C:\Program Files\…\pwsh.exe`) must be wrapped here, or
-  /// CommandLineToArgvW will split it into `C:\Program` + `Files\…` and
-  /// the shell will fail to find its own executable (the historical
-  /// "C: Program" first-click crash).
+  /// We launch every shell as `cmd.exe /c "<exe>" <args...>` (see [_start]
+  /// for why). flutter_pty's Windows `build_command` joins `program` and each
+  /// arg with a bare space — no quoting — so any token containing a space
+  /// (e.g. `C:\Program Files\…`) must be wrapped here, or cmd/CreateProcessW
+  /// would split it into `C:\Program` + `Files\…` and the shell would fail to
+  /// find its own executable (the historical "C: Program" first-click crash).
   ///
   /// Backslashes are left alone — paths like `C:\Program Files\pwsh\pwsh.exe`
   /// round-trip cleanly because no backslash immediately precedes a quote in
@@ -516,24 +624,24 @@ class TerminalViewState extends State<TerminalView> {
 
 /// Spawn the configured shell via [fa.FlutterPtyBackend].
   void _start() {
-    // We launch the shell DIRECTLY (not via `cmd.exe /c <shell>`). The
-    // historical reason to wrap in `cmd.exe /c` was a flutter_pty 0.4.2
-    // spawn quirk where its native `build_command` emitted
-    // `<executable> <executable> <args...>` (argv[0] doubled), which
-    // crashed pwsh / wsl / bash. The local flutter_pty fork
-    // (../flutter_pty_pkg, commit 99951b0) fixes that by starting the
-    // concatenation at `arguments[1]`, so the wrapper is no longer
-    // needed.
+    // Workaround for a Windows-only flutter_pty 0.4.2 spawn quirk: the
+    // native `build_command` (flutter_pty/src/flutter_pty_win.c) emits
+    // `<executable> <executable> <args...>` because the Dart binding sets
+    // `argv[0] = executable` AND `build_command` also iterates `arguments`
+    // starting at index 0. CreateProcessW with a NULL lpApplicationName
+    // takes the first token as the child's argv[0] and passes the rest as
+    // argv[1..n]. cmd.exe and Windows PowerShell tolerate the stray extra
+    // positional; pwsh, wsl.exe, and bash do not:
+    //   pwsh → "Processing -File '<own path>' failed: no .ps1 extension"
+    //   wsl  → runs the path as a Linux command → "command not found"
+    //   bash → "<own path>: cannot execute binary file"
     //
-    // Why this matters for the "terminal dies when opencode exits"
-    // symptom: `cmd /c` runs the command and exits, so the PTY's
-    // child process is `cmd.exe` (which exits) — not pwsh. When
-    // opencode exits inside pwsh, cmd.exe is already gone, the PTY
-    // reports the opencode crash exit code, the pipes are torn down,
-    // and the still-running pwsh is left orphaned and unreachable.
-    // Launching pwsh directly makes pwsh the PTY's child, and pwsh
-    // stays alive across child-process exits — opencode comes and goes
-    // but the terminal keeps running.
+    // We therefore launch every shell wrapped in `cmd.exe /c "<real>
+    // <args>"`. The doubled token becomes a harmless extra `cmd.exe`
+    // before `/c` (cmd ignores positionals before `/c`), and the real
+    // invocation rides untouched in the /c payload. Verified:
+    // `cmd.exe cmd.exe /c "<exe>" <args>` launches pwsh / bash / wsl
+    // correctly.
     final String ptyProgram;
     final List<String> ptyArgs;
     if (widget.surface.program.isEmpty) {
@@ -552,11 +660,12 @@ class TerminalViewState extends State<TerminalView> {
         ...widget.surface.args,
         if (isPowerShell) '-NoProfile',
       ];
-      // Quote the executable so paths with spaces
-      // (`C:\Program Files\PowerShell\7\pwsh.exe`) survive
-      // CommandLineToArgvW parsing of the concatenated command line.
-      ptyProgram = _quoteForCmd(realProgram);
-      ptyArgs = realArgs.map(_quoteForCmd).toList();
+      ptyProgram = 'cmd.exe';
+      ptyArgs = <String>[
+        '/c',
+        _quoteForCmd(realProgram),
+        ...realArgs.map(_quoteForCmd),
+      ];
     }
 
     _log.fine('_start: ptyProgram=$ptyProgram ptyArgs=$ptyArgs (program="${widget.surface.program}") cwd=${widget.workingDirectory}');
@@ -572,23 +681,7 @@ class TerminalViewState extends State<TerminalView> {
     _pty = pty;
     _log.fine('_start: PTY backend created');
 
-    _engineOutputSub = _engine.output.listen(
-      (bytes) {
-        // Gate host→PTY writes after the PTY has exited. flutter_pty's
-        // `pty_write` calls `WriteFile(handle->inputWriteSide, ...)` on
-        // the ConPTY input pipe; once the ConPTY's client process
-        // (cmd.exe wrapper) is gone, the kernel does NOT return
-        // `ERROR_BROKEN_PIPE` until `ClosePseudoConsole` is invoked,
-        // and we never invoke it. So `WriteFile` blocks the UI thread
-        // indefinitely on any post-exit keystroke. Dropping the bytes
-        // here is safe — there is no PTY to receive them anyway.
-        _log.info('engine.output listener fired bytes=${bytes.length} _exited=${_exited.value}');
-        if (_exited.value) return;
-        _log.info('engine.output listener pre-pty.write bytes=${bytes.length}');
-        pty.write(bytes);
-        _log.info('engine.output listener post-pty.write bytes=${bytes.length}');
-      },
-    );
+    _engineOutputSub = _engine.output.listen(pty.write);
     _outputSub = pty.output.listen(
       (bytes) {
         if (!_hasReceivedOutput.value) {
@@ -596,8 +689,6 @@ class TerminalViewState extends State<TerminalView> {
           _slowHintTimer?.cancel();
           _log.info('FIRST PTY OUTPUT: ${bytes.length} bytes (after ${DateTime.now().millisecondsSinceEpoch - _startTimeMs}ms)');
         }
-        _log.info('pty.output listener fired bytes=${bytes.length} _exited=${_exited.value}');
-        if (_exited.value) return;
         // `feedWithKitty` answers Kitty keyboard-protocol capability
         // queries (`CSI ? u`) and applies flag pushes (`CSI > ... u`),
         // writing responses back via `engine.write` (= PTY input). Apps
@@ -615,7 +706,6 @@ class TerminalViewState extends State<TerminalView> {
     );
     pty.exitCode.then((code) {
       _log.info('PTY exitCode=$code');
-      _lastExitCode = code;
       _markExited();
     });
   }
@@ -626,38 +716,7 @@ class TerminalViewState extends State<TerminalView> {
     if (_exited.value || !mounted) return;
     _log.fine('_markExited fired');
     _exited.value = true;
-    // Tear down the ConPTY properly. The local flutter_pty fork
-    // (../flutter_pty_pkg) decouples the C-side read thread from
-    // Dart_PostCObject_DL via a bounded ring buffer, so pty.close() can
-    // CancelIoEx the in-flight conout read and ClosePseudoConsole
-    // unblocks — no more orphaned ConPTY leaking the input pipe and no
-    // more whole-app UI freeze on the next keystroke. The close is
-    // synchronous from Dart's perspective but bounded (a worker thread
-    // may outlive the handle briefly if blocked in the Dart message
-    // port; the OS reclaims it on isolate shutdown).
-    _log.fine('_markExited pre-pty.close()');
-    try {
-      _pty?.close();
-    } catch (e) {
-      _log.warning('pty.close() threw: $e');
-    }
-    _log.fine('_markExited post-pty.close()');
-
-    // Feed a one-line "process exited" banner into the grid so the
-    // user can see *what* happened and *when* the terminal went dead
-    // (the listener gate below silently drops post-exit keystrokes,
-    // which otherwise makes the terminal feel hung without any visible
-    // signal). Uses dim SGR so it doesn't fight with the user's
-    // prompt colors. CR/LF at both ends forces the banner onto its
-    // own line regardless of where the cursor was when the shell died.
-    final codeStr = _lastExitCode?.toString() ?? '?';
-    _engine.feed(Uint8List.fromList(utf8.encode(
-      '\r\n\x1b[2m─── Process exited (code=$codeStr). '
-      'Terminal is read-only; close this pane to recover. ───\x1b[0m\r\n',
-    )));
-
     widget.onExited?.call();
-    _log.fine('_markExited post-onExited');
   }
 
   // ── Engine → host signal forwarding ──────────────────────────────

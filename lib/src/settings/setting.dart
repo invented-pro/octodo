@@ -93,11 +93,17 @@ class StringSetting extends Setting<String> {
   @override
   final IconData? icon;
 
+  /// Optional codec override. The default [StringCodec] accepts any
+  /// string; settings that need to validate (e.g. palette ids)
+  /// provide a domain-specific codec here.
+  final SettingCodec<String>? codecOverride;
+
   StringSetting(this.key, {required this.defaultValue,
-      required this.title, this.subtitle, this.icon});
+      required this.title, this.subtitle, this.icon,
+      this.codecOverride});
 
   @override
-  SettingCodec<String> get codec => const StringCodec();
+  SettingCodec<String> get codec => codecOverride ?? const StringCodec();
 }
 
 class EnumSetting<T extends Enum> extends Setting<T> {

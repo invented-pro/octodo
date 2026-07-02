@@ -4,6 +4,7 @@
 // aliases for future UserDefaults-style stores.
 
 import 'package:flutter/material.dart';
+import '../theme/palettes.dart';
 
 abstract class SettingCodec<T> {
   const SettingCodec();
@@ -136,4 +137,22 @@ class ColorCodec extends SettingCodec<Color> {
         '${g.toRadixString(16).padLeft(2, '0').toUpperCase()}'
         '${b.toRadixString(16).padLeft(2, '0').toUpperCase()}';
   }
+}
+
+/// Codec for the `appearance.themeName` setting — a [String] whose
+/// value is a [ThemePalette.id]. Unknown ids fall back to
+/// [AppPalettes.defaultId] instead of throwing, so a stale settings
+/// file (e.g. after a palette is renamed or removed) still boots.
+class PaletteIdCodec extends SettingCodec<String> {
+  const PaletteIdCodec();
+  @override
+  String fromJson(Object? json) {
+    final raw = json?.toString() ?? '';
+    for (final p in AppPalettes.all) {
+      if (p.id == raw) return p.id;
+    }
+    return AppPalettes.defaultId;
+  }
+  @override
+  Object? toJson(String v) => v;
 }
