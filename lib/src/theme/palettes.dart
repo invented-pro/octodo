@@ -105,6 +105,26 @@ abstract class ThemePalette {
   /// Accent at ~45% alpha — pressed/focused states that should feel
   /// stronger than a hover but not blind the user.
   Color get focusOverlay => accentBlue.withValues(alpha: 0.45);
+
+  // ── Workspace swatches ───────────────────────────────────────────
+
+  /// Seven curated colors shown as the "Custom" tab in the
+  /// workspace color picker. Each palette contributes its own
+  /// set: dark palettes ship high-luminance accents (e.g. Mocha
+  /// blue #89B4FA) that glow against a dark drawer surface, light
+  /// palettes ship saturated/dark accents (e.g. Latte blue
+  /// #1E66F5) that read on a pale surface. Picking a swatch from
+  /// the active palette gives a workspace indicator visible in
+  /// both the active theme and (with reduced contrast) the other.
+  List<Color> get workspaceSwatches => [
+        accentBlue,
+        accentGreen,
+        accentYellow,
+        accentPink,
+        accentPurple,
+        accentTeal,
+        accentOrange,
+      ];
 }
 
 // ── Built-in palettes ───────────────────────────────────────────────

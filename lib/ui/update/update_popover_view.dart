@@ -1,10 +1,7 @@
 // Update popover — themed dialog mirroring the settings palette:
-//   * bg       0xFF1A1A24
-//   * header   0xFF242430
-//   * border   0xFF45475A
-//   * accent   0xFF89B4FA
-//   * warn     0xFFF9E2AF (errors)
-//   * danger   0xFFF38BA8
+// every color is read from `context.palette` so it retints when
+// the user switches themes. The dialog is one of two surfaces
+// (alongside the workspace drawer) that are palette-aware.
 //
 // One body per [UpdateState]. Click handlers call back into the
 // [UpdateController] passed in at show time.
@@ -14,7 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../src/app_info.dart';
-
+import '../../src/theme/palette_context.dart';
 import '../../src/update/release_resolver.dart';
 import '../../src/update/update_controller.dart';
 import '../../src/update/update_state.dart';
@@ -42,12 +39,13 @@ class UpdatePopoverView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Dialog(
-      backgroundColor: const Color(0xFF1A1A24),
+      backgroundColor: palette.dialogSurface,
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        side: const BorderSide(color: Color(0xFF45475A), width: 1),
+        side: BorderSide(color: palette.outline, width: 1),
       ),
       child: SizedBox(
         width: 380,
@@ -94,16 +92,17 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Container(
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 18),
-      decoration: const BoxDecoration(
-        color: Color(0xFF242430),
-        borderRadius: BorderRadius.only(
+      decoration: BoxDecoration(
+        color: palette.popupSurface,
+        borderRadius: const BorderRadius.only(
           topLeft: Radius.circular(12),
           topRight: Radius.circular(12),
         ),
-        border: Border(bottom: BorderSide(color: Color(0xFF45475A), width: 1)),
+        border: Border(bottom: BorderSide(color: palette.outline, width: 1)),
       ),
       child: Row(
         children: [
@@ -122,8 +121,8 @@ class _Header extends StatelessWidget {
           const SizedBox(width: 10),
           Text(
             title,
-            style: const TextStyle(
-              color: Color(0xFFEFF1F5),
+            style: TextStyle(
+              color: palette.textPrimary,
               fontSize: 13,
               fontWeight: FontWeight.w600,
             ),
@@ -131,7 +130,7 @@ class _Header extends StatelessWidget {
           const Spacer(),
           IconButton(
             icon: const Icon(Icons.close, size: 16),
-            color: const Color(0xFFBAC2DE),
+            color: palette.textSecondary,
             visualDensity: VisualDensity.compact,
             onPressed: () => Navigator.of(context).pop(),
           ),
@@ -148,11 +147,14 @@ class _PrimaryButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return FilledButton(
       onPressed: onPressed,
       style: FilledButton.styleFrom(
-        backgroundColor: const Color(0xFF89B4FA),
-        foregroundColor: const Color(0xFF11111B),
+        backgroundColor: palette.accentBlue,
+        foregroundColor: palette.brightness == Brightness.dark
+            ? palette.surface0
+            : Colors.white,
       ),
       child: Text(label),
     );
@@ -166,10 +168,11 @@ class _SecondaryButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return TextButton(
       onPressed: onPressed,
       style: TextButton.styleFrom(
-        foregroundColor: const Color(0xFFBAC2DE),
+        foregroundColor: palette.textSecondary,
       ),
       child: Text(label),
     );
@@ -183,6 +186,7 @@ class _Footer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final rightChildren = <Widget>[];
     for (var i = 0; i < right.length; i++) {
       if (i > 0) rightChildren.add(const SizedBox(width: 8));
@@ -190,8 +194,8 @@ class _Footer extends StatelessWidget {
     }
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
-      decoration: const BoxDecoration(
-        border: Border(top: BorderSide(color: Color(0xFF313244), width: 1)),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: palette.rowSurface, width: 1)),
       ),
       child: Row(
         children: [
@@ -212,14 +216,15 @@ class _AvailableBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final release = model.detected;
+    final palette = context.palette;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _Header(
+        _Header(
           title: 'Update Available',
           icon: Icons.system_update_alt,
-          iconColor: Color(0xFF89B4FA),
+          iconColor: palette.accentBlue,
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
@@ -228,11 +233,12 @@ class _AvailableBody extends StatelessWidget {
             children: [
               if (release != null) _Metadata(release: release),
               const SizedBox(height: 14),
-              const Text(
+              Text(
                 'The download is fetched from GitHub. The SHA-256 of '
                 'the zip is checked against the sidecar before the '
                 'running app is replaced.',
-                style: TextStyle(color: Color(0xFFBAC2DE), fontSize: 11),
+                style: TextStyle(
+                    color: palette.textSecondary, fontSize: 11),
               ),
             ],
           ),
@@ -288,14 +294,15 @@ class _DownloadingBody extends StatelessWidget {
     final received = progress?.receivedBytes ?? 0;
     final total = progress?.totalBytes ?? 0;
     final version = progress?.version ?? '';
+    final palette = context.palette;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _Header(
+        _Header(
           title: 'Downloading Update',
           icon: Icons.downloading,
-          iconColor: Color(0xFF89B4FA),
+          iconColor: palette.accentBlue,
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(18, 18, 18, 8),
@@ -310,10 +317,9 @@ class _DownloadingBody extends StatelessWidget {
                 child: LinearProgressIndicator(
                   value: total <= 0 ? null : fraction,
                   minHeight: 8,
-                  backgroundColor: const Color(0xFF313244),
-                  valueColor: const AlwaysStoppedAnimation<Color>(
-                    Color(0xFF89B4FA),
-                  ),
+                  backgroundColor: palette.rowSurface,
+                  valueColor:
+                      AlwaysStoppedAnimation<Color>(palette.accentBlue),
                 ),
               ),
               const SizedBox(height: 8),
@@ -323,8 +329,8 @@ class _DownloadingBody extends StatelessWidget {
                     : '${_formatBytes(received)} of '
                         '${_formatBytes(total)} '
                         '(${(fraction * 100).toStringAsFixed(0)}%)',
-                style:
-                    const TextStyle(color: Color(0xFFBAC2DE), fontSize: 11),
+                style: TextStyle(
+                    color: palette.textSecondary, fontSize: 11),
               ),
             ],
           ),
@@ -356,14 +362,15 @@ class _DownloadedBody extends StatelessWidget {
     final d = model.downloaded;
     final verified = d?.digestVerified ?? false;
     final size = d?.sizeBytes ?? 0;
+    final palette = context.palette;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _Header(
+        _Header(
           title: 'Ready to Install',
           icon: Icons.restart_alt,
-          iconColor: Color(0xFF89B4FA),
+          iconColor: palette.accentBlue,
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
@@ -383,15 +390,16 @@ class _DownloadedBody extends StatelessWidget {
                     ? 'SHA-256 verified'
                     : 'No SHA-256 published',
                 valueColor: verified
-                    ? const Color(0xFFA6E3A1)
-                    : const Color(0xFFF9E2AF),
+                    ? palette.accentGreen
+                    : palette.accentYellow,
               ),
               const SizedBox(height: 14),
-              const Text(
+              Text(
                 'Pressing "Restart to install" closes the running '
                 'app, swaps the staged payload over the install '
                 'directory, then relaunches.',
-                style: TextStyle(color: Color(0xFFBAC2DE), fontSize: 11),
+                style: TextStyle(
+                    color: palette.textSecondary, fontSize: 11),
               ),
             ],
           ),
@@ -422,32 +430,34 @@ class _InstallingBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _Header(
+        _Header(
           title: 'Applying Update',
           icon: Icons.restart_alt,
-          iconColor: Color(0xFF89B4FA),
+          iconColor: palette.accentBlue,
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(18, 24, 18, 24),
           child: Row(
             children: [
-              const SizedBox(
+              SizedBox(
                 width: 18,
                 height: 18,
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
                   valueColor:
-                      AlwaysStoppedAnimation<Color>(Color(0xFF89B4FA)),
+                      AlwaysStoppedAnimation<Color>(palette.accentBlue),
                 ),
               ),
               const SizedBox(width: 12),
-              const Text(
+              Text(
                 'Restarting to apply update…',
-                style: TextStyle(color: Color(0xFFBAC2DE), fontSize: 12),
+                style: TextStyle(
+                    color: palette.textSecondary, fontSize: 12),
               ),
             ],
           ),
@@ -465,6 +475,7 @@ class _NotesLink extends StatelessWidget {
   Widget build(BuildContext context) {
     final target = url;
     if (target == null) return const SizedBox.shrink();
+    final palette = context.palette;
     return InkWell(
       onTap: () async {
         final ok = await launchUrl(target,
@@ -473,7 +484,7 @@ class _NotesLink extends StatelessWidget {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('Could not open $target'),
-              backgroundColor: const Color(0xFFF38BA8),
+              backgroundColor: palette.accentPink,
               duration: const Duration(seconds: 3),
             ),
           );
@@ -483,13 +494,14 @@ class _NotesLink extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
         child: Row(
           children: [
-            const Icon(Icons.description_outlined,
-                size: 14, color: Color(0xFFBAC2DE)),
+            Icon(Icons.description_outlined,
+                size: 14, color: palette.textSecondary),
             const SizedBox(width: 8),
-            const Text('View release notes',
-                style: TextStyle(color: Color(0xFFEFF1F5), fontSize: 12)),
+            Text('View release notes',
+                style: TextStyle(color: palette.textPrimary, fontSize: 12)),
             const Spacer(),
-            const Icon(Icons.open_in_new, size: 12, color: Color(0xFF6C7086)),
+            Icon(Icons.open_in_new,
+                size: 12, color: palette.textOverlay),
           ],
         ),
       ),
@@ -542,6 +554,7 @@ class _MetaRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
@@ -551,14 +564,14 @@ class _MetaRow extends StatelessWidget {
             width: _Metadata._labelWidth,
             child: Text(
               label,
-              style: const TextStyle(color: Color(0xFF7F849C), fontSize: 11),
+              style: TextStyle(color: palette.textMuted, fontSize: 11),
             ),
           ),
           Expanded(
             child: SelectableText(
               value,
               style: TextStyle(
-                color: valueColor ?? const Color(0xFFEFF1F5),
+                color: valueColor ?? palette.textPrimary,
                 fontSize: 11,
                 fontFamily: 'monospace',
               ),
@@ -575,32 +588,34 @@ class _CheckingBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _Header(
+        _Header(
           title: 'Checking for Updates',
           icon: Icons.sync,
-          iconColor: Color(0xFF89B4FA),
+          iconColor: palette.accentBlue,
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(18, 24, 18, 24),
           child: Row(
             children: [
-              const SizedBox(
+              SizedBox(
                 width: 18,
                 height: 18,
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
                   valueColor:
-                      AlwaysStoppedAnimation<Color>(Color(0xFF89B4FA)),
+                      AlwaysStoppedAnimation<Color>(palette.accentBlue),
                 ),
               ),
               const SizedBox(width: 12),
-              const Text(
+              Text(
                 'Probing GitHub…',
-                style: TextStyle(color: Color(0xFFBAC2DE), fontSize: 12),
+                style: TextStyle(
+                    color: palette.textSecondary, fontSize: 12),
               ),
             ],
           ),
@@ -622,6 +637,7 @@ class _AboutBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final version = model.currentVersion;
+    final palette = context.palette;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -629,7 +645,7 @@ class _AboutBody extends StatelessWidget {
         _Header(
           title: 'About $kAppName',
           icon: Icons.info_outline,
-          iconColor: const Color(0xFF89B4FA),
+          iconColor: palette.accentBlue,
           leading: Image.asset(
             kAppLogoAsset,
             width: 26,
@@ -644,21 +660,22 @@ class _AboutBody extends StatelessWidget {
             children: [
               Text(
                 kAppName,
-                style: const TextStyle(
-                  color: Color(0xFFEFF1F5),
+                style: TextStyle(
+                  color: palette.textPrimary,
                   fontSize: 18,
                   fontWeight: FontWeight.w600,
                 ),
               ),
               const SizedBox(height: 4),
-              const Text(
+              Text(
                 'A terminal complex for Windows, Linux, and macOS.',
-                style: TextStyle(color: Color(0xFFBAC2DE), fontSize: 11),
+                style:
+                    TextStyle(color: palette.textSecondary, fontSize: 11),
               ),
               const SizedBox(height: 14),
               Container(
                 height: 1,
-                color: const Color(0xFF313244),
+                color: palette.rowSurface,
               ),
               const SizedBox(height: 12),
               _AboutRow(label: 'Version:', value: version.isEmpty ? '—' : version),
@@ -706,6 +723,7 @@ class _AboutRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -713,14 +731,14 @@ class _AboutRow extends StatelessWidget {
           width: 72,
           child: Text(
             label,
-            style: const TextStyle(color: Color(0xFF7F849C), fontSize: 11),
+            style: TextStyle(color: palette.textMuted, fontSize: 11),
           ),
         ),
         Expanded(
           child: SelectableText(
             value,
-            style: const TextStyle(
-              color: Color(0xFFEFF1F5),
+            style: TextStyle(
+              color: palette.textPrimary,
               fontSize: 12,
               fontFamily: 'monospace',
             ),
@@ -741,6 +759,7 @@ class _AboutLinkRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -748,7 +767,7 @@ class _AboutLinkRow extends StatelessWidget {
           width: 72,
           child: Text(
             label,
-            style: const TextStyle(color: Color(0xFF7F849C), fontSize: 11),
+            style: TextStyle(color: palette.textMuted, fontSize: 11),
           ),
         ),
         Expanded(
@@ -762,7 +781,7 @@ class _AboutLinkRow extends StatelessWidget {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text('Could not open $url'),
-                    backgroundColor: const Color(0xFFF38BA8),
+                    backgroundColor: palette.accentPink,
                     duration: const Duration(seconds: 3),
                   ),
                 );
@@ -775,8 +794,8 @@ class _AboutLinkRow extends StatelessWidget {
                   Flexible(
                     child: Text(
                       url.host + (url.path.isEmpty ? '' : url.path),
-                      style: const TextStyle(
-                        color: Color(0xFF89B4FA),
+                      style: TextStyle(
+                        color: palette.accentBlue,
                         fontSize: 12,
                         fontFamily: 'monospace',
                         decoration: TextDecoration.underline,
@@ -785,10 +804,10 @@ class _AboutLinkRow extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 6),
-                  const Icon(
+                  Icon(
                     Icons.open_in_new,
                     size: 11,
-                    color: Color(0xFF6C7086),
+                    color: palette.textOverlay,
                   ),
                 ],
               ),
@@ -808,14 +827,15 @@ class _ErrorBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final err = model.error;
+    final palette = context.palette;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _Header(
+        _Header(
           title: 'Update Failed',
           icon: Icons.error_outline,
-          iconColor: Color(0xFFF9E2AF),
+          iconColor: palette.accentYellow,
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
@@ -824,8 +844,8 @@ class _ErrorBody extends StatelessWidget {
             children: [
               Text(
                 err?.message ?? 'Update failed.',
-                style:
-                    const TextStyle(color: Color(0xFFEFF1F5), fontSize: 12),
+                style: TextStyle(
+                    color: palette.textPrimary, fontSize: 12),
               ),
               if (err?.technicalDetails != null) ...[
                 const SizedBox(height: 10),
@@ -874,18 +894,19 @@ class _DetailsBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: const Color(0xFF11111B),
+        color: palette.surface0,
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: const Color(0xFF313244), width: 1),
+        border: Border.all(color: palette.rowSurface, width: 1),
       ),
       child: SelectableText(
         text,
-        style: const TextStyle(
-          color: Color(0xFFBAC2DE),
+        style: TextStyle(
+          color: palette.textSecondary,
           fontSize: 10,
           fontFamily: 'monospace',
         ),

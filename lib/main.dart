@@ -277,34 +277,40 @@ class _AppShellState extends State<AppShell>
   /// the [mounted] guard handles hot restart / dispose.
   BuildContext? _shellContext;
 
-  /// Workspace accent colors (cycled).
-  static const _wsColors = [
-    Color(0xFF89B4FA), // blue
-    Color(0xFFA6E3A1), // green
-    Color(0xFFF9E2AF), // yellow
-    Color(0xFFF38BA8), // pink
-    Color(0xFFCBA6F7), // purple
-    Color(0xFF94E2D5), // teal
-    Color(0xFFFAB387), // orange
-  ];
+  /// Workspace accent colors (cycled). Sourced from the active
+  /// theme palette's [ThemePalette.workspaceSwatches] so the
+  /// default workspace indicators stay legible on whatever
+  /// drawer surface the user picked. Hardcoded Mocha accents
+  /// would wash out on Latte's pale drawer (~1.5:1 contrast);
+  /// each palette's own accent set is calibrated for both
+  /// polarities.
+  List<Color> _activeWsColors() => _activePalette().workspaceSwatches;
 
-  /// Swatches derived from [_wsColors] for the color picker's
-  /// "Custom" tab. Each Catppuccin Mocha accent becomes a primary
-  /// swatch (shades 50-900 generated around the source color as
-  /// shade 500). Lets users pick a quick curated color while
-  /// keeping the HSV wheel tab open for free-form selection.
+  /// Swatches derived from the active palette's workspace colors
+  /// for the color picker's "Custom" tab. Each accent becomes a
+  /// primary swatch (shades 50-900 generated around the source
+  /// color as shade 500) so users can pick a quick curated color
+  /// while keeping the HSV wheel tab open for free-form selection.
   ///
-  /// Built lazily via [ColorTools.createPrimarySwatch] — that's a
-  /// runtime computation, so this can't be `const`.
-  static final Map<ColorSwatch<Object>, String> _wsColorSwatches = {
-    ColorTools.createPrimarySwatch(const Color(0xFF89B4FA)): 'Blue',
-    ColorTools.createPrimarySwatch(const Color(0xFFA6E3A1)): 'Green',
-    ColorTools.createPrimarySwatch(const Color(0xFFF9E2AF)): 'Yellow',
-    ColorTools.createPrimarySwatch(const Color(0xFFF38BA8)): 'Pink',
-    ColorTools.createPrimarySwatch(const Color(0xFFCBA6F7)): 'Purple',
-    ColorTools.createPrimarySwatch(const Color(0xFF94E2D5)): 'Teal',
-    ColorTools.createPrimarySwatch(const Color(0xFFFAB387)): 'Orange',
-  };
+  /// Built lazily — [ColorTools.createPrimarySwatch] is a runtime
+  /// computation, so the map can't be const.
+  Map<ColorSwatch<Object>, String> _activeWsColorSwatches() {
+    final names = ['Blue', 'Green', 'Yellow', 'Pink', 'Purple', 'Teal', 'Orange'];
+    final colors = _activeWsColors();
+    return {
+      for (var i = 0; i < colors.length; i++)
+        ColorTools.createPrimarySwatch(colors[i]): names[i],
+    };
+  }
+
+  /// Resolve the live theme palette from settings. Mirrors the
+  /// lookup [OctodoApp.build] does for the MaterialApp; read here
+  /// whenever a workspace-level color decision has to be made
+  /// outside a [BuildContext] (e.g. `_newWorkspace`).
+  ThemePalette _activePalette() => AppPalettes.byId(
+        SettingsRuntime.instance.store
+            .get(SettingsRuntime.instance.catalog.general.themeName),
+      );
 
   @override
   void initState() {
@@ -622,7 +628,7 @@ class _AppShellState extends State<AppShell>
     final ws = _WorkspaceEntry(
       id: 'ws-${_wsCounter++}',
       name: 'Workspace $_wsCounter',
-      color: _wsColors[(_wsCounter - 1) % _wsColors.length],
+      color: _activeWsColors()[(_wsCounter - 1) % _activeWsColors().length],
     );
     _workspaces.add(ws);
     _currentIndex = _workspaces.length - 1;
@@ -664,12 +670,12 @@ class _AppShellState extends State<AppShell>
   /// the barrier).
   ///
   /// Uses [flex_color_picker] (`ColorPicker.showPickerDialog`) for
-  /// full HSV-wheel flexibility plus the curated [_wsColorSwatches]
-  /// (Catppuccin Mocha accents) exposed as the Custom tab for quick
-  /// access. The picker's built-in dialog handles OK / Cancel /
-  /// barrier-dismiss; we capture the latest color via
-  /// [ColorPicker.onColorChanged] so we can return the final value
-  /// (the built-in `showPickerDialog` returns `bool`, not `Color`).
+  /// full HSV-wheel flexibility plus the curated swatches exposed
+  /// as the Custom tab for quick access. The picker's built-in
+  /// dialog handles OK / Cancel / barrier-dismiss; we capture the
+  /// latest color via [ColorPicker.onColorChanged] so we can
+  /// return the final value (the built-in `showPickerDialog`
+  /// returns `bool`, not `Color`).
   Future<Color?> _pickColor(BuildContext context, Color current) async {
     Color working = current;
     final ok = await ColorPicker(
@@ -683,7 +689,7 @@ class _AppShellState extends State<AppShell>
         ColorPickerType.custom: true,
         ColorPickerType.wheel: true,
       },
-      customColorSwatchesAndNames: _wsColorSwatches,
+      customColorSwatchesAndNames: _activeWsColorSwatches(),
       width: 36,
       height: 36,
       borderRadius: 4,
@@ -1208,7 +1214,9 @@ class _WorkspaceDrawer extends StatelessWidget {
                           ? Icons.chevron_right
                           : Icons.chevron_left,
                       size: 18,
-                      color: palette.textMuted,
+                      color: palette.brightness == Brightness.dark
+                          ? palette.textMuted
+                          : palette.textBody,
                     ),
                   ),
                 ),
@@ -1261,7 +1269,10 @@ class _WorkspaceDrawer extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(Icons.add,
-                          size: 16, color: palette.textMuted),
+                          size: 16,
+                          color: palette.brightness == Brightness.dark
+                              ? palette.textMuted
+                              : palette.textBody),
                       if (!collapsed) ...[
                         const SizedBox(width: 6),
                         Text(
@@ -1311,7 +1322,10 @@ class _WorkspaceDrawer extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(Icons.settings,
-                          size: 14, color: palette.textMuted),
+                          size: 14,
+                          color: palette.brightness == Brightness.dark
+                              ? palette.textMuted
+                              : palette.textBody),
                       if (!collapsed) ...[
                         const SizedBox(width: 6),
                         Text(
@@ -1433,6 +1447,16 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
     final isActive = widget.isActive;
     final showClose = isActive || _hovered;
     final palette = context.palette;
+    // Light palettes define textMuted/textOverlay as very pale colors
+    // (e.g. Latte textMuted #8C8FA1 on drawerSurface #E2E5EC ≈ 2.4:1
+    // contrast — below WCAG AA). They read fine on dark surfaces but
+    // the inactive tile text and close-X icon nearly disappear on the
+    // light drawer background. Boost to textBody/textSecondary in
+    // light mode only; dark stays as-is so the existing hierarchy is
+    // preserved.
+    final isDark = palette.brightness == Brightness.dark;
+    final inactiveText = isDark ? palette.textMuted : palette.textBody;
+    final subtleText = isDark ? palette.textOverlay : palette.textSecondary;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
@@ -1444,9 +1468,23 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
           padding:
               const EdgeInsets.only(left: 10, right: 4, top: 6, bottom: 6),
           decoration: BoxDecoration(
+            // Three-state background:
+            //   * active  → the workspace's own color at 15% (the
+            //               "selected" cue, used everywhere in the
+            //               drawer chrome).
+            //   * hover   → a faint accentBlue tint. Subtler than the
+            //               active tint so the active state always
+            //               wins, but visible enough to advertise
+            //               that the row is interactive. Skipped when
+            //               the tile is already active — that state
+            //               has its own dedicated tint and border.
+            //   * rest    → transparent so the drawer's surface
+            //               shows through.
             color: isActive
                 ? widget.color.withValues(alpha: 0.15)
-                : Colors.transparent,
+                : (_hovered
+                    ? palette.accentBlue.withValues(alpha: 0.10)
+                    : Colors.transparent),
             borderRadius: BorderRadius.circular(4),
             border: Border(
               left: BorderSide(
@@ -1502,7 +1540,7 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                             style: TextStyle(
                               color: isActive
                                   ? palette.textPrimary
-                                  : palette.textMuted,
+                                  : inactiveText,
                               fontSize: 13,
                               fontWeight: isActive
                                   ? FontWeight.w500
@@ -1515,7 +1553,7 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                               hintText: 'Workspace',
                               counterText: '',
                               hintStyle: TextStyle(
-                                color: palette.textMuted,
+                                color: subtleText,
                                 fontSize: 13,
                               ),
                             ),
@@ -1529,7 +1567,7 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                           style: TextStyle(
                             color: isActive
                                 ? palette.textPrimary
-                                : palette.textMuted,
+                                : inactiveText,
                             fontSize: 13,
                             fontWeight: isActive
                                 ? FontWeight.w500
@@ -1554,7 +1592,7 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                         child: Icon(
                           Icons.close,
                           size: 14,
-                          color: palette.textOverlay,
+                          color: subtleText,
                         ),
                       ),
                     ),
@@ -1994,7 +2032,7 @@ class _WorkspaceEndDropZone extends StatelessWidget {
   }
 }
 
-class _CollapsedWorkspaceTile extends StatelessWidget {
+class _CollapsedWorkspaceTile extends StatefulWidget {
   final String name;
   final Color color;
   final bool isActive;
@@ -2008,40 +2046,64 @@ class _CollapsedWorkspaceTile extends StatelessWidget {
   });
 
   @override
+  State<_CollapsedWorkspaceTile> createState() =>
+      _CollapsedWorkspaceTileState();
+}
+
+class _CollapsedWorkspaceTileState extends State<_CollapsedWorkspaceTile> {
+  bool _hovered = false;
+
+  @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Tooltip(
-      message: name,
+      message: widget.name,
       preferBelow: false,
       waitDuration: const Duration(milliseconds: 300),
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          height: 36,
-          margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-          decoration: BoxDecoration(
-            color: isActive
-                ? color.withValues(alpha: 0.20)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(4),
-            border: Border(
-              left: BorderSide(
-                color: isActive ? color : Colors.transparent,
-                width: 3,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: Container(
+            height: 36,
+            margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              // Same three-state background as the expanded tile:
+              // active → workspace color tint, hover → accentBlue
+              // hint, rest → transparent. The collapsed tile is
+              // icon-only so the hover tint does most of the
+              // "this is interactive" work (no close button to
+              // reveal).
+              color: widget.isActive
+                  ? widget.color.withValues(alpha: 0.20)
+                  : (_hovered
+                      ? palette.accentBlue.withValues(alpha: 0.10)
+                      : Colors.transparent),
+              borderRadius: BorderRadius.circular(4),
+              border: Border(
+                left: BorderSide(
+                  color: widget.isActive ? widget.color : Colors.transparent,
+                  width: 3,
+                ),
               ),
             ),
-          ),
-          child: Center(
-            child: Container(
+            child: Center(
+              child: Container(
               width: 10,
               height: 10,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: isActive ? color : color.withValues(alpha: 0.5),
+                color: widget.isActive
+                    ? widget.color
+                    : widget.color.withValues(alpha: 0.5),
               ),
             ),
           ),
         ),
       ),
+    ),
     );
   }
 }

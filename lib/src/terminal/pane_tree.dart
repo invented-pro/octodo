@@ -6,7 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path/path.dart' as p;
 import '../shortcuts/app_shortcuts.dart';
-import '../theme/app_theme.dart';
+import '../theme/palette_context.dart';
+import '../theme/palettes.dart';
 import 'terminal_view.dart';
 import 'shell_profiles.dart';
 
@@ -712,51 +713,53 @@ class PaneLayout extends StatelessWidget {
           children: [
             Positioned.fill(
               child: Offstage(
-                child: _buildHiddenTree(root, focusedContainer!),
+                child: _buildHiddenTree(context, root, focusedContainer!),
               ),
             ),
             Positioned.fill(
-              child: _buildContainer(focusedContainer!),
+              child: _buildContainer(context, focusedContainer!),
             ),
           ],
         ),
       );
     }
-    return _buildNode(root);
+    return _buildNode(context, root);
   }
 
   /// Build the full tree but skip the focused container (it's
   /// rendered separately as the visible overlay above). Every other
   /// container is laid out + mounted normally — just not painted.
-  Widget _buildHiddenTree(PaneNode node, PaneContainer focused) {
+  Widget _buildHiddenTree(
+      BuildContext context, PaneNode node, PaneContainer focused) {
     if (node is PaneContainer) {
       if (identical(node, focused)) {
         return const SizedBox.shrink();
       }
-      return _buildContainer(node);
+      return _buildContainer(context, node);
     }
     if (node is PaneSplit) {
       // Walk the split tree; recursively skip the focused subtree.
       final first = identical(node.first, focused)
           ? const SizedBox.shrink()
-          : _buildHiddenTree(node.first, focused);
+          : _buildHiddenTree(context, node.first, focused);
       final second = identical(node.second, focused)
           ? const SizedBox.shrink()
-          : _buildHiddenTree(node.second, focused);
-      return _buildSplitWithChildren(node, first, second);
+          : _buildHiddenTree(context, node.second, focused);
+      return _buildSplitWithChildren(context, node, first, second);
     }
     return const SizedBox.shrink();
   }
 
-  Widget _buildNode(PaneNode node) {
-    if (node is PaneContainer) return _buildContainer(node);
-    if (node is PaneSplit) return _buildSplit(node);
+  Widget _buildNode(BuildContext context, PaneNode node) {
+    if (node is PaneContainer) return _buildContainer(context, node);
+    if (node is PaneSplit) return _buildSplit(context, node);
     return const SizedBox.shrink();
   }
 
-Widget _buildContainer(PaneContainer container) {
+Widget _buildContainer(BuildContext context, PaneContainer container) {
     assert(container.surfaces.isNotEmpty,
         'PaneContainer ${container.id} rendered with no surfaces — tree mutation left an empty container in place.');
+    final palette = context.palette;
     final isFocused = focusedContainer == container;
     // `_PaneDropOverlay` carries a GlobalKey (per-container) so the
     // entire subtree (IndexedStack + TerminalView) is preserved across
@@ -773,8 +776,8 @@ Widget _buildContainer(PaneContainer container) {
         decoration: BoxDecoration(
           border: Border.all(
             color: isFocused
-                ? const Color(0xFF89B4FA)
-                : const Color(0xFF313244),
+                ? palette.accentBlue
+                : palette.outline,
             width: 1,
           ),
         ),
@@ -867,11 +870,12 @@ Widget _buildContainer(PaneContainer container) {
     );
   }
 
-  Widget _buildSplit(PaneSplit split) {
+  Widget _buildSplit(BuildContext context, PaneSplit split) {
     return _buildSplitWithChildren(
+      context,
       split,
-      _buildNode(split.first),
-      _buildNode(split.second),
+      _buildNode(context, split.first),
+      _buildNode(context, split.second),
     );
   }
 
@@ -880,6 +884,7 @@ Widget _buildContainer(PaneContainer container) {
   /// and by [_buildHiddenTree] (which substitutes a [SizedBox.shrink]
   /// for the focused subtree during maximize).
   Widget _buildSplitWithChildren(
+    BuildContext context,
     PaneSplit split,
     Widget first,
     Widget second,
@@ -1177,6 +1182,7 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final c = widget.container;
     final anyDrag = widget.isAnyTabDragActive.value;
     final children = <Widget>[];
@@ -1235,7 +1241,7 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
 
     return Container(
       height: 30,
-      color: const Color(0xFF1E1E2E),
+      color: palette.surface2,
       child: Row(
         children: [
           Expanded(
@@ -1268,21 +1274,24 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
             width: 1,
             height: 18,
             margin: const EdgeInsets.symmetric(horizontal: 4),
-            color: const Color(0xFF45475A),
+            color: palette.outline,
           ),
-          _buildControls(),
+          _buildControls(palette),
         ],
       ),
     );
   }
 
-  Widget _buildControls() {
+  Widget _buildControls(ThemePalette palette) {
+    final iconColor = palette.brightness == Brightness.dark
+        ? palette.textMuted
+        : palette.textBody;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         IconButton(
           icon: const Icon(Icons.add, size: 16),
-          color: Colors.grey.shade400,
+          color: iconColor,
           visualDensity: VisualDensity.compact,
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints.tightFor(width: 28, height: 28),
@@ -1291,8 +1300,8 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
         ),
         PopupMenuButton<int>(
           icon: const Icon(Icons.arrow_drop_down, size: 16),
-          iconColor: Colors.grey.shade400,
-          color: const Color(0xFF181825),
+          iconColor: iconColor,
+          color: palette.popupSurface,
           tooltip: 'Open new tab with shell…',
           padding: EdgeInsets.zero,
           onSelected: widget.onDefaultShellChanged,
@@ -1313,7 +1322,8 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
                         style: const TextStyle(fontSize: 13)),
                     if (i == widget.defaultShellIndex) ...[
                       const SizedBox(width: 6),
-                      const Icon(Icons.check, size: 14, color: Color(0xFF89B4FA)),
+                      Icon(Icons.check,
+                          size: 14, color: palette.accentBlue),
                     ],
                   ],
                 ),
@@ -1324,7 +1334,7 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
           width: 1,
           height: 18,
           margin: const EdgeInsets.symmetric(horizontal: 2),
-          color: const Color(0xFF313244),
+          color: palette.rowSurface,
         ),
         if (!widget.isMaximized) ...[
           IconButton(
@@ -1332,7 +1342,7 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
               angle: 1.5708, // 90° CW — turns splitscreen (horizontal divider)
               child: const Icon(Icons.splitscreen, size: 18), // into a left/right split
             ),
-            color: Colors.grey.shade400,
+            color: iconColor,
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints.tightFor(width: 28, height: 28),
@@ -1343,7 +1353,7 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
           ),
           IconButton(
             icon: const Icon(Icons.splitscreen, size: 18),
-            color: Colors.grey.shade400,
+            color: iconColor,
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints.tightFor(width: 28, height: 28),
@@ -1358,7 +1368,7 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
             widget.isMaximized ? Icons.fullscreen_exit : Icons.fullscreen,
             size: 20,
           ),
-          color: Colors.grey.shade400,
+          color: iconColor,
           visualDensity: VisualDensity.compact,
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints.tightFor(width: 32, height: 32),
@@ -1436,6 +1446,7 @@ class _DraggableChip extends StatelessWidget {
   }
 
   Widget _buildChip(BuildContext context) {
+    final palette = context.palette;
     // `chipTitle` handles the full chain: prefer the shell-set
     // title, fall back to the derived `[shortName] [basename(cwd)]`
     // when OSC hasn't reported yet, and fall back again when the
@@ -1461,9 +1472,9 @@ class _DraggableChip extends StatelessWidget {
       height: 30,
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF181825).withValues(alpha: 0.4),
+          color: palette.surface1.withValues(alpha: 0.4),
           border: Border.all(
-            color: const Color(0xFF89B4FA).withValues(alpha: 0.4),
+            color: palette.accentBlue.withValues(alpha: 0.4),
             width: 1,
           ),
         ),
@@ -1479,10 +1490,10 @@ class _DraggableChip extends StatelessWidget {
           padding: const EdgeInsets.only(left: 10, right: 4),
           height: 30,
           decoration: BoxDecoration(
-            color: const Color(0xFF181825),
+            color: palette.surface1,
             borderRadius: BorderRadius.circular(4),
             border: Border.all(
-              color: const Color(0xFF89B4FA),
+              color: palette.accentBlue,
               width: 1,
             ),
             boxShadow: [
@@ -1509,7 +1520,7 @@ class _DraggableChip extends StatelessWidget {
                 child: Text(
                   title,
                   style: TextStyle(
-                    color: isActive ? Colors.white : Colors.grey.shade300,
+                    color: isActive ? palette.textPrimary : palette.textBody,
                     fontSize: 12,
                     decoration: surface.exited
                         ? TextDecoration.lineThrough
@@ -1523,7 +1534,7 @@ class _DraggableChip extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.all(2),
                 child: Icon(Icons.close,
-                    size: 12, color: Colors.grey.shade500),
+                    size: 12, color: palette.textMuted),
               ),
             ],
           ),
@@ -1612,7 +1623,7 @@ class _DraggableChip extends StatelessWidget {
                   child: IgnorePointer(
                     child: Container(
                       decoration: BoxDecoration(
-                        color: const Color(0xFF89B4FA).withValues(alpha: 0.06),
+                        color: palette.accentBlue.withValues(alpha: 0.06),
                       ),
                     ),
                   ),
@@ -1665,14 +1676,15 @@ class _ChipVisualState extends State<_ChipVisual> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final isActive = widget.isActive;
     final exited = widget.exited;
     final showClose = isActive || _hovered;
     final Color bg;
     if (isActive) {
-      bg = AppColors.surface1;
+      bg = palette.surface1;
     } else if (_hovered) {
-      bg = AppColors.accentBlue.withValues(alpha: 0.24);
+      bg = palette.accentBlue.withValues(alpha: 0.24);
     } else {
       bg = Colors.transparent;
     }
@@ -1696,7 +1708,7 @@ class _ChipVisualState extends State<_ChipVisual> {
             color: bg,
             border: Border(
               bottom: BorderSide(
-                color: isActive ? AppColors.accentBlue : Colors.transparent,
+                color: isActive ? palette.accentBlue : Colors.transparent,
                 width: 2,
               ),
             ),
@@ -1716,7 +1728,7 @@ class _ChipVisualState extends State<_ChipVisual> {
                       _ShellIcon(
                         iconData: widget.icon,
                         iconAsset: widget.iconAsset,
-                        color: widget.iconColor ?? Colors.grey.shade500,
+                        color: widget.iconColor ?? palette.textMuted,
                         size: 12,
                       ),
                       const SizedBox(width: 5),
@@ -1726,10 +1738,8 @@ class _ChipVisualState extends State<_ChipVisual> {
                         widget.title,
                         style: TextStyle(
                           color: isActive
-                              ? Colors.white
-                              : (exited
-                                  ? Colors.grey.shade600
-                                  : AppColors.textBody),
+                              ? palette.textPrimary
+                              : (exited ? palette.textMuted : palette.textBody),
                           fontSize: 12,
                           decoration: exited
                               ? TextDecoration.lineThrough
@@ -1764,8 +1774,8 @@ class _ChipVisualState extends State<_ChipVisual> {
                           Icons.close,
                           size: 12,
                           color: isActive
-                              ? Colors.grey.shade300
-                              : Colors.grey.shade500,
+                              ? palette.textOverlay
+                              : palette.textMuted,
                         ),
                       ),
                     ),
@@ -1786,9 +1796,10 @@ class _InsertionLine extends StatelessWidget {
   const _InsertionLine();
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return SizedBox(
       width: 2,
-      child: Container(color: const Color(0xFF89B4FA)),
+      child: Container(color: palette.accentBlue),
     );
   }
 }
@@ -1812,6 +1823,7 @@ class _EndDropZone extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return DragTarget<SurfaceDragData>(
       onWillAcceptWithDetails: (_) => true,
       onMove: (_) => onHoverChanged(true),
@@ -1824,20 +1836,20 @@ class _EndDropZone extends StatelessWidget {
           child: Stack(
             children: [
               if (hovered || candidate.isNotEmpty)
-                const Positioned(
+                Positioned(
                   left: 0,
                   top: 4,
                   bottom: 4,
                   child: SizedBox(
                     width: 2,
-                    child: ColoredBox(color: Color(0xFF89B4FA)),
+                    child: ColoredBox(color: palette.accentBlue),
                   ),
                 ),
               if (candidate.isNotEmpty)
                 Positioned.fill(
                   child: IgnorePointer(
                     child: Container(
-                      color: const Color(0xFF89B4FA).withValues(alpha: 0.05),
+                      color: palette.accentBlue.withValues(alpha: 0.05),
                     ),
                   ),
                 ),
@@ -1944,6 +1956,7 @@ class _PaneDropOverlayState extends State<_PaneDropOverlay> {
                     );
                   },
                   builder: (context, candidate, rejected) {
+                    final palette = context.palette;
                     return Stack(
                       children: [
                         widget.child,
@@ -1953,7 +1966,7 @@ class _PaneDropOverlayState extends State<_PaneDropOverlay> {
                               child: Container(
                                 decoration: BoxDecoration(
                                   border: Border.all(
-                                    color: const Color(0xFF89B4FA),
+                                    color: palette.accentBlue,
                                     width: 2,
                                   ),
                                 ),
@@ -2081,12 +2094,13 @@ class _EdgeSplitZone extends StatelessWidget {
       onLeave: (_) => onHoverChanged(false),
       onAcceptWithDetails: (details) => onAccept(details.data),
       builder: (context, candidate, rejected) {
+        final palette = context.palette;
         final active = hovered || candidate.isNotEmpty;
         return AnimatedContainer(
           duration: const Duration(milliseconds: 120),
           decoration: BoxDecoration(
             color: active
-                ? const Color(0xFF89B4FA).withValues(alpha: 0.15)
+                ? palette.accentBlue.withValues(alpha: 0.15)
                 : Colors.transparent,
           ),
           child: Align(
@@ -2099,7 +2113,7 @@ class _EdgeSplitZone extends StatelessWidget {
                   ? 3
                   : null,
               color:
-                  active ? const Color(0xFF89B4FA) : Colors.transparent,
+                  active ? palette.accentBlue : Colors.transparent,
             ),
           ),
         );
