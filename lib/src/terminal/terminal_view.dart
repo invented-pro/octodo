@@ -565,7 +565,23 @@ class TerminalViewState extends State<TerminalView> {
     _pty = pty;
     _log.fine('_start: PTY backend created');
 
-    _engineOutputSub = _engine.output.listen(pty.write);
+    _engineOutputSub = _engine.output.listen(
+      (bytes) {
+        // Gate host→PTY writes after the PTY has exited. flutter_pty's
+        // `pty_write` calls `WriteFile(handle->inputWriteSide, ...)` on
+        // the ConPTY input pipe; once the ConPTY's client process
+        // (cmd.exe wrapper) is gone, the kernel does NOT return
+        // `ERROR_BROKEN_PIPE` until `ClosePseudoConsole` is invoked,
+        // and we never invoke it. So `WriteFile` blocks the UI thread
+        // indefinitely on any post-exit keystroke. Dropping the bytes
+        // here is safe — there is no PTY to receive them anyway.
+        _log.info('engine.output listener fired bytes=${bytes.length} _exited=${_exited.value}');
+        if (_exited.value) return;
+        _log.info('engine.output listener pre-pty.write bytes=${bytes.length}');
+        pty.write(bytes);
+        _log.info('engine.output listener post-pty.write bytes=${bytes.length}');
+      },
+    );
     _outputSub = pty.output.listen(
       (bytes) {
         if (!_hasReceivedOutput.value) {
@@ -573,7 +589,17 @@ class TerminalViewState extends State<TerminalView> {
           _slowHintTimer?.cancel();
           _log.info('FIRST PTY OUTPUT: ${bytes.length} bytes (after ${DateTime.now().millisecondsSinceEpoch - _startTimeMs}ms)');
         }
-        _engine.feed(bytes);
+        _log.info('pty.output listener fired bytes=${bytes.length} _exited=${_exited.value}');
+        if (_exited.value) return;
+        // `feedWithKitty` answers Kitty keyboard-protocol capability
+        // queries (`CSI ? u`) and applies flag pushes (`CSI > ... u`),
+        // writing responses back via `engine.write` (= PTY input). Apps
+        // like opencode / Claude Code / Codex CLI enable flag 1
+        // ("disambiguate escape codes") in response, which makes
+        // Shift+Enter arrive as `CSI 13 ; 2 u` instead of legacy `\r` —
+        // matching how real alacritty behaves and giving those TUIs a
+        // way to bind multiline entry to Shift+Enter.
+        _engine.feedWithKitty(bytes);
       },
       onDone: () {
         _log.info('PTY output stream done; calling _markExited');
@@ -592,7 +618,17 @@ class TerminalViewState extends State<TerminalView> {
     if (_exited.value || !mounted) return;
     _log.fine('_markExited fired');
     _exited.value = true;
+    // We intentionally do NOT call _pty?.close() here. On Windows,
+    // ClosePseudoConsole blocks the caller while the C-side read thread
+    // is still in ReadFile on the ConPTY output pipe, and that read only
+    // unwinds once the pipe handle is closed by the kernel — which the
+    // read thread itself owns. The pty_write liveness check (C-side
+    // WaitForSingleObject on the duplicated process handle) already
+    // makes post-exit writes a no-op, so the orphaned-ConPTY blocking
+    // issue is addressed without needing to call pty.close. The OS
+    // reclaims the ConPTY handle when the host process exits.
     widget.onExited?.call();
+    _log.fine('_markExited post-onExited');
   }
 
   // ── Engine → host signal forwarding ──────────────────────────────
