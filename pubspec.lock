@@ -154,8 +154,8 @@ packages:
     dependency: "direct main"
     description:
       path: "."
-      ref: "2026.07.01"
-      resolved-ref: bfce13b4cb331bc68ef49b9540c620cdb31e3a7c
+      ref: "2026.07.04"
+      resolved-ref: "5c995bfea0dc5b3866f5409292341e5ee2d0be6f"
       url: "https://github.com/invented-pro/flutter_alacritty"
     source: git
     version: "2.1.0"
@@ -184,11 +184,11 @@ packages:
     source: hosted
     version: "6.0.0"
   flutter_pty:
-    dependency: "direct main"
+    dependency: transitive
     description:
       path: "."
-      ref: "2026.07.01"
-      resolved-ref: "86fd86feb03a4e869e63fe22988eb44cc712de2d"
+      ref: "2026.07.03"
+      resolved-ref: "7ac05c07734111fdf619e34b9940232d2aaf8d42"
       url: "https://github.com/invented-pro/flutter_pty"
     source: git
     version: "0.4.2"

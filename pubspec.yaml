@@ -33,7 +33,9 @@ dependencies:
 
   ffi: ^2.1.0
   flutter_alacritty:
-    path: ../flutter_alacritty_freeze
+    git:
+      url: https://github.com/invented-pro/flutter_alacritty
+      ref: 2026.07.04
   archive: ^3.6.1
   crypto: ^3.0.6
   flutter_svg: ^2.0.10
@@ -45,10 +47,6 @@ dependencies:
   url_launcher: ^6.3.1
   window_manager: ^0.5.1
   flex_color_picker: ^3.8.0
-
-dependency_overrides:
-  flutter_pty:
-    path: ../flutter_pty_pkg
 
 dev_dependencies:
   flutter_test:
