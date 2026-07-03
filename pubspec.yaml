@@ -35,7 +35,7 @@ dependencies:
   flutter_alacritty:
     git:
       url: https://github.com/invented-pro/flutter_alacritty
-      ref: 2026.07.04
+      ref: 2026.07.05
   archive: ^3.6.1
   crypto: ^3.0.6
   flutter_svg: ^2.0.10
