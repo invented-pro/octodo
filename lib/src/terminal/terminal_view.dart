@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert' show utf8;
+import 'dart:typed_data' show BytesBuilder;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -297,6 +298,16 @@ class TerminalViewState extends State<TerminalView> {
   StreamSubscription<String>? _clipSub;
   StreamSubscription<void>? _clipLoadSub;
   StreamSubscription<void>? _bellSub;
+
+  // PTY output is coalesced into [_outputBuffer] and flushed once per
+  // [_flushInterval] so a `cat` of a large file or a verbose build log
+  // doesn't flood the UI isolate with one FFI call per ConPTY read.
+  // Without this, kHz-rate chunk arrival saturates the FFI bridge into
+  // the Rust alacritty core even though the parser itself is idle.
+  // 8 ms is well under one 60 Hz frame and invisible to interactive use.
+  final BytesBuilder _outputBuffer = BytesBuilder(copy: false);
+  Timer? _flushTimer;
+  static const Duration _flushInterval = Duration(milliseconds: 8);
 
   String _lastTitle = '';
   String _lastPwd = '';
@@ -689,18 +700,20 @@ class TerminalViewState extends State<TerminalView> {
           _slowHintTimer?.cancel();
           _log.info('FIRST PTY OUTPUT: ${bytes.length} bytes (after ${DateTime.now().millisecondsSinceEpoch - _startTimeMs}ms)');
         }
-        // `feedWithKitty` answers Kitty keyboard-protocol capability
-        // queries (`CSI ? u`) and applies flag pushes (`CSI > ... u`),
-        // writing responses back via `engine.write` (= PTY input). Apps
-        // like opencode / Claude Code / Codex CLI enable flag 1
-        // ("disambiguate escape codes") in response, which makes
-        // Shift+Enter arrive as `CSI 13 ; 2 u` instead of legacy `\r` —
-        // matching how real alacritty behaves and giving those TUIs a
-        // way to bind multiline entry to Shift+Enter.
-        _engine.feedWithKitty(bytes);
+        // Accumulate into [_outputBuffer] and (re)start a one-shot flush
+        // timer. The first chunk arms the timer; subsequent chunks within
+        // the window are folded into the same batch. The result is one
+        // FFI call to `feedWithKitty` per [_flushInterval] instead of one
+        // per ConPTY read — see [_flushOutput] and the field doc above.
+        _outputBuffer.add(bytes);
+        _flushTimer ??= Timer(_flushInterval, _flushOutput);
       },
       onDone: () {
         _log.info('PTY output stream done; calling _markExited');
+        // Drain any pending bytes synchronously before signaling exit so
+        // the trailing bytes from the dying shell aren't lost or held
+        // until the next tick.
+        _flushOutput();
         _markExited();
       },
     );
@@ -711,6 +724,28 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   late final int _startTimeMs = DateTime.now().millisecondsSinceEpoch;
+
+  /// Drain [_outputBuffer] into one [_engine.feedWithKitty] call.
+  ///
+  /// `feedWithKitty` answers Kitty keyboard-protocol capability queries
+  /// (`CSI ? u`) and applies flag pushes (`CSI > ... u`), writing
+  /// responses back via `engine.write` (= PTY input). Apps like opencode
+  /// / Claude Code / Codex CLI enable flag 1 ("disambiguate escape
+  /// codes") in response, which makes Shift+Enter arrive as `CSI 13 ; 2 u`
+  /// instead of legacy `\r` — matching how real alacritty behaves and
+  /// giving those TUIs a way to bind multiline entry to Shift+Enter.
+  ///
+  /// Coalescing the per-chunk FFI calls into one per [_flushInterval]
+  /// collapses thousands of micro-FFI calls/sec (under `cat` of a large
+  /// file or a build log) into one per frame budget, while keeping
+  /// end-to-end latency under one 60 Hz frame.
+  void _flushOutput() {
+    _flushTimer = null;
+    if (_outputBuffer.isEmpty) return;
+    final batch = _outputBuffer.takeBytes();
+    _outputBuffer.clear();
+    _engine.feedWithKitty(batch);
+  }
 
   void _markExited() {
     if (_exited.value || !mounted) return;
@@ -1050,6 +1085,9 @@ Positioned.fill(
   @override
   void dispose() {
     _slowHintTimer?.cancel();
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _flushOutput();
     _outputSub?.cancel();
     _engineOutputSub?.cancel();
     _clipSub?.cancel();
