@@ -1109,11 +1109,18 @@ class _AppShellState extends State<AppShell>
               child: IndexedStack(
                 index: _currentIndex.clamp(0, _workspaces.length - 1),
                 children: [
-                  for (final ws in _workspaces)
+                  for (var i = 0; i < _workspaces.length; i++)
                     TerminalWorkspace(
-                      key: ws.key,
-                      name: ws.name,
-                      color: ws.color,
+                      key: _workspaces[i].key,
+                      // Gate settings/theme setState on the focused
+                      // workspace so an offstage one doesn't pay an
+                      // O(M*K) rebuild on every setting change. The
+                      // offstage workspace still captures the new
+                      // value internally and re-applies on focus
+                      // (see TerminalWorkspaceState.didUpdateWidget).
+                      isFocused: i == _currentIndex,
+                      name: _workspaces[i].name,
+                      color: _workspaces[i].color,
                       availableShells: _shells,
                       onEmpty: () => _closeWorkspace(_currentIndex),
                     ),

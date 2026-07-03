@@ -87,6 +87,17 @@ class TerminalWorkspace extends StatefulWidget {
   /// left in an empty state.
   final VoidCallback? onEmpty;
 
+  /// Whether this workspace is the one currently displayed by the
+  /// parent's [IndexedStack]. The settings/theme `setState` listeners
+  /// gate on this flag so an offstage workspace doesn't pay an O(M*K)
+  /// rebuild on every setting change — only the focused workspace
+  /// does. Offstage workspaces still capture the new value internally
+  /// and re-apply on focus (see `TerminalWorkspaceState.didUpdateWidget`).
+  ///
+  /// Defaults to `true` so existing call sites (tests, docs examples)
+  /// behave as before. The AppShell always passes an explicit value.
+  final bool isFocused;
+
   const TerminalWorkspace({
     super.key,
     this.name = 'Workspace',
@@ -96,6 +107,7 @@ class TerminalWorkspace extends StatefulWidget {
     this.onNameChanged,
     this.onActiveChanged,
     this.onEmpty,
+    this.isFocused = true,
   });
 
   @override
@@ -129,6 +141,13 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// store's `watch` streams.
   late TerminalSettings _terminalSettings;
 
+  /// `true` when a settings/theme change arrived while we were
+  /// offstage (so we skipped the `setState` to avoid an O(M*K) rebuild
+  /// of a workspace the user can't see). On the next focus transition
+  /// (`didUpdateWidget` with `isFocused` flipping false→true) we
+  /// flush the deferred value with one `setState`.
+  bool _settingsDirty = false;
+
   /// Subscriptions to settings hot-reload streams. Cancelled on
   /// [dispose] to prevent memory leaks.
   final List<StreamSubscription<dynamic>> _settingsSubs = [];
@@ -144,11 +163,31 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     _initSettings();
   }
 
+  @override
+  void didUpdateWidget(covariant TerminalWorkspace oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // If we were offstage when settings/theme last changed, push the
+    // deferred value down now so the alacritty engines see the new
+    // font / palette on the frame we become focused. Without this,
+    // the offstage workspace would render with stale settings until
+    // the user happens to switch away and back.
+    if (!oldWidget.isFocused && widget.isFocused && _settingsDirty) {
+      _settingsDirty = false;
+      setState(() {});
+    }
+  }
+
   /// Subscribe to every user-facing terminal setting and rebuild
   /// `_terminalSettings` on change. One `setState` per change is fine
-  /// — the inner `TerminalView` instances compare snapshots in
-  /// `didUpdateWidget` and only call `_engine.reconfigure(...)` when
-  /// the snapshot actually differs.
+  /// for the focused workspace — the inner `TerminalView` instances
+  /// compare snapshots in `didUpdateWidget` and only call
+  /// `_engine.reconfigure(...)` when the snapshot actually differs.
+  ///
+  /// For OFFSTAGE workspaces we still update the in-memory
+  /// `_terminalSettings` (so the value isn't lost) but skip the
+  /// `setState` to avoid an O(M panes × K tabs) rebuild of a
+  /// workspace the user can't see. `didUpdateWidget` flushes the
+  /// deferred value when the workspace becomes focused again.
   void _initSettings() {
     final runtime = SettingsRuntime.instance;
     final catalog = runtime.catalog;
@@ -168,52 +207,41 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       terminalAnsiColors: palette.terminalAnsiColors,
     );
 
-    void bump() {
-      if (mounted) setState(() {});
+    /// Apply [next] to `_terminalSettings` and rebuild only when this
+    /// workspace is the focused one. Offstage: capture the value and
+    /// mark dirty; flush on the next focus transition.
+    void applyAndMaybeRebuild(TerminalSettings Function(TerminalSettings) next) {
+      if (!mounted) return;
+      final updated = next(_terminalSettings);
+      if (updated == _terminalSettings) return;
+      _terminalSettings = updated;
+      if (widget.isFocused) {
+        setState(() {});
+      } else {
+        _settingsDirty = true;
+      }
     }
 
-    _settingsSubs.add(runtime.store.watch<String>(t.fontFamily).listen((_) => bump()));
+    _settingsSubs.add(runtime.store.watch<String>(t.fontFamily).listen((v) {
+      applyAndMaybeRebuild((s) => s.copyWith(fontFamily: v));
+    }));
     _settingsSubs.add(runtime.store.watch<double>(t.fontSize).listen((v) {
-      if (mounted) {
-        setState(() {
-          _terminalSettings = _terminalSettings.copyWith(fontSize: v);
-        });
-      }
+      applyAndMaybeRebuild((s) => s.copyWith(fontSize: v));
     }));
     _settingsSubs.add(runtime.store.watch<CursorStyle>(t.cursorStyle).listen((v) {
-      if (mounted) {
-        setState(() {
-          _terminalSettings = _terminalSettings.copyWith(cursorStyle: v);
-        });
-      }
+      applyAndMaybeRebuild((s) => s.copyWith(cursorStyle: v));
     }));
     _settingsSubs.add(runtime.store.watch<bool>(t.cursorBlink).listen((v) {
-      if (mounted) {
-        setState(() {
-          _terminalSettings = _terminalSettings.copyWith(cursorBlink: v);
-        });
-      }
+      applyAndMaybeRebuild((s) => s.copyWith(cursorBlink: v));
     }));
     _settingsSubs.add(runtime.store.watch<int>(t.scrollbackLines).listen((v) {
-      if (mounted) {
-        setState(() {
-          _terminalSettings = _terminalSettings.copyWith(scrollbackLines: v);
-        });
-      }
+      applyAndMaybeRebuild((s) => s.copyWith(scrollbackLines: v));
     }));
     _settingsSubs.add(runtime.store.watch<bool>(t.copyOnSelect).listen((v) {
-      if (mounted) {
-        setState(() {
-          _terminalSettings = _terminalSettings.copyWith(copyOnSelect: v);
-        });
-      }
+      applyAndMaybeRebuild((s) => s.copyWith(copyOnSelect: v));
     }));
     _settingsSubs.add(runtime.store.watch<BellMode>(t.bellMode).listen((v) {
-      if (mounted) {
-        setState(() {
-          _terminalSettings = _terminalSettings.copyWith(bellMode: v);
-        });
-      }
+      applyAndMaybeRebuild((s) => s.copyWith(bellMode: v));
     }));
 
     // Theme (palette) change → swap terminal foreground, selection,
@@ -225,17 +253,14 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     _settingsSubs.add(runtime.store
         .watch<String>(catalog.general.themeName)
         .listen((_) {
-      if (mounted) {
-        final p = _resolvePalette(runtime);
-        setState(() {
-          _terminalSettings = _terminalSettings.copyWith(
+      if (!mounted) return;
+      final p = _resolvePalette(runtime);
+      applyAndMaybeRebuild((s) => s.copyWith(
             backgroundColor: p.surface0,
             terminalForeground: p.terminalForeground,
             terminalSelection: p.terminalSelection,
             terminalAnsiColors: p.terminalAnsiColors,
-          );
-        });
-      }
+          ));
     }));
   }
 
