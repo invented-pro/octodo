@@ -9,6 +9,7 @@ import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart';
 import 'shell_cwd.dart';
 import 'shell_profiles.dart';
+import 'terminal_settings_scope.dart';
 import 'terminal_view.dart';
 
 /// The user's home directory (%USERPROFILE%).
@@ -141,11 +142,22 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// store's `watch` streams.
   late TerminalSettings _terminalSettings;
 
+  /// Notifier that propagates settings/theme changes to descendant
+  /// [TerminalView]s via a [TerminalSettingsScope]. The workspace no
+  /// longer calls `setState` on a settings change — instead it
+  /// updates this notifier's `.value`, which triggers
+  /// `didChangeDependencies` on every listening [TerminalView] and
+  /// calls `_engine.reconfigure(...)` directly. This skips the
+  /// M-panes × K-tabs widget allocation + layout pass that the old
+  /// `setState` cascade used to cost on every settings toggle.
+  late TerminalSettingsNotifier _settingsNotifier;
+
   /// `true` when a settings/theme change arrived while we were
-  /// offstage (so we skipped the `setState` to avoid an O(M*K) rebuild
-  /// of a workspace the user can't see). On the next focus transition
-  /// (`didUpdateWidget` with `isFocused` flipping false→true) we
-  /// flush the deferred value with one `setState`.
+  /// offstage (so we skipped the notifier update to avoid the
+  /// `didChangeDependencies` cascade across tabs the user can't see).
+  /// On the next focus transition (`didUpdateWidget` with `isFocused`
+  /// flipping false→true) we flush the deferred value with one
+  /// notifier update.
   bool _settingsDirty = false;
 
   /// Subscriptions to settings hot-reload streams. Cancelled on
@@ -170,23 +182,28 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     // deferred value down now so the alacritty engines see the new
     // font / palette on the frame we become focused. Without this,
     // the offstage workspace would render with stale settings until
-    // the user happens to switch away and back.
+    // the user happens to switch away and back. Just nudge the
+    // notifier — `didChangeDependencies` on the TerminalViews will
+    // pick it up and call `_engine.reconfigure(...)`.
     if (!oldWidget.isFocused && widget.isFocused && _settingsDirty) {
       _settingsDirty = false;
-      setState(() {});
+      _settingsNotifier.value = _terminalSettings;
     }
   }
 
   /// Subscribe to every user-facing terminal setting and rebuild
-  /// `_terminalSettings` on change. One `setState` per change is fine
-  /// for the focused workspace — the inner `TerminalView` instances
-  /// compare snapshots in `didUpdateWidget` and only call
-  /// `_engine.reconfigure(...)` when the snapshot actually differs.
+  /// `_terminalSettings` on change. The workspace no longer calls
+  /// `setState` on settings changes — instead it updates
+  /// [_settingsNotifier], which propagates to every [TerminalView]
+  /// via the [TerminalSettingsScope] inherited widget and triggers
+  /// `didChangeDependencies` → `_engine.reconfigure(...)` directly,
+  /// skipping the M-panes × K-tabs widget rebuild that used to cost
+  /// on every settings toggle.
   ///
   /// For OFFSTAGE workspaces we still update the in-memory
   /// `_terminalSettings` (so the value isn't lost) but skip the
-  /// `setState` to avoid an O(M panes × K tabs) rebuild of a
-  /// workspace the user can't see. `didUpdateWidget` flushes the
+  /// notifier update to avoid the `didChangeDependencies` cascade
+  /// across tabs the user can't see. `didUpdateWidget` flushes the
   /// deferred value when the workspace becomes focused again.
   void _initSettings() {
     final runtime = SettingsRuntime.instance;
@@ -206,42 +223,47 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       terminalSelection: palette.terminalSelection,
       terminalAnsiColors: palette.terminalAnsiColors,
     );
+    _settingsNotifier = TerminalSettingsNotifier(_terminalSettings);
 
-    /// Apply [next] to `_terminalSettings` and rebuild only when this
-    /// workspace is the focused one. Offstage: capture the value and
-    /// mark dirty; flush on the next focus transition.
-    void applyAndMaybeRebuild(TerminalSettings Function(TerminalSettings) next) {
+    /// Apply [next] to `_terminalSettings` and propagate via the
+    /// notifier when this workspace is focused. Offstage: capture
+    /// the value and mark dirty; flush on the next focus transition.
+    void applyAndMaybeNotify(TerminalSettings Function(TerminalSettings) next) {
       if (!mounted) return;
       final updated = next(_terminalSettings);
       if (updated == _terminalSettings) return;
       _terminalSettings = updated;
       if (widget.isFocused) {
-        setState(() {});
+        // Setting `.value` on the notifier fires
+        // `didChangeDependencies` on every descendant TerminalView,
+        // which calls `_engine.reconfigure(...)` itself — no widget
+        // rebuild, no layout, no paint cascade.
+        _settingsNotifier.value = updated;
       } else {
         _settingsDirty = true;
       }
     }
 
     _settingsSubs.add(runtime.store.watch<String>(t.fontFamily).listen((v) {
-      applyAndMaybeRebuild((s) => s.copyWith(fontFamily: v));
+      applyAndMaybeNotify((s) => s.copyWith(fontFamily: v));
     }));
     _settingsSubs.add(runtime.store.watch<double>(t.fontSize).listen((v) {
-      applyAndMaybeRebuild((s) => s.copyWith(fontSize: v));
+      applyAndMaybeNotify((s) => s.copyWith(fontSize: v));
     }));
     _settingsSubs.add(runtime.store.watch<CursorStyle>(t.cursorStyle).listen((v) {
-      applyAndMaybeRebuild((s) => s.copyWith(cursorStyle: v));
+      applyAndMaybeNotify((s) => s.copyWith(cursorStyle: v));
     }));
     _settingsSubs.add(runtime.store.watch<bool>(t.cursorBlink).listen((v) {
-      applyAndMaybeRebuild((s) => s.copyWith(cursorBlink: v));
+      applyAndMaybeNotify((s) => s.copyWith(cursorBlink: v));
     }));
     _settingsSubs.add(runtime.store.watch<int>(t.scrollbackLines).listen((v) {
-      applyAndMaybeRebuild((s) => s.copyWith(scrollbackLines: v));
+      applyAndMaybeNotify((s) => s.copyWith(scrollbackLines: v));
     }));
     _settingsSubs.add(runtime.store.watch<bool>(t.copyOnSelect).listen((v) {
-      applyAndMaybeRebuild((s) => s.copyWith(copyOnSelect: v));
+      applyAndMaybeNotify((s) => s.copyWith(copyOnSelect: v));
     }));
     _settingsSubs.add(runtime.store.watch<BellMode>(t.bellMode).listen((v) {
-      applyAndMaybeRebuild((s) => s.copyWith(bellMode: v));
+      applyAndMaybeNotify((s) => s.copyWith(bellMode: v));
     }));
 
     // Theme (palette) change → swap terminal foreground, selection,
@@ -255,7 +277,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
         .listen((_) {
       if (!mounted) return;
       final p = _resolvePalette(runtime);
-      applyAndMaybeRebuild((s) => s.copyWith(
+      applyAndMaybeNotify((s) => s.copyWith(
             backgroundColor: p.surface0,
             terminalForeground: p.terminalForeground,
             terminalSelection: p.terminalSelection,
@@ -1128,37 +1150,44 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       ),
       child: Focus(
         autofocus: true,
-        child: _rootPane == null
-            ? const SizedBox.shrink()
-            : PaneLayout(
-                root: _rootPane!,
-                focusedContainer: _focusedContainer,
-                onFocusContainer: _focusContainer,
-                onFocusSurface: _selectSurfaceInContainer,
-                onNewSurface: (container) {
-                  _focusContainer(container);
-                  _newSurfaceInFocusedContainer();
-                },
-                onCloseSurface: _closeSurfaceInContainer,
-                onSplit: (container, surface, direction) {
-                  _focusContainer(container);
-                  _splitFocusedContainer(direction);
-                },
-                onResize: _onPaneResize,
-                onReorderSurface: _reorderSurfaceInContainer,
-                onMoveSurfaceBetweenContainers:
-                    _moveSurfaceBetweenContainers,
-                onDropToSplitEdge: _dropToSplitEdge,
-                isAnyTabDragActive: _isAnyTabDragActive,
-                onAnyDragActiveChanged: _setAnyDragActive,
-                workingDirectory: userHome,
-                terminalSettings: _terminalSettings,
-                availableShells: widget.availableShells,
-                defaultShellIndex: _defaultShellIndex,
-                onDefaultShellChanged: _openShellFromSelector,
-                isMaximized: _isMaximized,
-                onToggleMaximize: _toggleMaximize,
-              ),
+        child: TerminalSettingsScope(
+          // Owning notifier — every settings/theme change in
+          // [_initSettings] updates `_settingsNotifier.value`, which
+          // triggers `didChangeDependencies` on each TerminalView
+          // (which calls `_engine.reconfigure(...)` directly) without
+          // walking the workspace subtree.
+          notifier: _settingsNotifier,
+          child: _rootPane == null
+              ? const SizedBox.shrink()
+              : PaneLayout(
+                  root: _rootPane!,
+                  focusedContainer: _focusedContainer,
+                  onFocusContainer: _focusContainer,
+                  onFocusSurface: _selectSurfaceInContainer,
+                  onNewSurface: (container) {
+                    _focusContainer(container);
+                    _newSurfaceInFocusedContainer();
+                  },
+                  onCloseSurface: _closeSurfaceInContainer,
+                  onSplit: (container, surface, direction) {
+                    _focusContainer(container);
+                    _splitFocusedContainer(direction);
+                  },
+                  onResize: _onPaneResize,
+                  onReorderSurface: _reorderSurfaceInContainer,
+                  onMoveSurfaceBetweenContainers:
+                      _moveSurfaceBetweenContainers,
+                  onDropToSplitEdge: _dropToSplitEdge,
+                  isAnyTabDragActive: _isAnyTabDragActive,
+                  onAnyDragActiveChanged: _setAnyDragActive,
+                  workingDirectory: userHome,
+                  availableShells: widget.availableShells,
+                  defaultShellIndex: _defaultShellIndex,
+                  onDefaultShellChanged: _openShellFromSelector,
+                  isMaximized: _isMaximized,
+                  onToggleMaximize: _toggleMaximize,
+                ),
+        ),
       ),
     );
   }

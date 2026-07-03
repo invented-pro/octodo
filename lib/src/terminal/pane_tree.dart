@@ -644,13 +644,6 @@ class PaneLayout extends StatelessWidget {
   /// Working directory passed to each [TerminalView] (typically user home).
   final String workingDirectory;
 
-  /// Snapshot of every user-facing terminal setting (font, cursor,
-  /// scrollback, bell, copy-on-select). Workspace rebuilds this whenever
-  /// any setting changes; `TerminalView.didUpdateWidget` re-applies via
-  /// `_engine.reconfigure(_buildConfig())` so changes are live without
-  /// re-spawning the shell.
-  final TerminalSettings terminalSettings;
-
   /// Available shell profiles for the new-tab/shell-selector menu.
   final List<ShellProfile> availableShells;
   final int defaultShellIndex;
@@ -680,7 +673,6 @@ class PaneLayout extends StatelessWidget {
     required this.onMoveSurfaceBetweenContainers,
     required this.onDropToSplitEdge,
     required this.workingDirectory,
-    required this.terminalSettings,
     required this.availableShells,
     required this.defaultShellIndex,
     required this.onDefaultShellChanged,
@@ -844,7 +836,10 @@ Widget _buildContainer(BuildContext context, PaneContainer container) {
                           key: ValueKey<String>(surface.id),
                           surface: surface,
                           workingDirectory: workingDirectory,
-                          settings: terminalSettings,
+                          // Settings (font / cursor / palette) arrive
+                          // via the surrounding TerminalSettingsScope,
+                          // not as a widget prop, so a settings change
+                          // doesn't force this subtree to rebuild.
                           onTitleChanged: (title) {
                             surface.title = title;
                           },

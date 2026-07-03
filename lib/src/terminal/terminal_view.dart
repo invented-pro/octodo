@@ -19,6 +19,7 @@ import '../settings/settings_catalog.dart';
 import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart' show Surface;
+import 'terminal_settings_scope.dart';
 
 final Logger _log = moduleLogger('terminal.terminal_view');
 
@@ -26,13 +27,13 @@ final Logger _log = moduleLogger('terminal.terminal_view');
 /// engine (font, background, cursor, scrollback, bell, copy-on-select, and the
 /// active palette's terminal color set).
 ///
-/// `TerminalWorkspace` rebuilds this whenever any of the underlying setting
-/// stores emits a change; it's then passed down to `PaneLayout` → `TerminalView`.
-/// `TerminalView.didUpdateWidget` compares against the previous snapshot and
-/// calls `engine.reconfigure(_buildConfig())` so changes apply live without
-/// re-spawning the shell.
+/// `TerminalWorkspace` publishes each new snapshot via the
+/// [TerminalSettingsScope] inherited notifier. `TerminalView` reads it in
+/// `didChangeDependencies`, compares against its cached value, and calls
+/// `engine.reconfigure(_buildConfig())` so changes apply live without
+/// re-spawning the shell — no widget rebuild, no layout, no paint cascade.
 ///
-/// Value-equality (==/hashCode) drives the didUpdateWidget change detection;
+/// Value-equality (==/hashCode) drives the change detection;
 /// no need for the parent to wrap it in a manual `Key`.
 class TerminalSettings {
   const TerminalSettings({
@@ -160,10 +161,11 @@ int _cursorShapeFromEnum(CursorStyle s) => switch (s) {
     };
 
 /// Stock 16-color ANSI palette mirroring `fa.TerminalConfig.defaults()`
-/// (the canonical alacritty Tango-ish default). Only referenced by
-/// the bare-constructor default of [TerminalView] (the test path);
-/// production code always feeds a palette-derived snapshot via
-/// [TerminalSettings]. Kept top-level so it's `const`-constructible.
+/// (the canonical alacritty Tango-ish default). Used as the fallback
+/// when a [TerminalView] is constructed outside a
+/// [TerminalSettingsScope] (the test path); production code always
+/// feeds a palette-derived snapshot via [TerminalSettingsScope]. Kept
+/// top-level so it's `const`-constructible.
 const List<Color> _defaultAnsiColors = [
   Color(0xFF000000), Color(0xFFCC0000), Color(0xFF4E9A06), Color(0xFFC4A000),
   Color(0xFF3465A4), Color(0xFF75507B), Color(0xFF06989A), Color(0xFFD3D7CF),
@@ -171,10 +173,28 @@ const List<Color> _defaultAnsiColors = [
   Color(0xFF729FCF), Color(0xFFAD7FA8), Color(0xFF34E2E2), Color(0xFFEEEEEC),
 ];
 
+/// Fallback [TerminalSettings] used by [TerminalView] only when no
+/// [TerminalSettingsScope] is present in the tree (the test path).
+/// Matches `fa.TerminalConfig.defaults()` so a bare `TerminalView`
+/// looks like a stock alacritty without any caller-supplied settings.
+const TerminalSettings _defaultTerminalSettings = TerminalSettings(
+  fontFamily: 'Cascadia Code',
+  fontSize: 14.0,
+  backgroundColor: Color(0xFF181818),
+  cursorStyle: CursorStyle.block,
+  cursorBlink: true,
+  scrollbackLines: 10000,
+  copyOnSelect: false,
+  bellMode: BellMode.visual,
+  terminalForeground: Color(0xFFD8D8D8),
+  terminalSelection: Color(0xFF3A6EA5),
+  terminalAnsiColors: _defaultAnsiColors,
+);
+
 /// Element-wise equality for the 16 ANSI color lists. Used in
-/// `didUpdateWidget` to detect a palette-driven reconfigure without
-/// falling back to identity comparison (two lists built from the
-/// same palette compare equal but are different instances).
+/// `didChangeDependencies` to detect a palette-driven reconfigure
+/// without falling back to identity comparison (two lists built from
+/// the same palette compare equal but are different instances).
 bool _ansiListEq(List<Color> a, List<Color> b) {
   if (identical(a, b)) return true;
   if (a.length != b.length) return false;
@@ -231,12 +251,6 @@ class TerminalView extends StatefulWidget {
   /// Initial working directory for the spawned shell.
   final String? workingDirectory;
 
-  /// Current user-facing terminal settings (font, cursor, scrollback, bell,
-  /// copy-on-select). The widget caches this in its state and re-applies on
-  /// didUpdateWidget whenever the workspace rebuilds with a new snapshot —
-  /// no need to re-spawn the shell.
-  final TerminalSettings settings;
-
   /// Called whenever the terminal title (set via OSC 0/2 escape sequences)
   /// changes.
   final ValueChanged<String>? onTitleChanged;
@@ -253,24 +267,6 @@ class TerminalView extends StatefulWidget {
     super.key,
     required this.surface,
     this.workingDirectory,
-    this.settings = const TerminalSettings(
-      fontFamily: 'Cascadia Code',
-      fontSize: 14.0,
-      backgroundColor: Color(0xFF181818),
-      cursorStyle: CursorStyle.block,
-      cursorBlink: true,
-      scrollbackLines: 10000,
-      copyOnSelect: false,
-      bellMode: BellMode.visual,
-      // Defaults match fa.TerminalConfig.defaults().colors so a
-      // TerminalView constructed without a TerminalSettings snapshot
-      // (i.e. bypassing TerminalWorkspace — the test path) still
-      // looks like a stock alacritty. Production code always passes
-      // a snapshot resolved from the active palette.
-      terminalForeground: Color(0xFFD8D8D8),
-      terminalSelection: Color(0xFF3A6EA5),
-      terminalAnsiColors: _defaultAnsiColors,
-    ),
     this.onTitleChanged,
     this.onPwdChanged,
     this.onExited,
@@ -311,6 +307,17 @@ class TerminalViewState extends State<TerminalView> {
 
   String _lastTitle = '';
   String _lastPwd = '';
+
+  // ── Settings propagation ────────────────────────────────────────
+  //
+  // The workspace publishes its [TerminalSettings] via
+  // [TerminalSettingsScope]; we cache the latest snapshot here and
+  // apply non-font changes through `_engine.reconfigure(...)` on
+  // every `didChangeDependencies`. The font size is tracked
+  // separately so `Ctrl+0` (zoom-reset) always returns to the
+  // user's chosen baseline, not whatever the engine was last
+  // reconfigured to.
+  TerminalSettings? _settings;
 
   // ── Reactive state (signals) ──────────────────────────────────────
   //
@@ -357,10 +364,24 @@ class TerminalViewState extends State<TerminalView> {
   @override
   void initState() {
     super.initState();
-    _defaultFontSize = widget.settings.fontSize;
+    // Pull the initial settings from the surrounding
+    // TerminalSettingsScope WITHOUT registering a dependency —
+    // `dependOnInheritedWidgetOfExactType` isn't safe in initState
+    // (the framework hasn't wired up dependencies yet). The first
+    // `didChangeDependencies` call picks up the dependency and
+    // re-applies if anything raced. Production code always mounts
+    // us inside a scope (TerminalWorkspace), but the
+    // `?? _defaultTerminalSettings` fallback keeps a stray test
+    // harness from crashing if it builds a bare TerminalView.
+    _settings = context
+            .getInheritedWidgetOfExactType<TerminalSettingsScope>()
+            ?.notifier
+            ?.value ??
+        _defaultTerminalSettings;
+    _defaultFontSize = _settings!.fontSize;
     _fontSize = _defaultFontSize;
-    _copyOnSelect = widget.settings.copyOnSelect;
-    _bellMode = widget.settings.bellMode;
+    _copyOnSelect = _settings!.copyOnSelect;
+    _bellMode = _settings!.bellMode;
     _log.fine('initState: creating engine (program="${widget.surface.program}", cwd=${widget.workingDirectory})');
 
     _engine = fa.TerminalEngine(config: _buildConfig());
@@ -436,7 +457,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   fa.TerminalConfig _buildConfig() {
-    final s = widget.settings;
+    final s = _settings ?? _defaultTerminalSettings;
     // Bell duration: `none` disables both visual flash AND audible feedback
     // (the engine skips emitting bell events when duration is 0; the host
     // skips SystemSound.play for `none`). `visual`/`sound` both enable the
@@ -536,10 +557,21 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   @override
-  void didUpdateWidget(covariant TerminalView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    final s = widget.settings;
-    if (s == oldWidget.settings) return;
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Re-applies the latest [TerminalSettings] from the surrounding
+    // [TerminalSettingsScope] to the alacritty engine. Called once
+    // after initState (with the same value we already cached) and
+    // then every time the workspace publishes a new snapshot via
+    // the notifier. No widget rebuild, no layout, no paint — just
+    // an FFI `_engine.reconfigure(...)` when non-font fields
+    // actually changed.
+    final s = TerminalSettingsScope.of(context);
+    final old = _settings;
+    if (identical(old, s)) return;
+    if (old != null && s == old) return;
+
+    _settings = s;
 
     // Cache values the host-side hooks depend on so the next bell event
     // or selection-end uses the latest snapshot.
@@ -555,7 +587,7 @@ class TerminalViewState extends State<TerminalView> {
     // cascading _pty.resize that some shells clear-on-resize (cmd.exe,
     // certain WSL bash configs). Reconfigure is reserved for non-font
     // changes (cursor, scrollback, bell).
-    final fontChanged = _fontSize != s.fontSize;
+    final fontChanged = old == null || _fontSize != s.fontSize;
     if (fontChanged) {
       _fontSize = s.fontSize;
       _defaultFontSize = s.fontSize;
@@ -578,16 +610,17 @@ class TerminalViewState extends State<TerminalView> {
     // WSL bash configs clear-on-resize via TIOCSWINSZ). For font-family
     // changes we DO reconfigure so the engine's stored config stays in
     // sync — otherwise new tabs use the old family until restart.
-    final colorsChanged = s.backgroundColor != oldWidget.settings.backgroundColor ||
-        s.terminalForeground != oldWidget.settings.terminalForeground ||
-        s.terminalSelection != oldWidget.settings.terminalSelection ||
-        !_ansiListEq(
-            s.terminalAnsiColors, oldWidget.settings.terminalAnsiColors);
-    final engineSideChange = s.cursorStyle != oldWidget.settings.cursorStyle ||
-        s.cursorBlink != oldWidget.settings.cursorBlink ||
-        s.scrollbackLines != oldWidget.settings.scrollbackLines ||
-        s.bellMode != oldWidget.settings.bellMode ||
-        s.fontFamily != oldWidget.settings.fontFamily ||
+    final colorsChanged = old == null ||
+        s.backgroundColor != old.backgroundColor ||
+        s.terminalForeground != old.terminalForeground ||
+        s.terminalSelection != old.terminalSelection ||
+        !_ansiListEq(s.terminalAnsiColors, old.terminalAnsiColors);
+    final engineSideChange = old == null ||
+        s.cursorStyle != old.cursorStyle ||
+        s.cursorBlink != old.cursorBlink ||
+        s.scrollbackLines != old.scrollbackLines ||
+        s.bellMode != old.bellMode ||
+        s.fontFamily != old.fontFamily ||
         colorsChanged;
     if (engineSideChange) {
       _engine.reconfigure(_buildConfig());
@@ -605,13 +638,9 @@ class TerminalViewState extends State<TerminalView> {
     // Explicitly call refreshView() again here as a belt-and-suspenders
     // for the case where fontFamily was the only field that changed
     // AND the painter construction runs after the first refreshView.
-    if (s.fontFamily != oldWidget.settings.fontFamily) {
+    if (old != null && s.fontFamily != old.fontFamily) {
       _engine.refreshView();
     }
-    // NOTE: no setState here. StatefulElement.update always calls
-    // `rebuild(force: true)` after didUpdateWidget (see framework.dart
-    // ~line 6007), so the next build will pick up the cached
-    // _bellMode / _fontSize changes automatically.
   }
 
   /// Re-quote [s] so it survives `cmd.exe`'s `/c` parser as a single token.
@@ -980,7 +1009,7 @@ Positioned.fill(
     // TIOCSWINSZ (cmd.exe, WSL bash with certain configs), wiping
     // the visible content.
     textStyle: fa.TerminalStyle(
-      family: widget.settings.fontFamily,
+      family: (_settings ?? _defaultTerminalSettings).fontFamily,
       fallback: const [
         _cjkFontFamily,
         'Microsoft YaHei UI',
