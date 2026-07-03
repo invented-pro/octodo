@@ -258,6 +258,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "4.12.0"
+  just_font_scan:
+    dependency: "direct main"
+    description:
+      name: just_font_scan
+      sha256: a8206db7a5402315592447c2188a4a0205c4256422d859001ba59f2d433801ba
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "0.3.0"
   leak_tracker:
     dependency: transitive
     description:
@@ -315,7 +323,7 @@ packages:
     source: hosted
     version: "0.13.0"
   meta:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: meta
       sha256: "1741988757a65eb6b36abe716829688cf01910bbf91c34354ff7ec1c3de2b349"

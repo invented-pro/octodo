@@ -90,20 +90,19 @@ class TerminalSettings {
     Color? terminalForeground,
     Color? terminalSelection,
     List<Color>? terminalAnsiColors,
-  }) =>
-      TerminalSettings(
-        fontFamily: fontFamily ?? this.fontFamily,
-        fontSize: fontSize ?? this.fontSize,
-        backgroundColor: backgroundColor ?? this.backgroundColor,
-        cursorStyle: cursorStyle ?? this.cursorStyle,
-        cursorBlink: cursorBlink ?? this.cursorBlink,
-        scrollbackLines: scrollbackLines ?? this.scrollbackLines,
-        copyOnSelect: copyOnSelect ?? this.copyOnSelect,
-        bellMode: bellMode ?? this.bellMode,
-        terminalForeground: terminalForeground ?? this.terminalForeground,
-        terminalSelection: terminalSelection ?? this.terminalSelection,
-        terminalAnsiColors: terminalAnsiColors ?? this.terminalAnsiColors,
-      );
+  }) => TerminalSettings(
+    fontFamily: fontFamily ?? this.fontFamily,
+    fontSize: fontSize ?? this.fontSize,
+    backgroundColor: backgroundColor ?? this.backgroundColor,
+    cursorStyle: cursorStyle ?? this.cursorStyle,
+    cursorBlink: cursorBlink ?? this.cursorBlink,
+    scrollbackLines: scrollbackLines ?? this.scrollbackLines,
+    copyOnSelect: copyOnSelect ?? this.copyOnSelect,
+    bellMode: bellMode ?? this.bellMode,
+    terminalForeground: terminalForeground ?? this.terminalForeground,
+    terminalSelection: terminalSelection ?? this.terminalSelection,
+    terminalAnsiColors: terminalAnsiColors ?? this.terminalAnsiColors,
+  );
 
   @override
   bool operator ==(Object other) =>
@@ -123,18 +122,18 @@ class TerminalSettings {
 
   @override
   int get hashCode => Object.hash(
-        fontFamily,
-        fontSize,
-        backgroundColor,
-        cursorStyle,
-        cursorBlink,
-        scrollbackLines,
-        copyOnSelect,
-        bellMode,
-        terminalForeground,
-        terminalSelection,
-        Object.hashAll(terminalAnsiColors),
-      );
+    fontFamily,
+    fontSize,
+    backgroundColor,
+    cursorStyle,
+    cursorBlink,
+    scrollbackLines,
+    copyOnSelect,
+    bellMode,
+    terminalForeground,
+    terminalSelection,
+    Object.hashAll(terminalAnsiColors),
+  );
 
   /// List equality helper — Dart's `List` lacks a built-in `==`, so
   /// `terminalAnsiColors` would compare by identity and miss any
@@ -156,10 +155,10 @@ class TerminalSettings {
 /// index — using the name explicitly here keeps it robust to future enum
 /// reordering.
 int _cursorShapeFromEnum(CursorStyle s) => switch (s) {
-      CursorStyle.block => 0,
-      CursorStyle.underline => 1,
-      CursorStyle.bar => 2,
-    };
+  CursorStyle.block => 0,
+  CursorStyle.underline => 1,
+  CursorStyle.bar => 2,
+};
 
 /// Stock 16-color ANSI palette mirroring `fa.TerminalConfig.defaults()`
 /// (the canonical alacritty Tango-ish default). Used as the fallback
@@ -168,10 +167,22 @@ int _cursorShapeFromEnum(CursorStyle s) => switch (s) {
 /// feeds a palette-derived snapshot via [TerminalSettingsScope]. Kept
 /// top-level so it's `const`-constructible.
 const List<Color> _defaultAnsiColors = [
-  Color(0xFF000000), Color(0xFFCC0000), Color(0xFF4E9A06), Color(0xFFC4A000),
-  Color(0xFF3465A4), Color(0xFF75507B), Color(0xFF06989A), Color(0xFFD3D7CF),
-  Color(0xFF555753), Color(0xFFEF2929), Color(0xFF8AE234), Color(0xFFFCE94F),
-  Color(0xFF729FCF), Color(0xFFAD7FA8), Color(0xFF34E2E2), Color(0xFFEEEEEC),
+  Color(0xFF000000),
+  Color(0xFFCC0000),
+  Color(0xFF4E9A06),
+  Color(0xFFC4A000),
+  Color(0xFF3465A4),
+  Color(0xFF75507B),
+  Color(0xFF06989A),
+  Color(0xFFD3D7CF),
+  Color(0xFF555753),
+  Color(0xFFEF2929),
+  Color(0xFF8AE234),
+  Color(0xFFFCE94F),
+  Color(0xFF729FCF),
+  Color(0xFFAD7FA8),
+  Color(0xFF34E2E2),
+  Color(0xFFEEEEEC),
 ];
 
 /// Fallback [TerminalSettings] used by [TerminalView] only when no
@@ -216,15 +227,14 @@ int _toAlacrittyColor(Color c) {
 }
 
 /// Visual flash length for `fa.TerminalView`'s bell animation when the
-  /// bell mode is `visual`. Matches alacritty's default 100ms.
-  const Duration _kVisualBellDuration = Duration(milliseconds: 100);
+/// bell mode is `visual`. Matches alacritty's default 100ms.
+const Duration _kVisualBellDuration = Duration(milliseconds: 100);
 
-  /// Default colors palette from [fa.TerminalConfig.defaults]. Cached so
+/// Default colors palette from [fa.TerminalConfig.defaults]. Cached so
 /// `_buildConfig` doesn't allocate a fresh TerminalColors + 16-ANSI
 /// array on every call (called from initState, every settings change,
 /// every zoom step).
-final fa.TerminalColors _defaultColors =
-    fa.TerminalConfig.defaults().colors;
+final fa.TerminalColors _defaultColors = fa.TerminalConfig.defaults().colors;
 
 /// A self-contained terminal emulator widget backed by `flutter_alacritty`
 /// (Alacritty Rust core via flutter_rust_bridge + `flutter_pty` for ConPTY).
@@ -280,6 +290,7 @@ class TerminalView extends StatefulWidget {
 class TerminalViewState extends State<TerminalView> {
   late final fa.TerminalEngine _engine;
   late final fa.TerminalController _controller;
+
   /// Borrowed from `widget.surface.focusNode`. The Surface owns it
   /// (and disposes it in `Surface.dispose()`); this state MUST NOT
   /// dispose it from its own `dispose()`. Borrowing rather than
@@ -336,11 +347,100 @@ class TerminalViewState extends State<TerminalView> {
   Timer? _slowHintTimer;
 
   // Font fallback chain: Cascadia Code (ASCII) + Microsoft YaHei (CJK).
-  // The primary family comes from `TerminalSettings.fontFamily`; the
-  // fallback chain stays constant so CJK glyphs always render even when
-  // the user picks an ASCII-only font.
+  // The primary is always a known-good monospace Latin font; the
+  // user's pick goes into the fallback list so it only kicks in for
+  // the script it actually covers (e.g. "Adobe Devanagari" for
+  // Devanagari glyphs). See _buildConfig for why.
   static const _cjkFontFamily = 'Microsoft YaHei';
   static const _lineHeight = 1.2;
+  @visibleForTesting
+  static const safeFontFamilyFallback = 'Cascadia Code';
+
+  /// Module-level cache: does [family] have a usable Latin 'W'
+  /// advance? Keyed by the raw family string. The result is a
+  /// property of the OS font set + the family name, not of any
+  /// widget instance, so the cache lives outside the State.
+  ///
+  /// The OS font set is bounded (typically <1000 faces on a
+  /// Windows install), so a plain map doesn't grow without limit
+  /// over a session. If the user later installs a new font and
+  /// the cache misses, the validation just runs once on the next
+  /// rebuild and gets cached.
+  static final Map<String, bool> _latinAdvanceCache = <String, bool>{};
+
+  /// Returns `true` if [family] can render the ASCII characters
+  /// used by [CellMetrics.measure] ("W"*20). `false` for
+  /// script-specific faces (e.g. "Adobe Devanagari", "MS Mincho"),
+  /// for non-existent family names, AND for broken faces whose
+  /// 'W' glyph exists in the cmap but renders as 0-width — all
+  /// three cases would otherwise let `CellMetrics.measure`
+  /// return 0 and crash flutter_alacritty's `LayoutBuilder`
+  /// with `Infinity or NaN toInt`.
+  ///
+  /// Detection: lay out "W"*20 in the test family and compare to
+  /// the platform default. We use the same probe as the
+  /// production measurement (a 20-W string) so the result
+  /// predicts the production behavior. Three conditions must
+  /// all hold for a family to be "Latin":
+  ///
+  ///   1. `testTp.width` is positive — a 0-width 'W' (broken
+  ///      cmap entry, font still loading, etc.) is treated as
+  ///      non-Latin and pinned to the safe fallback.
+  ///   2. `testTp.width` is finite — `NaN` / `Infinity` from
+  ///      a malformed font are treated as non-Latin.
+  ///   3. `testTp.width` differs from the default by more than
+  ///      0.1 logical pixels — a missing or non-Latin family
+  ///      falls back to the default and produces the same
+  ///      width; a real match produces a different width
+  ///      (every installed face has at least slightly
+  ///      different 'W' metrics from every other one).
+  ///
+  /// Threshold 0.1px is enough to separate "different face"
+  /// from "same face" — the smallest reasonable advance delta
+  /// between two distinct installed fonts is well above this
+  /// at any default size.
+  @visibleForTesting
+  static bool hasLatinAdvance(String family) {
+    if (family.isEmpty) return false;
+    if (family == safeFontFamilyFallback) return true;
+    final cached = _latinAdvanceCache[family];
+    if (cached != null) return cached;
+
+    const sample = 20;
+    const probe = 'W';
+    final probeText = probe * sample;
+    final defaultTp = TextPainter(
+      text: TextSpan(text: probeText, style: const TextStyle()),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final testTp = TextPainter(
+      text: TextSpan(
+        text: probeText,
+        style: TextStyle(fontFamily: family),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final testWidth = testTp.width;
+    final result =
+        testWidth > 0 &&
+        testWidth.isFinite &&
+        (testWidth - defaultTp.width).abs() > 0.1;
+    _latinAdvanceCache[family] = result;
+    return result;
+  }
+
+  /// The family to use as the primary in the engine's [FontConfig]
+  /// and in `fa.TerminalView`'s [TerminalStyle]. Returns [family]
+  /// if it has Latin 'W' advance; otherwise returns
+  /// [safeFontFamilyFallback]. The original [family] (when
+  /// non-Latin) should still be added to the fallback list so it
+  /// covers the script it actually has glyphs for.
+  @visibleForTesting
+  static String effectiveLatinPrimary(String family) {
+    if (family.isEmpty) return safeFontFamilyFallback;
+    if (hasLatinAdvance(family)) return family;
+    return safeFontFamilyFallback;
+  }
 
   /// Baseline font size (drives zoom-reset). Tracked across settings
   /// changes via `didUpdateWidget` so `Ctrl+0` always returns to the
@@ -374,7 +474,8 @@ class TerminalViewState extends State<TerminalView> {
     // us inside a scope (TerminalWorkspace), but the
     // `?? _defaultTerminalSettings` fallback keeps a stray test
     // harness from crashing if it builds a bare TerminalView.
-    _settings = context
+    _settings =
+        context
             .getInheritedWidgetOfExactType<TerminalSettingsScope>()
             ?.notifier
             ?.value ??
@@ -384,7 +485,9 @@ class TerminalViewState extends State<TerminalView> {
     _copyOnSelect = _settings!.copyOnSelect;
     _bellMode = _settings!.bellMode;
     if (_log.isLoggable(Level.FINE)) {
-      _log.fine('initState: creating engine (program="${widget.surface.program}", cwd=${widget.workingDirectory})');
+      _log.fine(
+        'initState: creating engine (program="${widget.surface.program}", cwd=${widget.workingDirectory})',
+      );
     }
 
     _engine = fa.TerminalEngine(config: _buildConfig());
@@ -392,7 +495,9 @@ class TerminalViewState extends State<TerminalView> {
     // each cross the FFI boundary. Once-per-tab today, but the gate
     // also future-proofs against a per-frame caller.
     if (_log.isLoggable(Level.FINE)) {
-      _log.fine('initState: engine created, grid rows=${_engine.grid.rows} cols=${_engine.grid.columns} gen=${_engine.grid.generation}');
+      _log.fine(
+        'initState: engine created, grid rows=${_engine.grid.rows} cols=${_engine.grid.columns} gen=${_engine.grid.generation}',
+      );
     }
     _controller = fa.TerminalController()..attach(_engine);
     _engine.title.addListener(_syncTitle);
@@ -443,7 +548,9 @@ class TerminalViewState extends State<TerminalView> {
     try {
       _log.fine('initState: calling _engine.resize(80, 24)');
       _engine.resize(columns: 80, rows: 24);
-      _log.fine('initState: AFTER resize, grid rows=${_engine.grid.rows} cols=${_engine.grid.columns} gen=${_engine.grid.generation}');
+      _log.fine(
+        'initState: AFTER resize, grid rows=${_engine.grid.rows} cols=${_engine.grid.columns} gen=${_engine.grid.generation}',
+      );
     } catch (e, st) {
       _log.severe('initState: engine.resize threw: $e\n$st');
     }
@@ -458,7 +565,9 @@ class TerminalViewState extends State<TerminalView> {
     // the post-frame callbacks and forces a real repaint cycle.
     Timer(Duration.zero, () {
       if (mounted) {
-        _log.fine('Timer(zero) firing setState; grid rows=${_engine.grid.rows} cols=${_engine.grid.columns} gen=${_engine.grid.generation}');
+        _log.fine(
+          'Timer(zero) firing setState; grid rows=${_engine.grid.rows} cols=${_engine.grid.columns} gen=${_engine.grid.generation}',
+        );
         setState(() {});
       }
     });
@@ -481,8 +590,10 @@ class TerminalViewState extends State<TerminalView> {
     // by the workspace when it builds the snapshot from a palette);
     // we still check defensively before copyWith so a malformed
     // extension of TerminalSettings can't crash every TerminalView.
-    assert(s.terminalAnsiColors.length == 16,
-        'terminalAnsiColors must be exactly 16 entries');
+    assert(
+      s.terminalAnsiColors.length == 16,
+      'terminalAnsiColors must be exactly 16 entries',
+    );
     final ansiPacked = s.terminalAnsiColors
         .map(_toAlacrittyColor)
         .toList(growable: false);
@@ -509,8 +620,28 @@ class TerminalViewState extends State<TerminalView> {
         ansi: ansiPacked,
       ),
       font: fa.FontConfig(
-        family: s.fontFamily,
-        fallback: const [
+        // The primary is the user's pick IF it has a Latin
+        // 'W' advance; otherwise we pin to the safe Latin face
+        // (Cascadia Code) so the Rust renderer's cell metrics
+        // don't degenerate. The non-Latin pick is still added to
+        // the fallback list so it covers the script it's meant
+        // for (e.g. "Adobe Devanagari" for Devanagari glyphs,
+        // "Microsoft YaHei" for CJK). See `hasLatinAdvance`
+        // for how the Latin check works and why a script-only
+        // face would otherwise crash flutter_alacritty's
+        // `CellMetrics.measure` with `Infinity or NaN toInt`.
+        family: effectiveLatinPrimary(s.fontFamily),
+        fallback: <String>[
+          // Only add the user's pick to the fallback when it
+          // is NOT already serving as the primary (i.e., when
+          // we had to pin the primary to safeFontFamilyFallback
+          // because the pick is non-Latin). Latin picks are
+          // already the primary, so the fallback would be a
+          // no-op for them.
+          if (s.fontFamily.isNotEmpty &&
+              s.fontFamily != safeFontFamilyFallback &&
+              s.fontFamily != effectiveLatinPrimary(s.fontFamily))
+            s.fontFamily,
           _cjkFontFamily,
           'Microsoft YaHei UI',
           'SimSun',
@@ -526,10 +657,7 @@ class TerminalViewState extends State<TerminalView> {
         defaultBlinking: s.cursorBlink,
         blinkTimeout: 5,
       ),
-      scrolling: fa.ScrollConfig(
-        history: s.scrollbackLines,
-        multiplier: 3,
-      ),
+      scrolling: fa.ScrollConfig(history: s.scrollbackLines, multiplier: 3),
       bell: fa.BellConfig(
         color: 0xFFFFFF,
         duration: bellDurationMs,
@@ -618,12 +746,14 @@ class TerminalViewState extends State<TerminalView> {
     // WSL bash configs clear-on-resize via TIOCSWINSZ). For font-family
     // changes we DO reconfigure so the engine's stored config stays in
     // sync — otherwise new tabs use the old family until restart.
-    final colorsChanged = old == null ||
+    final colorsChanged =
+        old == null ||
         s.backgroundColor != old.backgroundColor ||
         s.terminalForeground != old.terminalForeground ||
         s.terminalSelection != old.terminalSelection ||
         !_ansiListEq(s.terminalAnsiColors, old.terminalAnsiColors);
-    final engineSideChange = old == null ||
+    final engineSideChange =
+        old == null ||
         s.cursorStyle != old.cursorStyle ||
         s.cursorBlink != old.cursorBlink ||
         s.scrollbackLines != old.scrollbackLines ||
@@ -670,7 +800,7 @@ class TerminalViewState extends State<TerminalView> {
     return '"${s.replaceAll('"', r'\"')}"';
   }
 
-/// Spawn the configured shell via [fa.FlutterPtyBackend].
+  /// Spawn the configured shell via [fa.FlutterPtyBackend].
   void _start() {
     // Workaround for a Windows-only flutter_pty 0.4.2 spawn quirk: the
     // native `build_command` (flutter_pty/src/flutter_pty_win.c) emits
@@ -702,7 +832,8 @@ class TerminalViewState extends State<TerminalView> {
       // git-bash, or cmd.exe either makes them fail (wsl tries to find a
       // Linux binary called "NoProfile") or is silently ignored. Force it
       // for *Shell pwsh/Windows PowerShell only.
-      final isPowerShell = realProgram.toLowerCase().contains('pwsh') ||
+      final isPowerShell =
+          realProgram.toLowerCase().contains('pwsh') ||
           realProgram.toLowerCase().contains('powershell');
       final realArgs = <String>[
         ...widget.surface.args,
@@ -716,7 +847,9 @@ class TerminalViewState extends State<TerminalView> {
       ];
     }
 
-    _log.fine('_start: ptyProgram=$ptyProgram ptyArgs=$ptyArgs (program="${widget.surface.program}") cwd=${widget.workingDirectory}');
+    _log.fine(
+      '_start: ptyProgram=$ptyProgram ptyArgs=$ptyArgs (program="${widget.surface.program}") cwd=${widget.workingDirectory}',
+    );
     final pty = fa.FlutterPtyBackend(
       rows: 24,
       columns: 80,
@@ -739,7 +872,9 @@ class TerminalViewState extends State<TerminalView> {
           // the framework would skip the emit at OFF level, but
           // argument evaluation still runs otherwise.
           if (_log.isLoggable(Level.INFO)) {
-            _log.info('FIRST PTY OUTPUT: ${bytes.length} bytes (after ${DateTime.now().millisecondsSinceEpoch - _startTimeMs}ms)');
+            _log.info(
+              'FIRST PTY OUTPUT: ${bytes.length} bytes (after ${DateTime.now().millisecondsSinceEpoch - _startTimeMs}ms)',
+            );
           }
         }
         // Accumulate into [_outputBuffer] and (re)start a one-shot flush
@@ -836,7 +971,9 @@ class TerminalViewState extends State<TerminalView> {
     // tick (LayoutBuilder.postFrame → onViewportResize) and the
     // grid property reads cross the FFI boundary.
     if (_log.isLoggable(Level.FINE)) {
-      _log.fine('_onViewportResize: cols=$cols rows=$rows (engine grid=${_engine.grid.rows}x${_engine.grid.columns} gen=${_engine.grid.generation})');
+      _log.fine(
+        '_onViewportResize: cols=$cols rows=$rows (engine grid=${_engine.grid.rows}x${_engine.grid.columns} gen=${_engine.grid.generation})',
+      );
     }
     _pty?.resize(rows, cols);
   }
@@ -867,9 +1004,9 @@ class TerminalViewState extends State<TerminalView> {
     if (target == null) return;
     final ok = await launchUrl(target, mode: LaunchMode.externalApplication);
     if (!ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not open $target')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not open $target')));
     }
   }
 
@@ -925,23 +1062,26 @@ class TerminalViewState extends State<TerminalView> {
   // binding alacritty ships in `defaultTerminalShortcuts` (Copy,
   // Paste, ToggleSearch, plus the unshifted zoom forms).
   static final Map<ShortcutActivator, Intent>
-      _alacrittyShortcutsWithShiftVariants = <ShortcutActivator, Intent>{
+  _alacrittyShortcutsWithShiftVariants = <ShortcutActivator, Intent>{
     ...defaultTerminalShortcuts,
     // Shift variants of the zoom bindings. The unshifted forms are
     // already in `defaultTerminalShortcuts` — we only need to add
     // the shift variants alacritty doesn't ship.
-    SingleActivator(LogicalKeyboardKey.equal,
-        control: true, shift: true): const IncreaseFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.add,
-        control: true, shift: true): const IncreaseFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.minus,
-        control: true, shift: true): const DecreaseFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.numpadSubtract,
-        control: true, shift: true): const DecreaseFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.digit0,
-        control: true, shift: true): const ResetFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.numpad0,
-        control: true, shift: true): const ResetFontSizeIntent(),
+    SingleActivator(LogicalKeyboardKey.equal, control: true, shift: true):
+        const IncreaseFontSizeIntent(),
+    SingleActivator(LogicalKeyboardKey.add, control: true, shift: true):
+        const IncreaseFontSizeIntent(),
+    SingleActivator(LogicalKeyboardKey.minus, control: true, shift: true):
+        const DecreaseFontSizeIntent(),
+    SingleActivator(
+      LogicalKeyboardKey.numpadSubtract,
+      control: true,
+      shift: true,
+    ): const DecreaseFontSizeIntent(),
+    SingleActivator(LogicalKeyboardKey.digit0, control: true, shift: true):
+        const ResetFontSizeIntent(),
+    SingleActivator(LogicalKeyboardKey.numpad0, control: true, shift: true):
+        const ResetFontSizeIntent(),
   };
 
   // ── Public action API ────────────────────────────────────────────
@@ -971,8 +1111,13 @@ class TerminalViewState extends State<TerminalView> {
 
   // ── Build ────────────────────────────────────────────────────────
 
-@override
+  @override
   Widget build(BuildContext context) {
+    // The user's font pick. Used in two places below (the engine
+    // config in `_buildConfig` and the widget's `textStyle` here);
+    // hoisted to a local so the long conditional in `textStyle`'s
+    // fallback list stays readable.
+    final fontFamilyPick = (_settings ?? _defaultTerminalSettings).fontFamily;
     return CallbackShortcuts(
       bindings: {
         ...TerminalBindings.build(
@@ -998,147 +1143,159 @@ class TerminalViewState extends State<TerminalView> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-// fa.TerminalView directly (no outer GestureDetector /
-// Listener / MouseRegion wrapper). Reasoning:
-//   * The original v6.0.0 tree wrapped fa.TerminalView in a
-//     GestureDetector whose internal `RenderPointerListener`
-//     silently swallowed `PointerHoverEvent` (no matching
-//     callback → no `super.handleEvent` forwarding), so the
-//     I-beam cursor never appeared at the pane edges.
-//   * The pane-edge cursor + selection bug was traced (v6.0.1
-//     investigation) to the always-present translucent `MetaData`
-//     of `_PaneDropOverlay`'s four `_EdgeSplitZone` DragTargets
-//     — fixed by rendering them only while a tab drag is in
-//     flight (see pane_tree.dart).
-//   * fa.TerminalView calls `_focus.requestFocus()` inside its
-//     own `__pointerOnDown`, and carries its own `MouseRegion`
-//     that dynamically resolves to text / click based on cell
-//     content (link detection).
-//
-// `padding: EdgeInsets.symmetric(horizontal: cellWidthHalf)` —
-// ~half a letter width. fa.TerminalView uses `widget.padding`
-// to shrink the available area before computing cols/rows (so the
-// PTY grid sizes to the padded area, not the full pane — last
-// column wouldn't be clipped), then wraps the tree in a Padding.
-// Cascadia Code is roughly `fontSize * 0.6` wide per glyph at
-// the default lineHeight, so half-letter ≈ `fontSize * 0.3`.
-Positioned.fill(
-  child: fa.TerminalView(
-    _engine,
-    controller: _controller,
-    focusNode: _focus,
-    autofocus: true,
-    padding: EdgeInsets.symmetric(horizontal: _fontSize * 0.3),
-    // Pass the actual font size/family to fa.TerminalView so its
-    // internal cell metrics match ours. Without this, fa.TerminalView
-    // uses `TerminalStyle.defaults()` (size: 14) regardless of our
-    // settings, which causes LayoutBuilder to compute a wrong grid
-    // size and triggers a cascading `_engine.resize` + `_pty.resize`
-    // on every settings change → some shells clear their screen on
-    // TIOCSWINSZ (cmd.exe, WSL bash with certain configs), wiping
-    // the visible content.
-    textStyle: fa.TerminalStyle(
-      family: (_settings ?? _defaultTerminalSettings).fontFamily,
-      fallback: const [
-        _cjkFontFamily,
-        'Microsoft YaHei UI',
-        'SimSun',
-        'Consolas',
-        'monospace',
-      ],
-      size: _fontSize,
-      lineHeight: _lineHeight,
-    ),
-    // Font zoom — let alacritty own it. We pass `defaultTerminalShortcuts`
-    // plus our shift variants so users who hold Shift while pressing
-    // `=` / `-` / `0` (yielding `+` / `_` / `)` on US layouts) get
-    // zoom too. Alacritty's stock `defaultTerminalShortcuts` only
-    // ships the unshifted forms (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`), so
-    // without this merge a `Ctrl+Shift+=` press would fall through
-    // to `encodeKey` and write `+` into the PTY.
-    shortcuts: _alacrittyShortcutsWithShiftVariants,
-    // Visual bell: fa.TerminalView paints its own overlay when
-    // bellDuration > zero (driven by settings.bellMode == visual).
-    bellDuration: _bellDurationForView,
-    onViewportResize: _onViewportResize,
-    onSecondaryTapUp: _onSecondaryTapUp,
-    onLinkActivate: _onLinkActivate,
-  ),
-),
-            SignalBuilder(
-              builder: (_) => _exited.value
-                  ? const Positioned.fill(
-                      child: ColoredBox(
-                        color: Colors.black54,
-                        child: Center(
-                          child: Text(
-                            '[process exited]',
-                            style: TextStyle(
-                              color: Color(0xFFBDBDBD),
-                              fontSize: 16,
-                            ),
+          // fa.TerminalView directly (no outer GestureDetector /
+          // Listener / MouseRegion wrapper). Reasoning:
+          //   * The original v6.0.0 tree wrapped fa.TerminalView in a
+          //     GestureDetector whose internal `RenderPointerListener`
+          //     silently swallowed `PointerHoverEvent` (no matching
+          //     callback → no `super.handleEvent` forwarding), so the
+          //     I-beam cursor never appeared at the pane edges.
+          //   * The pane-edge cursor + selection bug was traced (v6.0.1
+          //     investigation) to the always-present translucent `MetaData`
+          //     of `_PaneDropOverlay`'s four `_EdgeSplitZone` DragTargets
+          //     — fixed by rendering them only while a tab drag is in
+          //     flight (see pane_tree.dart).
+          //   * fa.TerminalView calls `_focus.requestFocus()` inside its
+          //     own `__pointerOnDown`, and carries its own `MouseRegion`
+          //     that dynamically resolves to text / click based on cell
+          //     content (link detection).
+          //
+          // `padding: EdgeInsets.symmetric(horizontal: cellWidthHalf)` —
+          // ~half a letter width. fa.TerminalView uses `widget.padding`
+          // to shrink the available area before computing cols/rows (so the
+          // PTY grid sizes to the padded area, not the full pane — last
+          // column wouldn't be clipped), then wraps the tree in a Padding.
+          // Cascadia Code is roughly `fontSize * 0.6` wide per glyph at
+          // the default lineHeight, so half-letter ≈ `fontSize * 0.3`.
+          Positioned.fill(
+            child: fa.TerminalView(
+              _engine,
+              controller: _controller,
+              focusNode: _focus,
+              autofocus: true,
+              padding: EdgeInsets.symmetric(horizontal: _fontSize * 0.3),
+              // Pass the actual font size/family to fa.TerminalView so its
+              // internal cell metrics match ours. Without this, fa.TerminalView
+              // uses `TerminalStyle.defaults()` (size: 14) regardless of our
+              // settings, which causes LayoutBuilder to compute a wrong grid
+              // size and triggers a cascading `_engine.resize` + `_pty.resize`
+              // on every settings change → some shells clear their screen on
+              // TIOCSWINSZ (cmd.exe, WSL bash with certain configs), wiping
+              // the visible content.
+              textStyle: fa.TerminalStyle(
+                // Mirror `_buildConfig`: primary is the user's
+                // pick when it has Latin 'W' advance, otherwise
+                // pinned to safeFontFamilyFallback (Cascadia
+                // Code). The non-Latin pick goes into the
+                // fallback list for the script it actually
+                // covers. See `hasLatinAdvance` for the
+                // detection logic and the crash class this
+                // avoids in `CellMetrics.measure`.
+                family: effectiveLatinPrimary(fontFamilyPick),
+                fallback: <String>[
+                  if (fontFamilyPick.isNotEmpty &&
+                      fontFamilyPick != safeFontFamilyFallback &&
+                      fontFamilyPick != effectiveLatinPrimary(fontFamilyPick))
+                    fontFamilyPick,
+                  _cjkFontFamily,
+                  'Microsoft YaHei UI',
+                  'SimSun',
+                  'Consolas',
+                  'monospace',
+                ],
+                size: _fontSize,
+                lineHeight: _lineHeight,
+              ),
+              // Font zoom — let alacritty own it. We pass `defaultTerminalShortcuts`
+              // plus our shift variants so users who hold Shift while pressing
+              // `=` / `-` / `0` (yielding `+` / `_` / `)` on US layouts) get
+              // zoom too. Alacritty's stock `defaultTerminalShortcuts` only
+              // ships the unshifted forms (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`), so
+              // without this merge a `Ctrl+Shift+=` press would fall through
+              // to `encodeKey` and write `+` into the PTY.
+              shortcuts: _alacrittyShortcutsWithShiftVariants,
+              // Visual bell: fa.TerminalView paints its own overlay when
+              // bellDuration > zero (driven by settings.bellMode == visual).
+              bellDuration: _bellDurationForView,
+              onViewportResize: _onViewportResize,
+              onSecondaryTapUp: _onSecondaryTapUp,
+              onLinkActivate: _onLinkActivate,
+            ),
+          ),
+          SignalBuilder(
+            builder: (_) => _exited.value
+                ? const Positioned.fill(
+                    child: ColoredBox(
+                      color: Colors.black54,
+                      child: Center(
+                        child: Text(
+                          '[process exited]',
+                          style: TextStyle(
+                            color: Color(0xFFBDBDBD),
+                            fontSize: 16,
                           ),
                         ),
                       ),
-                    )
-                  : const SizedBox.shrink(),
-            ),
-            SignalBuilder(
-              builder: (_) {
-                if (_hasReceivedOutput.value || _exited.value) {
-                  return const SizedBox.shrink();
-                }
-                return Positioned.fill(
-                  child: IgnorePointer(
-                    child: ColoredBox(
-                      color: Colors.black,
-                      child: Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  Color(0xFF89B4FA),
-                                ),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+          SignalBuilder(
+            builder: (_) {
+              if (_hasReceivedOutput.value || _exited.value) {
+                return const SizedBox.shrink();
+              }
+              return Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(
+                    color: Colors.black,
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Color(0xFF89B4FA),
                               ),
                             ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'Starting shell…',
-                              style: TextStyle(
-                                color: Color(0xFFBDBDBD),
-                                fontSize: 13,
-                              ),
+                          ),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'Starting shell…',
+                            style: TextStyle(
+                              color: Color(0xFFBDBDBD),
+                              fontSize: 13,
                             ),
-                            SignalBuilder(
-                              builder: (_) => _showSlowHint.value
-                                  ? const Padding(
-                                      padding: EdgeInsets.only(top: 6),
-                                      child: Text(
-                                        'WSL cold start can take 10-30 s on first launch.',
-                                        style: TextStyle(
-                                          color: Color(0xFF7F7F7F),
-                                          fontSize: 11,
-                                        ),
+                          ),
+                          SignalBuilder(
+                            builder: (_) => _showSlowHint.value
+                                ? const Padding(
+                                    padding: EdgeInsets.only(top: 6),
+                                    child: Text(
+                                      'WSL cold start can take 10-30 s on first launch.',
+                                      style: TextStyle(
+                                        color: Color(0xFF7F7F7F),
+                                        fontSize: 11,
                                       ),
-                                    )
-                                  : const SizedBox.shrink(),
-                            ),
-                          ],
-                        ),
+                                    ),
+                                  )
+                                : const SizedBox.shrink(),
+                          ),
+                        ],
                       ),
                     ),
                   ),
-                );
-              },
-            ),
-],
-        ),
-      );
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   @override

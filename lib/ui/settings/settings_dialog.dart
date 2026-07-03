@@ -17,6 +17,7 @@ import '../../src/log.dart';
 import '../../src/settings/setting.dart';
 import '../../src/settings/settings_catalog.dart';
 import '../../src/settings/settings_runtime.dart';
+import '../../src/terminal/font_family_options.dart';
 import '../../src/theme/palette_context.dart';
 import 'chrome/settings_card.dart';
 import 'chrome/settings_row.dart';
@@ -41,17 +42,24 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   StreamSubscription<void>? _writeSub;
 
+  /// Owned by the dialog for its lifetime. Constructed here so the
+  /// scan is kicked off exactly once when the panel opens and
+  /// disposed automatically when the panel closes. Descendants
+  /// read the result via [FontFamilyCacheScope.of].
+  late final FontFamilyCache _fontCache = FontFamilyCache()..load();
+
   @override
   void initState() {
     super.initState();
-    _writeSub = SettingsRuntime.instance.store
-        .watchWrites()
-        .listen((_) => _onWrite());
+    _writeSub = SettingsRuntime.instance.store.watchWrites().listen(
+      (_) => _onWrite(),
+    );
   }
 
   @override
   void dispose() {
     _writeSub?.cancel();
+    _fontCache.dispose();
     super.dispose();
   }
 
@@ -71,47 +79,48 @@ class _SettingsDialogState extends State<SettingsDialog> {
     final runtime = SettingsRuntime.instance;
     final catalog = runtime.catalog;
     final palette = context.palette;
-    return Dialog(
-      backgroundColor: palette.dialogSurface,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: palette.outline, width: 1),
-      ),
-      child: SizedBox(
-        width: 900,
-        height: 640,
-        child: Column(
-          children: [
-            _Header(showJsonPaths: _showJsonPaths,
-                onToggleJsonPaths: (v) => setState(() => _showJsonPaths = v)),
-            Expanded(
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 200,
-                    child: _Sidebar(
-                      selected: _section,
-                      onSelect: (s) => setState(() => _section = s),
-                    ),
-                  ),
-                  Container(width: 1, color: palette.rowSurface),
-                  Expanded(
-                    child: _Detail(
-                      section: _section,
-                      catalog: catalog,
-                      showJsonPaths: _showJsonPaths,
-                    ),
-                  ),
-                ],
+    return FontFamilyCacheScope(
+      notifier: _fontCache,
+      child: Dialog(
+        backgroundColor: palette.dialogSurface,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: palette.outline, width: 1),
+        ),
+        child: SizedBox(
+          width: 900,
+          height: 640,
+          child: Column(
+            children: [
+              _Header(
+                showJsonPaths: _showJsonPaths,
+                onToggleJsonPaths: (v) => setState(() => _showJsonPaths = v),
               ),
-            ),
-            _Footer(
-              runtime: runtime,
-              lastWrite: _lastWrite,
-              pulse: _pulse,
-            ),
-          ],
+              Expanded(
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 200,
+                      child: _Sidebar(
+                        selected: _section,
+                        onSelect: (s) => setState(() => _section = s),
+                      ),
+                    ),
+                    Container(width: 1, color: palette.rowSurface),
+                    Expanded(
+                      child: _Detail(
+                        section: _section,
+                        catalog: catalog,
+                        showJsonPaths: _showJsonPaths,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _Footer(runtime: runtime, lastWrite: _lastWrite, pulse: _pulse),
+            ],
+          ),
         ),
       ),
     );
@@ -145,15 +154,17 @@ class _Header extends StatelessWidget {
               color: palette.accentBlue.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(6),
             ),
-            child: Icon(Icons.settings,
-                size: 16, color: palette.accentBlue),
+            child: Icon(Icons.settings, size: 16, color: palette.accentBlue),
           ),
           const SizedBox(width: 10),
-          Text('Settings',
-              style: TextStyle(
-                  color: palette.textPrimary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600)),
+          Text(
+            'Settings',
+            style: TextStyle(
+              color: palette.textPrimary,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
           const SizedBox(width: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -161,23 +172,25 @@ class _Header extends StatelessWidget {
               color: palette.rowSurface,
               borderRadius: BorderRadius.circular(3),
             ),
-            child: Text(kAppName,
-                style: TextStyle(
-                    color: palette.textSecondary,
-                    fontSize: 10,
-                    fontFamily: 'monospace')),
+            child: Text(
+              kAppName,
+              style: TextStyle(
+                color: palette.textSecondary,
+                fontSize: 10,
+                fontFamily: 'monospace',
+              ),
+            ),
           ),
           const Spacer(),
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Show JSON paths',
-                  style: TextStyle(color: palette.textSecondary, fontSize: 11)),
-              const SizedBox(width: 6),
-              Switch(
-                value: showJsonPaths,
-                onChanged: onToggleJsonPaths,
+              Text(
+                'Show JSON paths',
+                style: TextStyle(color: palette.textSecondary, fontSize: 11),
               ),
+              const SizedBox(width: 6),
+              Switch(value: showJsonPaths, onChanged: onToggleJsonPaths),
             ],
           ),
           IconButton(
@@ -261,19 +274,20 @@ class _SidebarItem extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Icon(icon, size: 15,
-                  color: selected
-                      ? palette.accentBlue
-                      : palette.textMuted),
+              Icon(
+                icon,
+                size: 15,
+                color: selected ? palette.accentBlue : palette.textMuted,
+              ),
               const SizedBox(width: 10),
-              Text(label,
-                  style: TextStyle(
-                      color: selected
-                          ? palette.textPrimary
-                          : palette.textSecondary,
-                      fontSize: 12,
-                      fontWeight:
-                          selected ? FontWeight.w600 : FontWeight.w500)),
+              Text(
+                label,
+                style: TextStyle(
+                  color: selected ? palette.textPrimary : palette.textSecondary,
+                  fontSize: 12,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                ),
+              ),
             ],
           ),
         ),
@@ -317,15 +331,17 @@ class _Detail extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SettingsSectionHeader('TERMINAL'),
-        SettingsCard(children: [
-          _rowFor(catalog.terminal.fontFamily, showJsonPaths, store),
-          _rowFor(catalog.terminal.fontSize, showJsonPaths, store),
-          _rowFor(catalog.terminal.cursorStyle, showJsonPaths, store),
-          _rowFor(catalog.terminal.cursorBlink, showJsonPaths, store),
-          _rowFor(catalog.terminal.scrollbackLines, showJsonPaths, store),
-          _rowFor(catalog.terminal.copyOnSelect, showJsonPaths, store),
-          _rowFor(catalog.terminal.bellMode, showJsonPaths, store),
-        ]),
+        SettingsCard(
+          children: [
+            _rowFor(catalog.terminal.fontFamily, showJsonPaths, store),
+            _rowFor(catalog.terminal.fontSize, showJsonPaths, store),
+            _rowFor(catalog.terminal.cursorStyle, showJsonPaths, store),
+            _rowFor(catalog.terminal.cursorBlink, showJsonPaths, store),
+            _rowFor(catalog.terminal.scrollbackLines, showJsonPaths, store),
+            _rowFor(catalog.terminal.copyOnSelect, showJsonPaths, store),
+            _rowFor(catalog.terminal.bellMode, showJsonPaths, store),
+          ],
+        ),
       ],
     );
   }
@@ -336,14 +352,16 @@ class _Detail extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SettingsSectionHeader('GENERAL'),
-        SettingsCard(children: [
-          // Iterate `catalog.general.all` so the row order is owned
-          // by the catalog (single source of truth) — keeps the UI
-          // and the catalog tests in sync without duplicating the
-          // declaration in two places.
-          for (final s in catalog.general.all)
-            _rowFor(s, showJsonPaths, store),
-        ]),
+        SettingsCard(
+          children: [
+            // Iterate `catalog.general.all` so the row order is owned
+            // by the catalog (single source of truth) — keeps the UI
+            // and the catalog tests in sync without duplicating the
+            // declaration in two places.
+            for (final s in catalog.general.all)
+              _rowFor(s, showJsonPaths, store),
+          ],
+        ),
       ],
     );
   }
@@ -357,55 +375,58 @@ class _Detail extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SettingsSectionHeader('SETTINGS FILE'),
-        SettingsCard(children: [
-          _PathRow(store: store, isPrimary: true),
-        ]),
+        SettingsCard(children: [_PathRow(store: store, isPrimary: true)]),
         const SettingsSectionHeader('ACTIONS'),
-        SettingsCard(children: [
-          _ActionRow(
-            icon: Icons.folder_open,
-            title: 'Reveal settings file in file manager',
-            subtitle: 'Open the location of the settings file.',
-            onTap: () => runtime.hostActions.revealInFileManager(path),
-          ),
-          _ActionRow(
-            icon: Icons.edit,
-            title: 'Open settings file in text editor',
-            subtitle: 'Edit the JSONC file directly. Changes hot-reload.',
-            onTap: () => runtime.hostActions.openInExternalEditor(path),
-          ),
-          _ActionRow(
-            icon: Icons.restart_alt,
-            title: 'Reset all to defaults',
-            subtitle: 'Clear every setting in the settings file.',
-            destructive: true,
-            onTap: () async {
-              final confirm = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  backgroundColor: palette.dialogSurface,
-                  title: const Text('Reset all settings?'),
-                  content: const Text(
-                      'This clears every value in the settings file. Defaults will be used.'),
-                  actions: [
-                    TextButton(
+        SettingsCard(
+          children: [
+            _ActionRow(
+              icon: Icons.folder_open,
+              title: 'Reveal settings file in file manager',
+              subtitle: 'Open the location of the settings file.',
+              onTap: () => runtime.hostActions.revealInFileManager(path),
+            ),
+            _ActionRow(
+              icon: Icons.edit,
+              title: 'Open settings file in text editor',
+              subtitle: 'Edit the JSONC file directly. Changes hot-reload.',
+              onTap: () => runtime.hostActions.openInExternalEditor(path),
+            ),
+            _ActionRow(
+              icon: Icons.restart_alt,
+              title: 'Reset all to defaults',
+              subtitle: 'Clear every setting in the settings file.',
+              destructive: true,
+              onTap: () async {
+                final confirm = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    backgroundColor: palette.dialogSurface,
+                    title: const Text('Reset all settings?'),
+                    content: const Text(
+                      'This clears every value in the settings file. Defaults will be used.',
+                    ),
+                    actions: [
+                      TextButton(
                         onPressed: () => Navigator.of(ctx).pop(false),
-                        child: const Text('Cancel')),
-                    TextButton(
+                        child: const Text('Cancel'),
+                      ),
+                      TextButton(
                         style: TextButton.styleFrom(
                           foregroundColor: palette.accentPink,
                         ),
                         onPressed: () => Navigator.of(ctx).pop(true),
-                        child: const Text('Reset')),
-                  ],
-                ),
-              );
-              if (confirm == true) {
-                await runtime.store.resetAll();
-              }
-            },
-          ),
-        ]),
+                        child: const Text('Reset'),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirm == true) {
+                  await runtime.store.resetAll();
+                }
+              },
+            ),
+          ],
+        ),
       ],
     );
   }
@@ -469,10 +490,7 @@ class _Detail extends StatelessWidget {
 class _PathRow extends StatelessWidget {
   final dynamic store;
   final bool isPrimary;
-  const _PathRow({
-    required this.store,
-    required this.isPrimary,
-  });
+  const _PathRow({required this.store, required this.isPrimary});
 
   @override
   Widget build(BuildContext context) {
@@ -491,8 +509,8 @@ class _PathRow extends StatelessWidget {
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints.tightFor(width: 26, height: 26),
             tooltip: 'Reveal',
-            onPressed: () =>
-                SettingsRuntime.instance.hostActions.revealInFileManager(store.path),
+            onPressed: () => SettingsRuntime.instance.hostActions
+                .revealInFileManager(store.path),
           ),
           IconButton(
             icon: const Icon(Icons.copy, size: 14),
@@ -588,9 +606,7 @@ class _Footer extends StatelessWidget {
                   : palette.rowSurface,
               borderRadius: BorderRadius.circular(4),
               border: Border.all(
-                color: pulse
-                    ? palette.accentGreen
-                    : palette.outline,
+                color: pulse ? palette.accentGreen : palette.outline,
                 width: 1,
               ),
             ),
@@ -600,17 +616,13 @@ class _Footer extends StatelessWidget {
                 Icon(
                   pulse ? Icons.check_circle : Icons.save_outlined,
                   size: 12,
-                  color: pulse
-                      ? palette.accentGreen
-                      : palette.textMuted,
+                  color: pulse ? palette.accentGreen : palette.textMuted,
                 ),
                 const SizedBox(width: 5),
                 Text(
                   pulse ? 'Saved' : 'Last saved: ${_ago(lastWrite)}',
                   style: TextStyle(
-                    color: pulse
-                        ? palette.accentGreen
-                        : palette.textSecondary,
+                    color: pulse ? palette.accentGreen : palette.textSecondary,
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
                   ),
@@ -627,8 +639,7 @@ class _Footer extends StatelessWidget {
             child: MouseRegion(
               cursor: SystemMouseCursors.click,
               child: GestureDetector(
-                onTap: () =>
-                    runtime.hostActions.revealInFileManager(path),
+                onTap: () => runtime.hostActions.revealInFileManager(path),
                 child: Text(
                   path,
                   style: TextStyle(
@@ -671,8 +682,9 @@ void revealInExplorer(String path) {
   } else if (Platform.isMacOS) {
     _startOrLog('open', ['-R', path], action: 'reveal in Finder');
   } else {
-    _startOrLog('xdg-open', [File(path).parent.path],
-        action: 'reveal in file manager');
+    _startOrLog('xdg-open', [
+      File(path).parent.path,
+    ], action: 'reveal in file manager');
   }
 }
 
@@ -691,13 +703,19 @@ void openInTextEditor(String path) {
 /// silently dropped. The user gets no UI feedback either way — these
 /// helpers are best-effort — but the log line is the only signal we'd
 /// have when a settings dialog button appears to do nothing.
-Future<void> _startOrLog(String executable, List<String> args,
-    {required String action}) async {
+Future<void> _startOrLog(
+  String executable,
+  List<String> args, {
+  required String action,
+}) async {
   try {
     await Process.start(executable, args);
   } catch (e, st) {
     _osLog.log(
-        Level.WARNING, '$action failed ($executable ${args.join(' ')}): $e', e, st);
+      Level.WARNING,
+      '$action failed ($executable ${args.join(' ')}): $e',
+      e,
+      st,
+    );
   }
 }
-
