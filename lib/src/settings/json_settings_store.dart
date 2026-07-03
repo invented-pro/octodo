@@ -44,19 +44,26 @@ class JsonSettingsStore implements SettingsStore {
   @override
   Future<void> set<T>(Setting<T> key, T value) async {
     _values[key.key] = key.codec.toJson(value);
-    await _flush();
+    // Pass the typed value straight through to the per-key watcher —
+    // it avoids both firing unrelated keys' streams AND the
+    // get<T>(key) re-read on the changed key.
+    await _flushAndEmit(changedKey: key.key, changedValue: value);
   }
 
   @override
   Future<void> reset<T>(Setting<T> key) async {
     _values.remove(key.key);
-    await _flush();
+    // Null tells the watcher to re-read (it'll fall back to
+    // defaultValue because the JSON map no longer has the key).
+    await _flushAndEmit(changedKey: key.key);
   }
 
   @override
   Future<void> resetAll() async {
     _values.clear();
-    await _flush();
+    // Multiple keys changed — fan out to every per-key stream so
+    // each watcher re-reads against the now-empty map.
+    await _flushAndEmit();
   }
 
   @override
@@ -68,7 +75,19 @@ class JsonSettingsStore implements SettingsStore {
       key.key,
       () => StreamController<dynamic>.broadcast(),
     );
-    return controller.stream.cast<dynamic>().map((_) => get<T>(key)).distinct().asBroadcastStream();
+    // Per-key event is either:
+    //   * the typed value pushed directly by [set] (skips the
+    //     get+re-codec round-trip on self-writes), OR
+    //   * `null` from [reset], [resetAll], or the file-watcher's
+    //     external-change path — fall back to a fresh [get<T>]
+    //     against the in-memory map.
+    // `is T` correctly distinguishes the two cases because the typed
+    // values pushed by [set] always satisfy `is T` for the
+    // corresponding watch call.
+    return controller.stream
+        .map((v) => v is T ? v : get<T>(key))
+        .distinct()
+        .asBroadcastStream();
   }
 
   /// Subscribe to file-level changes (for layered store).
@@ -141,26 +160,41 @@ String get path => _file.path;
     }
   }
 
-  Future<void> _flush() async {
-    try {
-      await _file.parent.create(recursive: true);
-      final tmp = File('${_file.path}.tmp');
-      tmp.writeAsStringSync(jsoncEncode(_values));
-      tmp.renameSync(_file.path);
-      final stat = _file.statSync();
-      _lastMtime = stat.modified;
-      _lastSize = stat.size;
+  /// Persist the in-memory [_values] to disk and notify watchers.
+///
+/// Pass [changedKey] (and optionally [changedValue]) for a targeted
+/// notification — only that key's stream is fired. Omit both to fan
+/// out to every per-key stream (used by [resetAll] and the
+/// file-watcher path).
+///
+/// On write failure we skip the emit entirely so callers don't see
+/// a "Saved" / reconfigure event for a value that didn't actually
+/// land on disk. The next periodic reload reapplies whatever the
+/// file does contain.
+Future<void> _flushAndEmit({String? changedKey, Object? changedValue}) async {
+  try {
+    await _file.parent.create(recursive: true);
+    final tmp = File('${_file.path}.tmp');
+    tmp.writeAsStringSync(jsoncEncode(_values));
+    tmp.renameSync(_file.path);
+    final stat = _file.statSync();
+    _lastMtime = stat.modified;
+    _lastSize = stat.size;
+    if (changedKey != null) {
+      _emitKey(changedKey, changedValue);
+    } else {
       _emitAll();
-      _emitWrites();
-    } catch (e, st) {
-      // Don't emit `watchWrites` on failure — the on-disk state
-      // doesn't match the in-memory state, so a "Saved" indicator
-      // would be lying. The user will see the next periodic reload
-      // reapply the previous on-disk version.
-      _log.log(Level.SEVERE,
-          'Failed to write settings to ${_file.path}', e, st);
     }
+    _emitWrites();
+  } catch (e, st) {
+    // Don't emit `watchWrites` on failure — the on-disk state
+    // doesn't match the in-memory state, so a "Saved" indicator
+    // would be lying. The user will see the next periodic reload
+    // reapply the previous on-disk version.
+    _log.log(Level.SEVERE,
+        'Failed to write settings to ${_file.path}', e, st);
   }
+}
 
   void _emitWrites() {
     final c = _controllers['__writes__'];
@@ -194,6 +228,15 @@ String get path => _file.path;
     for (final c in _controllers.values) {
       if (!c.isClosed) c.add(null);
     }
+  }
+
+  /// Fire [value] on the per-key controller for [key]. Watchers for
+  /// every OTHER key are unaffected — this is the targeted equivalent
+  /// of [_emitAll]. Used by [set] / [reset] so a single-key write
+  /// only wakes one listener instead of N.
+  void _emitKey(String key, Object? value) {
+    final c = _controllers[key];
+    if (c != null && !c.isClosed) c.add(value);
   }
 
   /// Pretty-print the file path for status messages.
