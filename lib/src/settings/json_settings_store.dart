@@ -5,6 +5,7 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:path/path.dart' as p;
 import '../log.dart';
 import 'jsonc.dart';
@@ -12,6 +13,15 @@ import 'setting.dart';
 import 'settings_store.dart';
 
 final Logger _log = moduleLogger('settings.json_store');
+
+/// Result of the off-isolate initial load. Bundled into a record so
+/// it round-trips through `Isolate.run` (records are sendable).
+typedef _LoadResult = ({
+  Map<String, Object?> values,
+  DateTime mtime,
+  int size,
+  Object? error,
+});
 
 class JsonSettingsStore implements SettingsStore {
   final File _file;
@@ -23,9 +33,54 @@ class JsonSettingsStore implements SettingsStore {
   DateTime _lastMtime = DateTime.fromMillisecondsSinceEpoch(0);
   int _lastSize = -1;
 
-  JsonSettingsStore(this._file) {
-    _load();
+  // ── Construction ────────────────────────────────────────────────
+
+  /// Private constructor used by the async [create] factory. The
+  /// initial values + the file's mtime/size are pre-resolved on a
+  /// background isolate (so the UI isolate isn't blocked by a sync
+  /// file read at startup) and the file watcher is started here on
+  /// the UI isolate.
+  JsonSettingsStore._({
+    required this._file,
+    required Map<String, Object?> initialValues,
+    required DateTime initialMtime,
+    required int initialSize,
+  })  : _lastMtime = initialMtime,
+        _lastSize = initialSize {
+    _values.addAll(initialValues);
     _startWatcher();
+  }
+
+  /// Async factory: reads + parses the settings file on a
+  /// background isolate, then returns a fully-loaded store on the
+  /// UI isolate. This is the only public way to build a
+  /// [JsonSettingsStore] — the previous sync constructor blocked
+  /// the UI isolate for ~5–50 ms at startup (file read + JSONC
+  /// parse), which is enough to drop a frame on a cold disk or
+  /// large file.
+  ///
+  /// The watcher (250 ms `statSync` poll) and all read/write
+  /// operations stay on the UI isolate; only the one-time initial
+  /// load moves off.
+  static Future<JsonSettingsStore> create(File file) async {
+    final result = await Isolate.run<_LoadResult>(
+      () => _readInBackground(file.path),
+      debugName: 'JsonSettingsStore.load',
+    );
+    final store = JsonSettingsStore._(
+      file: file,
+      initialValues: result.values,
+      initialMtime: result.mtime,
+      initialSize: result.size,
+    );
+    if (result.error != null && !store._loadErrorsCtrl.isClosed) {
+      final err = result.error!;
+      _log.log(Level.SEVERE,
+          'Failed to load settings from ${file.path}; falling back to defaults',
+          err);
+      store._loadErrorsCtrl.add(err);
+    }
+    return store;
   }
 
   /// All keys currently defined in this file.
@@ -124,12 +179,10 @@ String get path => _file.path;
   // ── Internals ──────────────────────────────────────────────────
 
   void _load() {
-    if (!_file.existsSync()) {
-      _values.clear();
-      _lastMtime = DateTime.fromMillisecondsSinceEpoch(0);
-      _lastSize = 0;
-      return;
-    }
+    // Re-read [_file] on the UI isolate and update [_values] in
+    // place. Used by the file watcher when it detects an external
+    // edit. Sync I/O is fine here — the watcher runs every 250 ms
+    // and the file is small (~1 KB of JSONC in typical configs).
     try {
       final stat = _file.statSync();
       _lastMtime = stat.modified;
@@ -144,17 +197,12 @@ String get path => _file.path;
         _values.clear();
         decoded.forEach((k, v) => _values[k.toString()] = v);
       } else {
-        // Root is not an object — treat as corrupt.
         throw const FormatException(
             'Settings file root is not a JSON object');
       }
     } catch (e, st) {
-      // Corrupt or unreadable: fall back to defaults AND surface
-      // the error. Without the surface the user has no way to
-      // know their settings were dropped.
       _log.log(Level.SEVERE,
-          'Failed to load settings from ${_file.path}; falling back to defaults',
-          e, st);
+          'Failed to reload settings from ${_file.path}', e, st);
       _values.clear();
       if (!_loadErrorsCtrl.isClosed) _loadErrorsCtrl.add(e);
     }
@@ -249,5 +297,60 @@ Future<void> _flushAndEmit({String? changedKey, Object? changedValue}) async {
     }
     _controllers.clear();
     _loadErrorsCtrl.close();
+  }
+}
+
+/// Read + parse the settings file at [path] on a background isolate.
+///
+/// Returns the decoded map plus the file's mtime/size (so the
+/// watcher can start without a false-positive "file changed" tick
+/// on its first poll) and any load error encountered.
+///
+/// Sentinel mtime (epoch 0) and size (0) are returned for the
+/// "file does not exist" case so the watcher's first `statSync`
+/// will notice if the file appears later.
+_LoadResult _readInBackground(String path) {
+  final file = File(path);
+  if (!file.existsSync()) {
+    return (
+      values: <String, Object?>{},
+      mtime: DateTime.fromMillisecondsSinceEpoch(0),
+      size: 0,
+      error: null,
+    );
+  }
+  try {
+    final stat = file.statSync();
+    final raw = file.readAsStringSync();
+    if (raw.trim().isEmpty) {
+      return (
+        values: <String, Object?>{},
+        mtime: stat.modified,
+        size: stat.size,
+        error: null,
+      );
+    }
+    final decoded = jsoncDecode(raw);
+    if (decoded is Map) {
+      return (
+        values: decoded.map((k, v) => MapEntry(k.toString(), v)),
+        mtime: stat.modified,
+        size: stat.size,
+        error: null,
+      );
+    }
+    // Root is not an object — treat as corrupt.
+    throw const FormatException(
+        'Settings file root is not a JSON object');
+  } catch (e) {
+    // Corrupt or unreadable: fall back to defaults. The error is
+    // surfaced on the UI isolate by [create] so the banner /
+    // watchLoadErrors stream see it exactly once.
+    return (
+      values: <String, Object?>{},
+      mtime: DateTime.fromMillisecondsSinceEpoch(0),
+      size: 0,
+      error: e,
+    );
   }
 }

@@ -10,7 +10,6 @@
 // the in-memory mock — the whole point is the file write → emit
 // glue.
 
-import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -51,7 +50,7 @@ void main() {
 
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('octodo_settings_emit_');
-    store = JsonSettingsStore(File(p.join(tempDir.path, 'settings.json')));
+    store = await JsonSettingsStore.create(File(p.join(tempDir.path, 'settings.json')));
   });
 
   tearDown(() async {

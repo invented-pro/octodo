@@ -82,7 +82,7 @@ Future<void> main() async {
   // and the Scaffold theme (see OctodoApp.build). All three must
   // agree so the chrome never flashes a different shade around the
   // terminal grid.
-  _initSettings();
+  await _initSettings();
   final backgroundColor = kTerminalBackground;
   // window_manager: required before any WindowOptions / show call so
   // the plugin's platform-channel handlers are wired up. Sets the
@@ -129,10 +129,15 @@ Future<void> main() async {
 /// Initialize the [SettingsRuntime] singleton. Persists all settings
 /// to `<userHome>/.config/Octodo/settings.json` (created on first
 /// write) and watches the file for external edits (250ms poll).
-void _initSettings() {
+Future<void> _initSettings() async {
   final paths = SettingsPaths.resolve();
+  // Initial settings load runs on a background isolate via
+  // JsonSettingsStore.create — see json_settings_store.dart. Keeps
+  // the file read + JSONC parse off the UI isolate's startup path
+  // so the first frame isn't blocked.
+  final store = await JsonSettingsStore.create(paths.file);
   SettingsRuntime.instance = SettingsRuntime.create(
-    store: JsonSettingsStore(paths.file),
+    store: store,
     hostActions: SettingsHostActions(
       revealInFileManager: revealInExplorer,
       openInExternalEditor: openInTextEditor,
@@ -259,7 +264,10 @@ class _AppShellState extends State<AppShell>
   final List<_WorkspaceEntry> _workspaces = [];
   int _currentIndex = 0;
   int _wsCounter = 0;
-  late final List<ShellProfile> _shells;
+  /// Available shells for new tabs. `null` while the off-isolate
+  /// probe is still running (see [_bootstrapAsync]); the build
+  /// shows a loading placeholder in that case.
+  List<ShellProfile>? _shells;
   late final UpdateStateModel _updateModel;
   late final UpdateController _updateController;
 
@@ -317,8 +325,11 @@ class _AppShellState extends State<AppShell>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     windowManager.addListener(this);
-    _shells = detectShells();
-    _newWorkspace();
+    // Probe installed shells off the UI isolate so the ~90 ms
+    // `wsl.exe --list --quiet` call (and ~6 `existsSync` checks)
+    // don't block the first frame. The build shows a loading
+    // placeholder until the future resolves; see [build].
+    _bootstrapAsync();
 
     _updateModel = UpdateStateModel(currentVersion: kAppVersion);
     _updateController = UpdateController(
@@ -340,6 +351,19 @@ class _AppShellState extends State<AppShell>
     // and either lets `destroy()` run or cancels based on the user's
     // answer.
     windowManager.setPreventClose(true);
+  }
+
+  /// Resolves the shell list off-isolate, then mounts the first
+  /// workspace and rebuilds. Until the future completes, [build]
+  /// shows a minimal loading MaterialApp so the window has
+  /// something to paint while the probe runs.
+  Future<void> _bootstrapAsync() async {
+    final shells = await detectShellsAsync();
+    if (!mounted) return;
+    setState(() {
+      _shells = shells;
+      _newWorkspace();
+    });
   }
 
   @override
@@ -1075,6 +1099,17 @@ class _AppShellState extends State<AppShell>
 
   @override
   Widget build(BuildContext context) {
+    // First-frame placeholder while the off-isolate shell probe
+    // resolves (see [_bootstrapAsync]). Without this the workspace
+    // chrome would try to render with `_shells == null` and crash.
+    if (_shells == null) {
+      return MaterialApp(
+        theme: buildAppTheme(palette: _activePalette()),
+        home: const Scaffold(
+          body: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
     _shellContext = context;
     _shellMessenger = ScaffoldMessenger.maybeOf(context);
     // Rebuild the merged binding map each build so the closures
@@ -1121,7 +1156,7 @@ class _AppShellState extends State<AppShell>
                       isFocused: i == _currentIndex,
                       name: _workspaces[i].name,
                       color: _workspaces[i].color,
-                      availableShells: _shells,
+                      availableShells: _shells ?? const <ShellProfile>[],
                       onEmpty: () => _closeWorkspace(_currentIndex),
                     ),
                 ],

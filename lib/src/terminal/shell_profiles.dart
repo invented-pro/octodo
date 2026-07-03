@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
@@ -190,6 +191,31 @@ List<ShellProfile> detectShells() => detectShellsFrom(
       environment: Platform.environment,
       listWslDistros: _listWslDistros,
     );
+
+/// Off-isolate variant of [detectShells]. The probe work
+/// (`existsSync` × ~6, plus a `Process.runSync` for WSL) is fast in
+/// absolute terms (~90 ms measured on a typical box) but blocks
+/// the UI isolate — and that's right inside `_AppShellState.initState`,
+/// between `runApp` and the first frame. Running the probe on a
+/// background isolate via `Isolate.run` lets the first frame paint
+/// while the shell list is being assembled; the workspace shows a
+/// loading placeholder until the future resolves.
+///
+/// Returns the same `List<ShellProfile>` shape as [detectShells].
+/// Errors are swallowed (mirroring [detectShells]'s try/catch
+/// around `Process.runSync`); on failure an empty list is
+/// returned, which the UI handles by showing the same loading
+/// placeholder.
+Future<List<ShellProfile>> detectShellsAsync() {
+  return Isolate.run<List<ShellProfile>>(
+    () => detectShellsFrom(
+      fileExists: (p) => File(p).existsSync(),
+      environment: Platform.environment,
+      listWslDistros: _listWslDistros,
+    ),
+    debugName: 'ShellProfile.detect',
+  );
+}
 
 /// Pure, host-independent core of [detectShells]. Builds the profile list
 /// from explicit probes ([fileExists], [environment], [listWslDistros]) so it
