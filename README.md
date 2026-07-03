@@ -24,7 +24,7 @@ panes, and tabs.
 - **Flutter-native multi-pane / tab layouts.** 
 - **Keyboard-shortcut driven.** 
 - **IME support.** 
-- **Auto-detects available shells per host.** 
+- **Auto-detect available shells, including WSL distributions.** 
 
 
 ## Platform support
