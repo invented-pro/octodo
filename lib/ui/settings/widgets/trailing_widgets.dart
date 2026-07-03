@@ -452,54 +452,98 @@ class _DoubleInputTrailingState extends State<DoubleInputTrailing> {
     widget.store.set(widget.setting, parsed);
   }
 
+  static const _step = 1.0;
+
+  void _bump(int sign) {
+    final next = (_value + sign * _step).clamp(
+      widget.setting.min ?? double.negativeInfinity,
+      widget.setting.max ?? double.infinity,
+    );
+    if (!mounted) return;
+    setState(() {
+      _value = next;
+      _controller.text = _formatValue(next);
+      _errorText = null;
+    });
+    widget.store.set(widget.setting, next);
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     return Semantics(
       label: widget.setting.title,
-      child: SizedBox(
-        width: 96,
-        child: TextField(
-          controller: _controller,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: _errorText != null
-                ? palette.accentPink
-                : palette.textPrimary,
-            fontSize: 12,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.remove, size: 14),
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 26, height: 26),
+            tooltip: 'Decrement by 1',
+            onPressed: () => _bump(-1),
           ),
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          inputFormatters: [
-            FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
-          ],
-          cursorColor: palette.accentBlue,
-          decoration: InputDecoration(
-            isDense: true,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 8,
-              vertical: 6,
-            ),
-            filled: true,
-            fillColor: palette.dialogSurface,
-            errorText: _errorText,
-            errorStyle: const TextStyle(fontSize: 10, height: 1.2),
-            errorMaxLines: 2,
-            border: _border(palette: palette, focused: false, hasError: false),
-            enabledBorder: _border(
-              palette: palette,
-              focused: false,
-              hasError: false,
-            ),
-            focusedBorder: _border(
-              palette: palette,
-              focused: true,
-              hasError: _errorText != null,
+          SizedBox(
+            width: 80,
+            child: TextField(
+              controller: _controller,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: _errorText != null
+                    ? palette.accentPink
+                    : palette.textPrimary,
+                fontSize: 12,
+              ),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+              ],
+              cursorColor: palette.accentBlue,
+              decoration: InputDecoration(
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: 6,
+                ),
+                filled: true,
+                fillColor: palette.dialogSurface,
+                errorText: _errorText,
+                errorStyle: const TextStyle(fontSize: 10, height: 1.2),
+                errorMaxLines: 2,
+                border: _border(
+                  palette: palette,
+                  focused: false,
+                  hasError: false,
+                ),
+                enabledBorder: _border(
+                  palette: palette,
+                  focused: false,
+                  hasError: false,
+                ),
+                focusedBorder: _border(
+                  palette: palette,
+                  focused: true,
+                  hasError: _errorText != null,
+                ),
+              ),
+              onSubmitted: (_) => _submit(),
+              onTapOutside: (_) => _handleFocusLoss(),
+              onEditingComplete: _submit,
             ),
           ),
-          onSubmitted: (_) => _submit(),
-          onTapOutside: (_) => _handleFocusLoss(),
-          onEditingComplete: _submit,
-        ),
+          IconButton(
+            icon: const Icon(Icons.add, size: 14),
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 26, height: 26),
+            tooltip: 'Increment by 1',
+            onPressed: () => _bump(1),
+          ),
+        ],
       ),
     );
   }
