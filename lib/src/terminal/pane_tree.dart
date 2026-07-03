@@ -1,5 +1,6 @@
 import 'dart:math';
-import 'package:flutter/foundation.dart' show ValueListenable, visibleForTesting;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, visibleForTesting;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -31,6 +32,7 @@ class Surface extends ChangeNotifier {
   /// `GlobalKey` (which can collide with inherited focus scopes
   /// when the parent rebuilds — see v6.0.4 bug fix).
   final String id;
+
   /// Shell executable path (e.g. `C:\Program Files\PowerShell\7\pwsh.exe`).
   /// Set from the spawning [ShellProfile]; the spawn layer wraps it together
   /// with [args] in `cmd.exe /c …` — see `TerminalView._start`.
@@ -130,41 +132,40 @@ class Surface extends ChangeNotifier {
     return value;
   }
 
-  Surface({String? id, this.profile, this.initialCwd})
-      : id = id ?? _newId();
+  Surface({String? id, this.profile, this.initialCwd}) : id = id ?? _newId();
 
-/// Title to display when the shell hasn't set its own yet.
-/// Format: `[shortName] [basename(cwd)]`, e.g.
-///   `pwsh ~`, `bash C:\Users\x\proj`.
-///
-/// Prefers [currentCwd] (updated by OSC 7) over the static
-/// [initialCwd] so a `cd` in the shell is reflected even when the
-/// shell doesn't set its own title via OSC 0/2.
-///
-/// If the cwd still equals [initialCwd] (the shell never `cd`'d
-/// away from its start dir), render the path component as `~` to
-/// match the shell-prompt shorthand the user is used to — most
-/// notably WSL, where the distro starts in the user's home and
-/// OSC 7 reports it as `/mnt/c/Users/<name>` instead of `~`.
-///
-/// When the shell's profile has `showCwdInTitle == false` (set for
-/// PowerShell 7 / Windows PowerShell / CMD — see shell_profiles.dart
-/// for the rationale: their OSC 7 paths are unreliable through
-/// ConPTY), the title is just the shell's `shortName` — `pwsh`,
-/// `powershell`, `cmd`. OSC 7 is still recorded on `_currentCwd`
-/// (used by the IME caret reporting and any future cwd-aware
-/// features), it just doesn't leak into the chip.
-String get fallbackTitle {
-  final name = profile?.shortName ?? 'shell';
-  final showCwd = profile?.showCwdInTitle ?? false;
-  if (!showCwd) return name;
-  final cwd = _currentCwd ?? initialCwd;
-  if (cwd == null || cwd.isEmpty) return name;
-  if (cwd == initialCwd) return '$name ~';
-  final base = p.basename(cwd);
-  if (base.isEmpty) return name;
-  return '$name $base';
-}
+  /// Title to display when the shell hasn't set its own yet.
+  /// Format: `[shortName] [basename(cwd)]`, e.g.
+  ///   `pwsh ~`, `bash C:\Users\x\proj`.
+  ///
+  /// Prefers [currentCwd] (updated by OSC 7) over the static
+  /// [initialCwd] so a `cd` in the shell is reflected even when the
+  /// shell doesn't set its own title via OSC 0/2.
+  ///
+  /// If the cwd still equals [initialCwd] (the shell never `cd`'d
+  /// away from its start dir), render the path component as `~` to
+  /// match the shell-prompt shorthand the user is used to — most
+  /// notably WSL, where the distro starts in the user's home and
+  /// OSC 7 reports it as `/mnt/c/Users/<name>` instead of `~`.
+  ///
+  /// When the shell's profile has `showCwdInTitle == false` (set for
+  /// PowerShell 7 / Windows PowerShell / CMD — see shell_profiles.dart
+  /// for the rationale: their OSC 7 paths are unreliable through
+  /// ConPTY), the title is just the shell's `shortName` — `pwsh`,
+  /// `powershell`, `cmd`. OSC 7 is still recorded on `_currentCwd`
+  /// (used by the IME caret reporting and any future cwd-aware
+  /// features), it just doesn't leak into the chip.
+  String get fallbackTitle {
+    final name = profile?.shortName ?? 'shell';
+    final showCwd = profile?.showCwdInTitle ?? false;
+    if (!showCwd) return name;
+    final cwd = _currentCwd ?? initialCwd;
+    if (cwd == null || cwd.isEmpty) return name;
+    if (cwd == initialCwd) return '$name ~';
+    final base = p.basename(cwd);
+    if (base.isEmpty) return name;
+    return '$name $base';
+  }
 
   /// The full title to render in the tab chip. Tries the shell-set
   /// title first; if [_shortenTitle] reduces it to an empty string
@@ -182,7 +183,10 @@ String get fallbackTitle {
   static String _newId() {
     final r = Random();
     final bytes = List<int>.generate(
-        16, (_) => r.nextInt(256), growable: false);
+      16,
+      (_) => r.nextInt(256),
+      growable: false,
+    );
     final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
     return 's-$hex';
   }
@@ -205,6 +209,7 @@ String get fallbackTitle {
 /// [Surface]s (the tabs shown in that pane's section).
 abstract class PaneNode {
   PaneNode? get focusedLeaf;
+
   /// True when [target] is reachable from this subtree (by `identical`).
   /// Used by the workspace to detect whether a previously-focused
   /// container is still in the tree after a mutation — the tree-level
@@ -238,10 +243,9 @@ enum PaneEdge { left, right, top, bottom }
 extension PaneEdgeX on PaneEdge {
   /// Split direction: left/right edges split horizontally (two
   /// columns), top/bottom edges split vertically (two rows).
-  Axis get splitDirection =>
-      (this == PaneEdge.left || this == PaneEdge.right)
-          ? Axis.horizontal
-          : Axis.vertical;
+  Axis get splitDirection => (this == PaneEdge.left || this == PaneEdge.right)
+      ? Axis.horizontal
+      : Axis.vertical;
 
   /// True if the new pane should be on the "first" side of the
   /// split (left/top). False for right/bottom.
@@ -274,6 +278,17 @@ class PaneContainer extends PaneNode {
   /// in a way that breaks the key's uniqueness invariant).
   final GlobalKey _dropOverlayKey = GlobalKey();
   GlobalKey get dropOverlayKey => _dropOverlayKey;
+
+  /// Stable [GlobalKey] for this container's [_ContainerTabBar] so the
+  /// workspace can reach the tab bar's state from the keyboard
+  /// navigation path (Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1..9) and
+  /// request that the newly-focused chip be scrolled into view. The
+  /// click path doesn't need this — the click handler runs inside
+  /// the tab bar and can read positions directly. See
+  /// [ContainerTabBarState.ensureIndexVisible].
+  final GlobalKey<ContainerTabBarState> tabBarKey =
+      GlobalKey<ContainerTabBarState>();
+
   /// The surfaces (tabs) shown in this pane.  A "live" container
   /// always has at least one surface; an empty list means the
   /// container is being torn down.
@@ -313,7 +328,10 @@ class PaneContainer extends PaneNode {
   static String _newContainerId() {
     final r = Random();
     final bytes = List<int>.generate(
-        16, (_) => r.nextInt(256), growable: false);
+      16,
+      (_) => r.nextInt(256),
+      growable: false,
+    );
     final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
     return 'c-$hex';
   }
@@ -591,14 +609,11 @@ class PaneLayout extends StatelessWidget {
   final PaneNode root;
   final PaneContainer? focusedContainer;
   final void Function(PaneContainer container) onFocusContainer;
-  final void Function(PaneContainer container, Surface surface)
-      onFocusSurface;
+  final void Function(PaneContainer container, Surface surface) onFocusSurface;
   final void Function(PaneContainer container) onNewSurface;
-  final void Function(PaneContainer container, Surface surface)
-      onCloseSurface;
-  final void Function(
-          PaneContainer container, Surface surface, Axis direction)
-      onSplit;
+  final void Function(PaneContainer container, Surface surface) onCloseSurface;
+  final void Function(PaneContainer container, Surface surface, Axis direction)
+  onSplit;
   final void Function(PaneSplit parent, double newRatio) onResize;
 
   /// Called when a tab is reordered within the same container.
@@ -607,7 +622,7 @@ class PaneLayout extends StatelessWidget {
   /// needed (matching Flutter's [ReorderableListView] semantics:
   /// if [newIndex] > [oldIndex] it decrements by 1 after removal).
   final void Function(PaneContainer container, int oldIndex, int newIndex)
-      onReorderSurface;
+  onReorderSurface;
 
   /// Called when a tab is dragged from one container to another.
   /// [targetIndex] is the insertion position inside [toContainer];
@@ -617,7 +632,8 @@ class PaneLayout extends StatelessWidget {
     SurfaceDragData drag,
     PaneContainer toContainer,
     int targetIndex,
-  ) onMoveSurfaceBetweenContainers;
+  )
+  onMoveSurfaceBetweenContainers;
 
   /// Called when a tab is dropped onto one of the four edges of
   /// [targetContainer]. The pane at [targetContainer] is replaced
@@ -627,7 +643,8 @@ class PaneLayout extends StatelessWidget {
     SurfaceDragData drag,
     PaneContainer targetContainer,
     PaneEdge edge,
-  ) onDropToSplitEdge;
+  )
+  onDropToSplitEdge;
 
   /// True while a tab drag is in flight anywhere in this workspace
   /// (any pane). The four edge drop zones of each pane are only
@@ -650,12 +667,12 @@ class PaneLayout extends StatelessWidget {
   final void Function(int) onDefaultShellChanged;
 
   /// When true, render the [focusedContainer] full-window in front and
-/// keep every non-focused container mounted invisibly behind it. The
-/// pane tree is left unchanged — toggling this flag back to false
-/// restores the original layout. Every pane's widget subtree (and
-/// therefore the [TerminalView] State, engine, PTY, scrollback) stays
-/// alive across maximize/restore because we never remove a subtree
-/// from the tree.
+  /// keep every non-focused container mounted invisibly behind it. The
+  /// pane tree is left unchanged — toggling this flag back to false
+  /// restores the original layout. Every pane's widget subtree (and
+  /// therefore the [TerminalView] State, engine, PTY, scrollback) stays
+  /// alive across maximize/restore because we never remove a subtree
+  /// from the tree.
   final bool isMaximized;
   final VoidCallback? onToggleMaximize;
 
@@ -708,9 +725,7 @@ class PaneLayout extends StatelessWidget {
                 child: _buildHiddenTree(context, root, focusedContainer!),
               ),
             ),
-            Positioned.fill(
-              child: _buildContainer(context, focusedContainer!),
-            ),
+            Positioned.fill(child: _buildContainer(context, focusedContainer!)),
           ],
         ),
       );
@@ -722,7 +737,10 @@ class PaneLayout extends StatelessWidget {
   /// rendered separately as the visible overlay above). Every other
   /// container is laid out + mounted normally — just not painted.
   Widget _buildHiddenTree(
-      BuildContext context, PaneNode node, PaneContainer focused) {
+    BuildContext context,
+    PaneNode node,
+    PaneContainer focused,
+  ) {
     if (node is PaneContainer) {
       if (identical(node, focused)) {
         return const SizedBox.shrink();
@@ -748,9 +766,11 @@ class PaneLayout extends StatelessWidget {
     return const SizedBox.shrink();
   }
 
-Widget _buildContainer(BuildContext context, PaneContainer container) {
-    assert(container.surfaces.isNotEmpty,
-        'PaneContainer ${container.id} rendered with no surfaces — tree mutation left an empty container in place.');
+  Widget _buildContainer(BuildContext context, PaneContainer container) {
+    assert(
+      container.surfaces.isNotEmpty,
+      'PaneContainer ${container.id} rendered with no surfaces — tree mutation left an empty container in place.',
+    );
     final palette = context.palette;
     final isFocused = focusedContainer == container;
     // `_PaneDropOverlay` carries a GlobalKey (per-container) so the
@@ -767,15 +787,19 @@ Widget _buildContainer(BuildContext context, PaneContainer container) {
       child: Container(
         decoration: BoxDecoration(
           border: Border.all(
-            color: isFocused
-                ? palette.accentBlue
-                : palette.outline,
+            color: isFocused ? palette.accentBlue : palette.outline,
             width: 1,
           ),
         ),
         child: Column(
           children: [
             _ContainerTabBar(
+              // Stable per-container GlobalKey on the tab bar so
+              // the workspace can reach its state from the keyboard
+              // nav path and request an ensure-visible animation.
+              // See [ContainerTabBarState.ensureIndexVisible] and
+              // [PaneContainer.tabBarKey].
+              key: container.tabBarKey,
               container: container,
               isFocused: isFocused,
               isMaximized: isMaximized,
@@ -789,12 +813,8 @@ Widget _buildContainer(BuildContext context, PaneContainer container) {
               onToggleMaximize: onToggleMaximize,
               onReorderSurface: (oldIndex, newIndex) =>
                   onReorderSurface(container, oldIndex, newIndex),
-              onMoveSurfaceBetweenContainers:
-                  (drag, targetIndex) => onMoveSurfaceBetweenContainers(
-                drag,
-                container,
-                targetIndex,
-              ),
+              onMoveSurfaceBetweenContainers: (drag, targetIndex) =>
+                  onMoveSurfaceBetweenContainers(drag, container, targetIndex),
               isAnyTabDragActive: isAnyTabDragActive,
               onAnyDragActiveChanged: onAnyDragActiveChanged,
             ),
@@ -802,13 +822,14 @@ Widget _buildContainer(BuildContext context, PaneContainer container) {
               child: _PaneDropOverlay(
                 key: container.dropOverlayKey,
                 container: container,
-                onMoveSurfaceBetweenContainers:
-                    onMoveSurfaceBetweenContainers,
+                onMoveSurfaceBetweenContainers: onMoveSurfaceBetweenContainers,
                 onDropToSplitEdge: onDropToSplitEdge,
                 isAnyTabDragActive: isAnyTabDragActive,
                 child: IndexedStack(
-                  index: container.focusedIndex
-                      .clamp(0, container.surfaces.length - 1),
+                  index: container.focusedIndex.clamp(
+                    0,
+                    container.surfaces.length - 1,
+                  ),
                   children: [
                     for (final surface in container.surfaces)
                       // Wrap the TerminalView in a KeyedSubtree carrying
@@ -888,16 +909,16 @@ Widget _buildContainer(BuildContext context, PaneContainer container) {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final totalSize =
-            isHorizontal ? constraints.maxWidth : constraints.maxHeight;
+        final totalSize = isHorizontal
+            ? constraints.maxWidth
+            : constraints.maxHeight;
         final firstSize = totalSize * split.ratio;
         final secondSize = totalSize - firstSize;
 
         final divider = _Divider(
           isHorizontal: isHorizontal,
           onDrag: (delta, _) {
-            final newRatio =
-                (split.ratio + delta / totalSize).clamp(0.1, 0.9);
+            final newRatio = (split.ratio + delta / totalSize).clamp(0.1, 0.9);
             onResize(split, newRatio.toDouble());
           },
         );
@@ -984,7 +1005,7 @@ class _ContainerTabBar extends StatefulWidget {
   /// Cross-container move: drop a tab from elsewhere into this
   /// container at [targetIndex].
   final void Function(SurfaceDragData drag, int targetIndex)
-      onMoveSurfaceBetweenContainers;
+  onMoveSurfaceBetweenContainers;
 
   /// Workspace-level "any tab drag active" listenable. The chip's
   /// insertion-line + end-zone highlight also rebuild against this so
@@ -996,6 +1017,7 @@ class _ContainerTabBar extends StatefulWidget {
   final ValueChanged<bool> onAnyDragActiveChanged;
 
   const _ContainerTabBar({
+    super.key,
     required this.container,
     required this.isFocused,
     required this.isMaximized,
@@ -1014,10 +1036,15 @@ class _ContainerTabBar extends StatefulWidget {
   });
 
   @override
-  State<_ContainerTabBar> createState() => _ContainerTabBarState();
+  State<_ContainerTabBar> createState() => ContainerTabBarState();
 }
 
-class _ContainerTabBarState extends State<_ContainerTabBar> {
+/// State for [_ContainerTabBar]. Exposed (no leading underscore) so
+/// the workspace can call [ensureIndexVisible] from the keyboard
+/// navigation path via [PaneContainer.tabBarKey]. The tab bar widget
+/// itself stays private — only the state needs to be reachable from
+/// outside this file.
+class ContainerTabBarState extends State<_ContainerTabBar> {
   /// Controls the horizontal scroll of the tab list. Owned by the
   /// state so wheel events can advance it manually (Flutter's
   /// default horizontal [ListView] does not respond to vertical
@@ -1028,6 +1055,17 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
   /// visible viewport width when comparing a clicked chip's
   /// position to the visible area.
   final GlobalKey _listViewKey = GlobalKey();
+
+  /// Per-chip [GlobalKey]s, aligned 1:1 with
+  /// `widget.container.surfaces` at build time. Used by
+  /// [ensureIndexVisible] (the keyboard-navigation auto-scroll path)
+  /// to look up the newly-focused chip's [RenderBox] by index. The
+  /// list is grown / shrunk in [build] via [_syncChipKeys] so the
+  /// same [GlobalKey] follows its element through drag-reorder,
+  /// close, and cross-container moves (a [GlobalKey] on a
+  /// [ListenableBuilder] is reparented to the new tree position
+  /// when the framework reuses the element).
+  final List<GlobalKey> _chipKeys = [];
 
   /// Surface count from the previous build. Used in [didUpdateWidget]
   /// to detect when a new tab was added and animate the scroll to
@@ -1050,6 +1088,10 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
   }
 
   @override
+  // The widget is intentionally private; this is the only place
+  // the public state class references its private widget type, and
+  // the parameter is positional/internal to the framework.
+  // ignore: library_private_types_in_public_api
   void didUpdateWidget(covariant _ContainerTabBar oldWidget) {
     super.didUpdateWidget(oldWidget);
     final newCount = widget.container.surfaces.length;
@@ -1075,6 +1117,21 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
   void dispose() {
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// Grow / shrink [_chipKeys] to exactly [count] entries, preserving
+  /// any existing keys. A chip's [GlobalKey] must remain unique for
+  /// its element across the whole app, so we never reuse a key (the
+  /// removed entries are simply dropped; Flutter releases the
+  /// element they pointed to when the corresponding chip is removed
+  /// from the tree).
+  void _syncChipKeys(int count) {
+    while (_chipKeys.length < count) {
+      _chipKeys.add(GlobalKey());
+    }
+    if (_chipKeys.length > count) {
+      _chipKeys.removeRange(count, _chipKeys.length);
+    }
   }
 
   void _setHover(int? index, bool after) {
@@ -1103,8 +1160,10 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
     final step = signal.scrollDelta.dy;
     if (step == 0) return;
     // Negative deltas (wheel up) → scroll left; positive → right.
-    final target = (_scrollController.offset + step / 4)
-        .clamp(pos.minScrollExtent, pos.maxScrollExtent);
+    final target = (_scrollController.offset + step / 4).clamp(
+      pos.minScrollExtent,
+      pos.maxScrollExtent,
+    );
     _scrollController.jumpTo(target);
   }
 
@@ -1136,7 +1195,7 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
     // chip's on-screen offset within the ListView's viewport.
     final chipLeft =
         chipBox.localToGlobal(Offset.zero).dx -
-            listViewBox.localToGlobal(Offset.zero).dx;
+        listViewBox.localToGlobal(Offset.zero).dx;
     final chipWidth = chipBox.size.width;
     final listViewWidth = listViewBox.size.width;
 
@@ -1150,8 +1209,10 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
       // Scroll left by ~85% of viewport, leaving the clicked chip
       // near the right edge of the new viewport.
       final delta = -(listViewWidth - chipWidth) * pageFraction;
-      final target = (_scrollController.offset + delta)
-          .clamp(pos.minScrollExtent, pos.maxScrollExtent);
+      final target = (_scrollController.offset + delta).clamp(
+        pos.minScrollExtent,
+        pos.maxScrollExtent,
+      );
       _scrollController.animateTo(
         target,
         duration: const Duration(milliseconds: 220),
@@ -1165,8 +1226,10 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
     if (chipLeft + chipWidth >= listViewWidth - edgeThreshold &&
         _scrollController.offset < pos.maxScrollExtent) {
       final delta = (listViewWidth - chipWidth) * pageFraction;
-      final target = (_scrollController.offset + delta)
-          .clamp(pos.minScrollExtent, pos.maxScrollExtent);
+      final target = (_scrollController.offset + delta).clamp(
+        pos.minScrollExtent,
+        pos.maxScrollExtent,
+      );
       _scrollController.animateTo(
         target,
         duration: const Duration(milliseconds: 220),
@@ -1175,12 +1238,106 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
     }
   }
 
+  /// Bring the chip at [index] into the visible viewport by animating
+  /// [_scrollController] to the offset that puts the chip flush with
+  /// the nearest edge:
+  ///
+  ///   * If the chip is fully visible already → no-op (return).
+  ///   * If the chip is off-screen to the left → align to the leading
+  ///     (left) edge of the viewport.
+  ///   * If the chip is off-screen to the right → align to the trailing
+  ///     (right) edge of the viewport.
+  ///
+  /// The deferred post-frame callback is required because
+  /// `setState` callers (the keyboard handlers in the workspace)
+  /// update `container.focusedIndex` synchronously but the chip's
+  /// new [RenderBox] doesn't exist until the ListView has been
+  /// rebuilt and laid out for the frame. By the time the post-frame
+  /// callback fires, the chip's [GlobalKey] resolves to a real
+  /// [BuildContext] and `findRenderObject()` returns a real box.
+  ///
+  /// Called by the workspace from Ctrl+Tab / Ctrl+Shift+Tab /
+  /// Ctrl+1..9 navigation. The mouse-click path uses a different
+  /// mechanism ([_maybeAutoScroll], which pages by ~85% of viewport
+  /// on edge clicks) because the user's intent is different — click
+  /// is "show me the next batch", keyboard is "show me THIS tab".
+  void ensureIndexVisible(int index) {
+    if (index < 0 || index >= widget.container.surfaces.length) return;
+    if (!_scrollController.hasClients) return;
+    if (index >= _chipKeys.length) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_scrollController.hasClients) return;
+      if (index < 0 || index >= widget.container.surfaces.length) return;
+      if (index >= _chipKeys.length) return;
+      final chipBox = _chipKeys[index].currentContext?.findRenderObject();
+      final listViewBox = _listViewKey.currentContext?.findRenderObject();
+      if (chipBox is! RenderBox || listViewBox is! RenderBox) return;
+      final pos = _scrollController.position;
+      final chipLeft =
+          chipBox.localToGlobal(Offset.zero).dx -
+          listViewBox.localToGlobal(Offset.zero).dx;
+      final chipWidth = chipBox.size.width;
+      final listViewWidth = listViewBox.size.width;
+      final target = computeEnsureVisibleTargetOffset(
+        chipLeft: chipLeft,
+        chipWidth: chipWidth,
+        listViewWidth: listViewWidth,
+        currentOffset: _scrollController.offset,
+        minOffset: pos.minScrollExtent,
+        maxOffset: pos.maxScrollExtent,
+      );
+      if (target == null) return; // chip already fully visible
+      _scrollController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  /// Pure helper that computes the new scroll offset needed to bring
+  /// a chip into view. Returns `null` if the chip is already fully
+  /// visible (so callers can short-circuit and skip the animation).
+  ///
+  /// Extracted so the math is testable without mounting a widget;
+  /// exercised by `test/pane_tree_test.dart`. Mirrors the
+  /// off-left → leading-edge / off-right → trailing-edge contract
+  /// documented on [ensureIndexVisible].
+  @visibleForTesting
+  static double? computeEnsureVisibleTargetOffset({
+    required double chipLeft,
+    required double chipWidth,
+    required double listViewWidth,
+    required double currentOffset,
+    required double minOffset,
+    required double maxOffset,
+  }) {
+    final chipRight = chipLeft + chipWidth;
+    if (chipLeft >= 0 && chipRight <= listViewWidth) return null;
+    final double target;
+    if (chipLeft < 0) {
+      // Chip's absolute position = currentOffset + chipLeft. Setting
+      // the scroll so the chip lands at the leading edge gives
+      // newOffset = currentOffset + chipLeft (chipLeft is negative
+      // so this scrolls toward smaller offsets).
+      target = currentOffset + chipLeft;
+    } else {
+      // chipRight > listViewWidth: chip extends past the right edge.
+      // Set scroll so the chip's right edge meets the viewport's
+      // right edge: newOffset = currentOffset + (chipRight - listViewWidth).
+      target = currentOffset + (chipRight - listViewWidth);
+    }
+    return target.clamp(minOffset, maxOffset);
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     final c = widget.container;
     final anyDrag = widget.isAnyTabDragActive.value;
     final children = <Widget>[];
+    _syncChipKeys(c.surfaces.length);
 
     for (var i = 0; i < c.surfaces.length; i++) {
       final surface = c.surfaces[i];
@@ -1191,48 +1348,51 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
       final showBefore = _hoverIndex == i && !_hoverAfter && anyDrag;
       final showAfter = _hoverIndex == i && _hoverAfter && anyDrag;
 
-      children.add(_DraggableChip(
-        key: ValueKey('chip-${surface.id}'),
-        surface: surface,
-        isActive: isActive,
-        containerId: c.id,
-        indexInContainer: i,
-        onTap: (chipContext) {
-          widget.onFocusSurface(surface);
-          _maybeAutoScroll(chipContext, i);
-        },
-        onClose: () => widget.onCloseSurface(surface),
-        onLocalDragChanged: widget.onAnyDragActiveChanged,
-        onHoverChanged: (after) => _setHover(i, after),
-        onReorderInContainer: (oldIndex, newIndex) =>
-            widget.onReorderSurface(oldIndex, newIndex),
-        onAcceptForeign: (drag, after) {
-          _setHover(i, after);
-          widget.onMoveSurfaceBetweenContainers(
-              drag, after ? i + 1 : i);
-        },
-        showInsertBefore: showBefore,
-        showInsertAfter: showAfter,
-      ));
+      children.add(
+        _DraggableChip(
+          key: ValueKey('chip-${surface.id}'),
+          chipKey: _chipKeys[i],
+          surface: surface,
+          isActive: isActive,
+          containerId: c.id,
+          indexInContainer: i,
+          onTap: (chipContext) {
+            widget.onFocusSurface(surface);
+            _maybeAutoScroll(chipContext, i);
+          },
+          onClose: () => widget.onCloseSurface(surface),
+          onLocalDragChanged: widget.onAnyDragActiveChanged,
+          onHoverChanged: (after) => _setHover(i, after),
+          onReorderInContainer: (oldIndex, newIndex) =>
+              widget.onReorderSurface(oldIndex, newIndex),
+          onAcceptForeign: (drag, after) {
+            _setHover(i, after);
+            widget.onMoveSurfaceBetweenContainers(drag, after ? i + 1 : i);
+          },
+          showInsertBefore: showBefore,
+          showInsertAfter: showAfter,
+        ),
+      );
     }
 
     // End-of-list drop zone (between last chip and the controls).
-    children.add(_EndDropZone(
-      width: 24,
-      hovered: _endZoneHover && anyDrag,
-      onHoverChanged: _setEndZoneHover,
-      onAccept: (drag) {
-        if (drag.sourceContainerId == c.id) {
-          // Same-container reorder, append to end.
-          // Flutter convention: if oldIndex == newIndex → no-op.
-          if (drag.sourceIndex == c.surfaces.length) return;
-          widget.onReorderSurface(drag.sourceIndex, c.surfaces.length);
-        } else {
-          widget.onMoveSurfaceBetweenContainers(
-              drag, c.surfaces.length);
-        }
-      },
-    ));
+    children.add(
+      _EndDropZone(
+        width: 24,
+        hovered: _endZoneHover && anyDrag,
+        onHoverChanged: _setEndZoneHover,
+        onAccept: (drag) {
+          if (drag.sourceContainerId == c.id) {
+            // Same-container reorder, append to end.
+            // Flutter convention: if oldIndex == newIndex → no-op.
+            if (drag.sourceIndex == c.surfaces.length) return;
+            widget.onReorderSurface(drag.sourceIndex, c.surfaces.length);
+          } else {
+            widget.onMoveSurfaceBetweenContainers(drag, c.surfaces.length);
+          }
+        },
+      ),
+    );
 
     return Container(
       height: 30,
@@ -1290,7 +1450,8 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
           visualDensity: VisualDensity.compact,
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-          tooltip: 'New Tab (${describe(LogicalKeyboardKey.keyT, shift: true)})',
+          tooltip:
+              'New Tab (${describe(LogicalKeyboardKey.keyT, shift: true)})',
           onPressed: widget.onNewSurface,
         ),
         PopupMenuButton<int>(
@@ -1313,12 +1474,13 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
                       size: 16,
                     ),
                     const SizedBox(width: 8),
-                    Text(widget.availableShells[i].label,
-                        style: const TextStyle(fontSize: 13)),
+                    Text(
+                      widget.availableShells[i].label,
+                      style: const TextStyle(fontSize: 13),
+                    ),
                     if (i == widget.defaultShellIndex) ...[
                       const SizedBox(width: 6),
-                      Icon(Icons.check,
-                          size: 14, color: palette.accentBlue),
+                      Icon(Icons.check, size: 14, color: palette.accentBlue),
                     ],
                   ],
                 ),
@@ -1335,16 +1497,21 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
           IconButton(
             icon: Transform.rotate(
               angle: 1.5708, // 90° CW — turns splitscreen (horizontal divider)
-              child: const Icon(Icons.splitscreen, size: 18), // into a left/right split
+              child: const Icon(
+                Icons.splitscreen,
+                size: 18,
+              ), // into a left/right split
             ),
             color: iconColor,
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-            tooltip: 'Split Right (${describe(LogicalKeyboardKey.keyD, shift: true)})',
+            tooltip:
+                'Split Right (${describe(LogicalKeyboardKey.keyD, shift: true)})',
             onPressed: () => widget.onSplit(
-                widget.container.surfaces[widget.container.focusedIndex],
-                Axis.horizontal),
+              widget.container.surfaces[widget.container.focusedIndex],
+              Axis.horizontal,
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.splitscreen, size: 18),
@@ -1352,10 +1519,12 @@ class _ContainerTabBarState extends State<_ContainerTabBar> {
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-            tooltip: 'Split Down (${describe(LogicalKeyboardKey.keyE, shift: true)})',
+            tooltip:
+                'Split Down (${describe(LogicalKeyboardKey.keyE, shift: true)})',
             onPressed: () => widget.onSplit(
-                widget.container.surfaces[widget.container.focusedIndex],
-                Axis.vertical),
+              widget.container.surfaces[widget.container.focusedIndex],
+              Axis.vertical,
+            ),
           ),
         ],
         IconButton(
@@ -1392,6 +1561,17 @@ class _DraggableChip extends StatelessWidget {
   final bool isActive;
   final String containerId;
   final int indexInContainer;
+
+  /// Per-chip [GlobalKey] supplied by the tab bar's state. The key
+  /// is attached to the [ListenableBuilder] wrapping this chip's
+  /// render tree so [ensureIndexVisible] can locate the chip's
+  /// [RenderBox] by index. Without this key, the keyboard nav path
+  /// has no way to find a specific chip's render geometry (the
+  /// existing `ValueKey` is the surface-id, but the build loop
+  /// needs a stable lookup key per *position* that survives
+  /// reorders and closes).
+  final GlobalKey chipKey;
+
   /// Called when the user taps the chip. Receives the chip's
   /// [BuildContext] so the parent can locate the chip's
   /// [RenderBox] (used by the edge-click auto-scroll).
@@ -1406,6 +1586,7 @@ class _DraggableChip extends StatelessWidget {
 
   const _DraggableChip({
     super.key,
+    required this.chipKey,
     required this.surface,
     required this.isActive,
     required this.containerId,
@@ -1421,10 +1602,10 @@ class _DraggableChip extends StatelessWidget {
   });
 
   SurfaceDragData get _dragData => SurfaceDragData(
-        surfaceId: surface.id,
-        sourceContainerId: containerId,
-        sourceIndex: indexInContainer,
-      );
+    surfaceId: surface.id,
+    sourceContainerId: containerId,
+    sourceIndex: indexInContainer,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -1434,7 +1615,15 @@ class _DraggableChip extends StatelessWidget {
     // `cd` in WSL/bash would update `surface.title`/`currentCwd`
     // but the chip would only redraw on the next unrelated
     // setState (e.g. a tab-bar hover) — clicking another tab.
+    //
+    // The `chipKey` is attached here (not on the outer
+    // `_DraggableChip` element, which already carries a
+    // [ValueKey] for element matching) so that
+    // [ContainerTabBarState.ensureIndexVisible] can find this
+    // chip's [RenderBox] via the per-position key managed in
+    // [ContainerTabBarState._chipKeys].
     return ListenableBuilder(
+      key: chipKey,
       listenable: surface,
       builder: (context, _) => _buildChip(context),
     );
@@ -1487,10 +1676,7 @@ class _DraggableChip extends StatelessWidget {
           decoration: BoxDecoration(
             color: palette.surface1,
             borderRadius: BorderRadius.circular(4),
-            border: Border.all(
-              color: palette.accentBlue,
-              width: 1,
-            ),
+            border: Border.all(color: palette.accentBlue, width: 1),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.5),
@@ -1528,8 +1714,7 @@ class _DraggableChip extends StatelessWidget {
               const SizedBox(width: 2),
               Padding(
                 padding: const EdgeInsets.all(2),
-                child: Icon(Icons.close,
-                    size: 12, color: palette.textMuted),
+                child: Icon(Icons.close, size: 12, color: palette.textMuted),
               ),
             ],
           ),
@@ -1792,10 +1977,7 @@ class _InsertionLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
-    return SizedBox(
-      width: 2,
-      child: Container(color: palette.accentBlue),
-    );
+    return SizedBox(width: 2, child: Container(color: palette.accentBlue));
   }
 }
 
@@ -1876,12 +2058,14 @@ class _PaneDropOverlay extends StatefulWidget {
     SurfaceDragData drag,
     PaneContainer toContainer,
     int targetIndex,
-  ) onMoveSurfaceBetweenContainers;
+  )
+  onMoveSurfaceBetweenContainers;
   final void Function(
     SurfaceDragData drag,
     PaneContainer targetContainer,
     PaneEdge edge,
-  ) onDropToSplitEdge;
+  )
+  onDropToSplitEdge;
   final ValueListenable<bool> isAnyTabDragActive;
   final Widget child;
 
@@ -2101,14 +2285,11 @@ class _EdgeSplitZone extends StatelessWidget {
           child: Align(
             alignment: _alignmentFor(edge),
             child: Container(
-              width: edge == PaneEdge.left || edge == PaneEdge.right
-                  ? 3
-                  : null,
+              width: edge == PaneEdge.left || edge == PaneEdge.right ? 3 : null,
               height: edge == PaneEdge.top || edge == PaneEdge.bottom
                   ? 3
                   : null,
-              color:
-                  active ? palette.accentBlue : Colors.transparent,
+              color: active ? palette.accentBlue : Colors.transparent,
             ),
           ),
         );

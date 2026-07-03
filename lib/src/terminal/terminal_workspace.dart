@@ -82,6 +82,7 @@ class TerminalWorkspace extends StatefulWidget {
   final VoidCallback? onClose;
   final void Function(String name)? onNameChanged;
   final void Function(bool active)? onActiveChanged;
+
   /// Called when the last surface in the last container is closed —
   /// the workspace becomes empty.  The parent (e.g. AppShell) is
   /// expected to remove the workspace.  If null, the workspace is
@@ -244,27 +245,41 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       }
     }
 
-    _settingsSubs.add(runtime.store.watch<String>(t.fontFamily).listen((v) {
-      applyAndMaybeNotify((s) => s.copyWith(fontFamily: v));
-    }));
-    _settingsSubs.add(runtime.store.watch<double>(t.fontSize).listen((v) {
-      applyAndMaybeNotify((s) => s.copyWith(fontSize: v));
-    }));
-    _settingsSubs.add(runtime.store.watch<CursorStyle>(t.cursorStyle).listen((v) {
-      applyAndMaybeNotify((s) => s.copyWith(cursorStyle: v));
-    }));
-    _settingsSubs.add(runtime.store.watch<bool>(t.cursorBlink).listen((v) {
-      applyAndMaybeNotify((s) => s.copyWith(cursorBlink: v));
-    }));
-    _settingsSubs.add(runtime.store.watch<int>(t.scrollbackLines).listen((v) {
-      applyAndMaybeNotify((s) => s.copyWith(scrollbackLines: v));
-    }));
-    _settingsSubs.add(runtime.store.watch<bool>(t.copyOnSelect).listen((v) {
-      applyAndMaybeNotify((s) => s.copyWith(copyOnSelect: v));
-    }));
-    _settingsSubs.add(runtime.store.watch<BellMode>(t.bellMode).listen((v) {
-      applyAndMaybeNotify((s) => s.copyWith(bellMode: v));
-    }));
+    _settingsSubs.add(
+      runtime.store.watch<String>(t.fontFamily).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(fontFamily: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<double>(t.fontSize).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(fontSize: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<CursorStyle>(t.cursorStyle).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(cursorStyle: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<bool>(t.cursorBlink).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(cursorBlink: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<int>(t.scrollbackLines).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(scrollbackLines: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<bool>(t.copyOnSelect).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(copyOnSelect: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<BellMode>(t.bellMode).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(bellMode: v));
+      }),
+    );
 
     // Theme (palette) change → swap terminal foreground, selection,
     // background, and the 16 ANSI colors from the new palette. The
@@ -272,25 +287,26 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     // `terminal.backgroundColor` user override was removed because
     // it defeated the "theme change retints the terminal" goal —
     // an explicit override always won over the palette).
-    _settingsSubs.add(runtime.store
-        .watch<String>(catalog.general.themeName)
-        .listen((_) {
-      if (!mounted) return;
-      final p = _resolvePalette(runtime);
-      applyAndMaybeNotify((s) => s.copyWith(
+    _settingsSubs.add(
+      runtime.store.watch<String>(catalog.general.themeName).listen((_) {
+        if (!mounted) return;
+        final p = _resolvePalette(runtime);
+        applyAndMaybeNotify(
+          (s) => s.copyWith(
             backgroundColor: p.surface0,
             terminalForeground: p.terminalForeground,
             terminalSelection: p.terminalSelection,
             terminalAnsiColors: p.terminalAnsiColors,
-          ));
-    }));
+          ),
+        );
+      }),
+    );
   }
 
   /// Resolve the palette currently selected by the user. Cheap —
   /// `AppPalettes.byId` walks the registry's 9-entry list.
   static ThemePalette _resolvePalette(SettingsRuntime runtime) =>
-      AppPalettes.byId(
-          runtime.store.get(runtime.catalog.general.themeName));
+      AppPalettes.byId(runtime.store.get(runtime.catalog.general.themeName));
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -348,8 +364,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     surface?.focusNode.requestFocus();
   }
 
-  ShellProfile get _defaultShell =>
-      widget.availableShells[_defaultShellIndex];
+  ShellProfile get _defaultShell => widget.availableShells[_defaultShellIndex];
 
   /// Build a [Surface] for [profile], starting in [workingDirectory].
   /// The profile is carried so the tab bar can render the shell's
@@ -410,16 +425,26 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
         args,
       ).timeout(const Duration(seconds: 1));
       if (result.exitCode != 0) {
-        _log.log(Level.WARNING, 'wslpath -w ~ failed (exitCode=${result.exitCode}, stderr=${result.stderr}) for ${profile.program} ${args.join(' ')}');
+        _log.log(
+          Level.WARNING,
+          'wslpath -w ~ failed (exitCode=${result.exitCode}, stderr=${result.stderr}) for ${profile.program} ${args.join(' ')}',
+        );
         return null;
       }
       final home = (result.stdout as String).trim();
       return home.isEmpty ? null : home;
     } on TimeoutException {
-      _log.warning('wslpath -w ~ timed out after 1s for ${profile.program} ${args.join(' ')}');
+      _log.warning(
+        'wslpath -w ~ timed out after 1s for ${profile.program} ${args.join(' ')}',
+      );
       return null;
     } catch (e, st) {
-      _log.log(Level.WARNING, 'wslpath -w ~ threw for ${profile.program} ${args.join(' ')}', e, st);
+      _log.log(
+        Level.WARNING,
+        'wslpath -w ~ threw for ${profile.program} ${args.join(' ')}',
+        e,
+        st,
+      );
       return null;
     }
   }
@@ -483,7 +508,8 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     final fromBox =
         focused.dropOverlayKey.currentContext?.findRenderObject() as RenderBox?;
     if (fromBox == null) return;
-    final fromCenter = fromBox.localToGlobal(Offset.zero) +
+    final fromCenter =
+        fromBox.localToGlobal(Offset.zero) +
         Offset(fromBox.size.width / 2, fromBox.size.height / 2);
 
     // Collect every leaf in the tree. forEachLeaf lives on PaneSplit
@@ -506,7 +532,8 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       final box =
           c.dropOverlayKey.currentContext?.findRenderObject() as RenderBox?;
       if (box == null) continue;
-      final center = box.localToGlobal(Offset.zero) +
+      final center =
+          box.localToGlobal(Offset.zero) +
           Offset(box.size.width / 2, box.size.height / 2);
       final dx = center.dx - fromCenter.dx;
       final dy = center.dy - fromCenter.dy;
@@ -639,28 +666,24 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
         }
         return _CloseResult(tree, owner);
       }
-      return _CloseResult(
-        tree,
-        tree.focusedLeaf as PaneContainer?,
-      );
+      return _CloseResult(tree, tree.focusedLeaf as PaneContainer?);
     }
     if (newRoot is PaneContainer) {
       // Container collapsed — its sibling (the returned subtree) is
       // now the root.  If the root itself is a PaneContainer, the
       // whole tree became a single pane.
       if (newRoot.surfaces.isNotEmpty) {
-        newRoot.focusedIndex =
-            newRoot.focusedIndex.clamp(0, newRoot.surfaces.length - 1);
+        newRoot.focusedIndex = newRoot.focusedIndex.clamp(
+          0,
+          newRoot.surfaces.length - 1,
+        );
       }
       return _CloseResult(newRoot, newRoot);
     }
     // newRoot is PaneSplit (only happens when removeSurface returns
     // a new split; current implementation never does, but keep the
     // branch for forward-compat).
-    return _CloseResult(
-      newRoot,
-      newRoot.focusedLeaf as PaneContainer?,
-    );
+    return _CloseResult(newRoot, newRoot.focusedLeaf as PaneContainer?);
   }
 
   PaneContainer? _findContainerOf(Surface surface) {
@@ -701,6 +724,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     setState(() {
       c.focusedIndex = (c.focusedIndex + 1) % c.surfaces.length;
     });
+    _scrollActiveChipIntoView(c);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       focusCurrentPane();
     });
@@ -713,6 +737,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       c.focusedIndex =
           (c.focusedIndex - 1 + c.surfaces.length) % c.surfaces.length;
     });
+    _scrollActiveChipIntoView(c);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       focusCurrentPane();
     });
@@ -722,9 +747,25 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     final c = _focusedContainer;
     if (c == null || index < 0 || index >= c.surfaces.length) return;
     setState(() => c.focusedIndex = index);
+    _scrollActiveChipIntoView(c);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       focusCurrentPane();
     });
+  }
+
+  /// Ask the tab bar of [container] to scroll its newly-focused
+  /// chip into view. Called from the three keyboard navigation
+  /// paths (Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1..9) so that
+  /// navigating past the visible edge of the tab bar reveals the
+  /// activated tab — matching what the mouse-click path already
+  /// does via [_ContainerTabBarState._maybeAutoScroll]. Safe to
+  /// call when the tab bar isn't mounted yet (e.g. during the
+  /// first frame after a new tab is created and immediately
+  /// focused) — the call is a no-op in that case.
+  void _scrollActiveChipIntoView(PaneContainer container) {
+    container.tabBarKey.currentState?.ensureIndexVisible(
+      container.focusedIndex,
+    );
   }
 
   // ── Split operations ─────────────────────────────────────────────
@@ -797,11 +838,19 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     }
     if (parent.first is PaneSplit) {
       _splitContainerInTree(
-          parent.first as PaneSplit, target, newContainer, direction);
+        parent.first as PaneSplit,
+        target,
+        newContainer,
+        direction,
+      );
     }
     if (parent.second is PaneSplit) {
       _splitContainerInTree(
-          parent.second as PaneSplit, target, newContainer, direction);
+        parent.second as PaneSplit,
+        target,
+        newContainer,
+        direction,
+      );
     }
   }
 
@@ -883,7 +932,10 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// user drops a tab onto another tab in the same pane (or onto the
   /// end-of-list zone of the same pane).
   void _reorderSurfaceInContainer(
-      PaneContainer container, int oldIndex, int newIndex) {
+    PaneContainer container,
+    int oldIndex,
+    int newIndex,
+  ) {
     if (oldIndex < 0 ||
         oldIndex >= container.surfaces.length ||
         newIndex < 0 ||
@@ -905,8 +957,9 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       final s = container.surfaces.removeAt(oldIndex);
       container.surfaces.insert(newIndex, s);
       // Keep the focused tab focused after reorder, if possible.
-      container.focusedIndex =
-          container.surfaces.indexOf(s).clamp(0, container.surfaces.length - 1);
+      container.focusedIndex = container.surfaces
+          .indexOf(s)
+          .clamp(0, container.surfaces.length - 1);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       focusCurrentPane();
@@ -943,18 +996,16 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     if (identical(fromContainer, toContainer)) return;
     if (root is! PaneSplit) return;
 
-    final clampedTarget =
-        targetIndex.clamp(0, toContainer.surfaces.length);
+    final clampedTarget = targetIndex.clamp(0, toContainer.surfaces.length);
 
     setState(() {
       // 1) Remove from source list.
       fromContainer.surfaces.remove(surface);
       // Fix focused index if it landed out of range.
       if (fromContainer.focusedIndex >= fromContainer.surfaces.length) {
-        fromContainer.focusedIndex =
-            fromContainer.surfaces.isEmpty
-                ? 0
-                : fromContainer.surfaces.length - 1;
+        fromContainer.focusedIndex = fromContainer.surfaces.isEmpty
+            ? 0
+            : fromContainer.surfaces.length - 1;
       }
 
       // 2) Collapse source if it became empty (tree is a split,
@@ -1016,10 +1067,9 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       // 1) Remove from source.
       fromContainer.surfaces.remove(surface);
       if (fromContainer.focusedIndex >= fromContainer.surfaces.length) {
-        fromContainer.focusedIndex =
-            fromContainer.surfaces.isEmpty
-                ? 0
-                : fromContainer.surfaces.length - 1;
+        fromContainer.focusedIndex = fromContainer.surfaces.isEmpty
+            ? 0
+            : fromContainer.surfaces.length - 1;
       }
 
       // 2) Collapse source if it became empty.
@@ -1087,6 +1137,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
         }
         return null;
       }
+
       return visit(root);
     }
     return null;
@@ -1107,6 +1158,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       }
       return null;
     }
+
     return visit(root);
   }
 
@@ -1175,8 +1227,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
                   },
                   onResize: _onPaneResize,
                   onReorderSurface: _reorderSurfaceInContainer,
-                  onMoveSurfaceBetweenContainers:
-                      _moveSurfaceBetweenContainers,
+                  onMoveSurfaceBetweenContainers: _moveSurfaceBetweenContainers,
                   onDropToSplitEdge: _dropToSplitEdge,
                   isAnyTabDragActive: _isAnyTabDragActive,
                   onAnyDragActiveChanged: _setAnyDragActive,

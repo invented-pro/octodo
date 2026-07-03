@@ -34,8 +34,10 @@ void main() {
 
     test('drive-rooted forward-slash path → backslash', () {
       expect(Surface.normalizeShellCwd('C:/Users/<user>'), r'C:\Users\<user>');
-      expect(Surface.normalizeShellCwd('c:/Program Files/app'),
-          r'c:\Program Files\app');
+      expect(
+        Surface.normalizeShellCwd('c:/Program Files/app'),
+        r'c:\Program Files\app',
+      );
       expect(Surface.normalizeShellCwd('D:/'), r'D:\');
     });
 
@@ -46,8 +48,10 @@ void main() {
 
     test('POSIX absolute path passes through unchanged', () {
       expect(Surface.normalizeShellCwd('/home/alice'), '/home/alice');
-      expect(Surface.normalizeShellCwd('/mnt/c/Users/<user>'),
-          '/mnt/c/Users/<user>');
+      expect(
+        Surface.normalizeShellCwd('/mnt/c/Users/<user>'),
+        '/mnt/c/Users/<user>',
+      );
       expect(Surface.normalizeShellCwd('/tmp'), '/tmp');
     });
 
@@ -84,11 +88,15 @@ void main() {
       expect(Surface.normalizeShellCwd('C'), 'C');
     });
 
-    test('multiple forward slashes in a drive path collapse to backslashes',
-        () {
-      expect(Surface.normalizeShellCwd('C://Users///<user>'),
-          r'C:\\Users\\\<user>');
-    });
+    test(
+      'multiple forward slashes in a drive path collapse to backslashes',
+      () {
+        expect(
+          Surface.normalizeShellCwd('C://Users///<user>'),
+          r'C:\\Users\\\<user>',
+        );
+      },
+    );
   });
 
   group('PaneSplit.removeSurface — nested-collapse focus tracking', () {
@@ -127,34 +135,39 @@ void main() {
 
       // Outer split object is unchanged (the inner split collapsed and
       // was spliced in by being replaced with `b`); but `a` is gone.
-      expect(identical(newRoot, outerSplit), isTrue,
-          reason: 'outer split is the same object; only its first child '
-              'changed from innerSplit → b');
+      expect(
+        identical(newRoot, outerSplit),
+        isTrue,
+        reason:
+            'outer split is the same object; only its first child '
+            'changed from innerSplit → b',
+      );
       // `a` no longer reachable from the new tree.
       final reachable = <String>{
         for (final leaf in _allLeaves(newRoot!)) leaf.id,
       };
-      expect(reachable.contains(a.id), isFalse,
-          reason: 'a was disposed and removed from the tree');
+      expect(
+        reachable.contains(a.id),
+        isFalse,
+        reason: 'a was disposed and removed from the tree',
+      );
       expect(reachable.contains(b.id), isTrue);
       expect(reachable.contains(c.id), isTrue);
     });
 
     test('top-level (non-nested) collapse: identical(newRoot, split) is '
-        'false because the split is replaced by the surviving container',
-        () {
+        'false because the split is replaced by the surviving container', () {
       final a = PaneContainer()..surfaces.add(Surface());
       final b = PaneContainer()..surfaces.add(Surface());
-      final split = PaneSplit(
-        direction: Axis.horizontal,
-        first: a,
-        second: b,
-      );
+      final split = PaneSplit(direction: Axis.horizontal, first: a, second: b);
 
       final newRoot = split.removeSurface(a.surfaces.first);
 
-      expect(identical(newRoot, split), isFalse,
-          reason: 'top-level collapse returns the sibling, not the split');
+      expect(
+        identical(newRoot, split),
+        isFalse,
+        reason: 'top-level collapse returns the sibling, not the split',
+      );
       expect(identical(newRoot, b), isTrue);
     });
   });
@@ -171,18 +184,20 @@ void main() {
     test('top-level collapse: focused = surviving sibling', () {
       final a = PaneContainer()..surfaces.add(Surface());
       final b = PaneContainer()..surfaces.add(Surface());
-      final split = PaneSplit(
-        direction: Axis.horizontal,
-        first: a,
-        second: b,
-      );
+      final split = PaneSplit(direction: Axis.horizontal, first: a, second: b);
 
       final result = applyCloseSurfaceForTest(split, a, a.surfaces.first);
       expect(result, isNotNull);
-      expect(identical(result!.tree, b), isTrue,
-          reason: 'tree root collapses to the surviving sibling');
-      expect(identical(result.focused, b), isTrue,
-          reason: 'focus transfers to the surviving sibling');
+      expect(
+        identical(result!.tree, b),
+        isTrue,
+        reason: 'tree root collapses to the surviving sibling',
+      );
+      expect(
+        identical(result.focused, b),
+        isTrue,
+        reason: 'focus transfers to the surviving sibling',
+      );
     });
 
     test('nested collapse (owner disposed inside inner split): '
@@ -201,38 +216,188 @@ void main() {
         second: c,
       );
 
-      final result = applyCloseSurfaceForTest(
-          outerSplit, a, a.surfaces.first);
+      final result = applyCloseSurfaceForTest(outerSplit, a, a.surfaces.first);
       expect(result, isNotNull);
       // Tree root is unchanged (outerSplit), but a is gone.
       expect(identical(result!.tree, outerSplit), isTrue);
       // CRITICAL: focused must NOT be the disposed `a`.
-      expect(identical(result.focused, a), isFalse,
-          reason: 'a was disposed; pointing _focusedContainer at it would '
-              'break Ctrl+Shift+K, visual focus indicator, and '
-              'focusCurrentPane()');
+      expect(
+        identical(result.focused, a),
+        isFalse,
+        reason:
+            'a was disposed; pointing _focusedContainer at it would '
+            'break Ctrl+Shift+K, visual focus indicator, and '
+            'focusCurrentPane()',
+      );
       // Focused should be the first reachable leaf (B in this layout).
       expect(identical(result.focused, b), isTrue);
     });
 
     test('non-collapsing close (owner keeps other surfaces): '
         'focused = owner', () {
-      final a = PaneContainer()
-        ..surfaces.addAll([Surface(), Surface()]);
+      final a = PaneContainer()..surfaces.addAll([Surface(), Surface()]);
       final b = PaneContainer()..surfaces.add(Surface());
-      final split = PaneSplit(
-        direction: Axis.horizontal,
-        first: a,
-        second: b,
-      );
+      final split = PaneSplit(direction: Axis.horizontal, first: a, second: b);
 
-      final result = applyCloseSurfaceForTest(
-          split, a, a.surfaces[0]);
+      final result = applyCloseSurfaceForTest(split, a, a.surfaces[0]);
       expect(result, isNotNull);
       expect(identical(result!.tree, split), isTrue);
       expect(identical(result.focused, a), isTrue);
       // focusedIndex clamped to the new last surface.
       expect(a.focusedIndex, 0);
+    });
+  });
+
+  group('ContainerTabBarState.computeEnsureVisibleTargetOffset', () {
+    // Helper to keep the test table compact. `minOffset` is 0
+    // (the leading edge of a normal scrollable); `maxOffset` is
+    // whatever the caller computes (e.g. total chip width minus
+    // viewport width).
+    double? run({
+      required double chipLeft,
+      required double chipWidth,
+      required double listViewWidth,
+      required double currentOffset,
+      required double maxOffset,
+    }) {
+      return ContainerTabBarState.computeEnsureVisibleTargetOffset(
+        chipLeft: chipLeft,
+        chipWidth: chipWidth,
+        listViewWidth: listViewWidth,
+        currentOffset: currentOffset,
+        minOffset: 0,
+        maxOffset: maxOffset,
+      );
+    }
+
+    test('chip fully visible at left edge → null (no scroll)', () {
+      // chip occupies [0, 100] inside a 200-wide viewport; nothing
+      // hidden on either side.
+      expect(
+        run(
+          chipLeft: 0,
+          chipWidth: 100,
+          listViewWidth: 200,
+          currentOffset: 0,
+          maxOffset: 500,
+        ),
+        isNull,
+      );
+    });
+
+    test('chip fully visible in the middle → null (no scroll)', () {
+      // chip occupies [50, 150] inside a 200-wide viewport; nothing
+      // hidden on either side.
+      expect(
+        run(
+          chipLeft: 50,
+          chipWidth: 100,
+          listViewWidth: 200,
+          currentOffset: 0,
+          maxOffset: 500,
+        ),
+        isNull,
+      );
+    });
+
+    test('chip exactly flush with right edge → null (still visible)', () {
+      // chipRight == listViewWidth means the chip's right edge
+      // meets the viewport's right edge — still fully visible, no
+      // need to scroll.
+      expect(
+        run(
+          chipLeft: 100,
+          chipWidth: 100,
+          listViewWidth: 200,
+          currentOffset: 0,
+          maxOffset: 500,
+        ),
+        isNull,
+      );
+    });
+
+    test('chip off-screen to the LEFT scrolls it to the leading edge', () {
+      // chip is 50px past the left edge of the viewport; current
+      // scroll is 100. Absolute chip position = 50, so scroll to
+      // 50 to put the chip at the leading edge.
+      expect(
+        run(
+          chipLeft: -50,
+          chipWidth: 100,
+          listViewWidth: 200,
+          currentOffset: 100,
+          maxOffset: 500,
+        ),
+        50.0,
+      );
+    });
+
+    test('chip off-screen to the LEFT at scroll 0 clamps to 0', () {
+      // Already at the leftmost position; can't scroll further
+      // negative. Result is 0 (chip will sit at viewport's left
+      // edge with its tail still hidden — same as the click
+      // handler's behavior on the trailing clamp).
+      expect(
+        run(
+          chipLeft: -50,
+          chipWidth: 100,
+          listViewWidth: 200,
+          currentOffset: 0,
+          maxOffset: 500,
+        ),
+        0.0,
+      );
+    });
+
+    test('chip off-screen to the RIGHT scrolls it to the trailing edge', () {
+      // chip occupies [250, 350] in absolute coords; viewport is
+      // [0, 200]. To put the chip's right edge at the viewport's
+      // right edge: newOffset = 250 + 100 - 200 = 150.
+      expect(
+        run(
+          chipLeft: 250,
+          chipWidth: 100,
+          listViewWidth: 200,
+          currentOffset: 0,
+          maxOffset: 500,
+        ),
+        150.0,
+      );
+    });
+
+    test('chip off-screen to the RIGHT when already at max clamps to max', () {
+      // Current offset is the maxScrollExtent, so we can't scroll
+      // further right. The result must not exceed maxOffset, and
+      // the chip will be left slightly past the trailing edge —
+      // same trade-off as the off-left-at-zero case.
+      expect(
+        run(
+          chipLeft: 550,
+          chipWidth: 100,
+          listViewWidth: 200,
+          currentOffset: 500,
+          maxOffset: 500,
+        ),
+        500.0,
+      );
+    });
+
+    test('chip off-right while partially past current viewport mid-scroll', () {
+      // viewport is [100, 300]; chip is at [350, 450]. Scrolling
+      // so the chip's right edge is at viewport's right edge:
+      // newOffset = 100 + (350 + 100 - 200) = 350. (chipLeft here
+      // is 350 - 100 = 250; the math is chipLeft + chipWidth -
+      // listViewWidth = 150, currentOffset 100 + 150 = 250.)
+      expect(
+        run(
+          chipLeft: 250,
+          chipWidth: 100,
+          listViewWidth: 200,
+          currentOffset: 100,
+          maxOffset: 500,
+        ),
+        250.0,
+      );
     });
   });
 }
