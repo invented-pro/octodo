@@ -12,9 +12,6 @@
 .swiftpm/
 migrate_working_dir/
 
-# Local working notes / trackers (untracked by design)
-todo.md
-
 # IntelliJ related
 *.iml
 *.ipr
