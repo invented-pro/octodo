@@ -15,6 +15,7 @@ import 'package:flutter_alacritty/flutter_alacritty.dart'
         IncreaseFontSizeIntent,
         ResetFontSizeIntent;
 import 'package:signals/signals_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../settings/settings_catalog.dart';
 import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
@@ -861,6 +862,17 @@ class TerminalViewState extends State<TerminalView> {
     }
   }
 
+  Future<void> _onLinkActivate(String uri) async {
+    final target = Uri.tryParse(uri);
+    if (target == null) return;
+    final ok = await launchUrl(target, mode: LaunchMode.externalApplication);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open $target')),
+      );
+    }
+  }
+
   // ── Clipboard / readline shortcuts ────────────────────────────────
 
   void _sendCtrlU() => _engine.write(Uint8List.fromList([0x15]));
@@ -1050,6 +1062,7 @@ Positioned.fill(
     bellDuration: _bellDurationForView,
     onViewportResize: _onViewportResize,
     onSecondaryTapUp: _onSecondaryTapUp,
+    onLinkActivate: _onLinkActivate,
   ),
 ),
             SignalBuilder(
