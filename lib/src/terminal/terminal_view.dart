@@ -382,10 +382,17 @@ class TerminalViewState extends State<TerminalView> {
     _fontSize = _defaultFontSize;
     _copyOnSelect = _settings!.copyOnSelect;
     _bellMode = _settings!.bellMode;
-    _log.fine('initState: creating engine (program="${widget.surface.program}", cwd=${widget.workingDirectory})');
+    if (_log.isLoggable(Level.FINE)) {
+      _log.fine('initState: creating engine (program="${widget.surface.program}", cwd=${widget.workingDirectory})');
+    }
 
     _engine = fa.TerminalEngine(config: _buildConfig());
-    _log.fine('initState: engine created, grid rows=${_engine.grid.rows} cols=${_engine.grid.columns} gen=${_engine.grid.generation}');
+    // Gate the FFI getter calls — `engine.grid.rows/columns/generation`
+    // each cross the FFI boundary. Once-per-tab today, but the gate
+    // also future-proofs against a per-frame caller.
+    if (_log.isLoggable(Level.FINE)) {
+      _log.fine('initState: engine created, grid rows=${_engine.grid.rows} cols=${_engine.grid.columns} gen=${_engine.grid.generation}');
+    }
     _controller = fa.TerminalController()..attach(_engine);
     _engine.title.addListener(_syncTitle);
     _engine.workingDir.addListener(_syncPwd);
@@ -727,7 +734,12 @@ class TerminalViewState extends State<TerminalView> {
         if (!_hasReceivedOutput.value) {
           _hasReceivedOutput.value = true;
           _slowHintTimer?.cancel();
-          _log.info('FIRST PTY OUTPUT: ${bytes.length} bytes (after ${DateTime.now().millisecondsSinceEpoch - _startTimeMs}ms)');
+          // Gate the `DateTime.now()` + arithmetic in the message —
+          // the framework would skip the emit at OFF level, but
+          // argument evaluation still runs otherwise.
+          if (_log.isLoggable(Level.INFO)) {
+            _log.info('FIRST PTY OUTPUT: ${bytes.length} bytes (after ${DateTime.now().millisecondsSinceEpoch - _startTimeMs}ms)');
+          }
         }
         // Accumulate into [_outputBuffer] and (re)start a one-shot flush
         // timer. The first chunk arms the timer; subsequent chunks within
@@ -819,7 +831,12 @@ class TerminalViewState extends State<TerminalView> {
   // `_alacrittyShortcutsWithShiftVariants` below.
 
   void _onViewportResize(int cols, int rows) {
-    _log.fine('_onViewportResize: cols=$cols rows=$rows (engine grid=${_engine.grid.rows}x${_engine.grid.columns} gen=${_engine.grid.generation})');
+    // Gate the three FFI getters — this fires on every drag-resize
+    // tick (LayoutBuilder.postFrame → onViewportResize) and the
+    // grid property reads cross the FFI boundary.
+    if (_log.isLoggable(Level.FINE)) {
+      _log.fine('_onViewportResize: cols=$cols rows=$rows (engine grid=${_engine.grid.rows}x${_engine.grid.columns} gen=${_engine.grid.generation})');
+    }
     _pty?.resize(rows, cols);
   }
 

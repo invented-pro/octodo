@@ -26,6 +26,14 @@ void configureLogging({Level? rootLevel}) {
 }
 
 void _emit(LogRecord r) {
+  // Defensive double-gate. `package:logging` already filters records
+  // against `Logger.level` at the call site (so when root level is
+  // OFF, no record is ever created), but explicit gating here makes
+  // the intent obvious and is the branch the CPU is going to predict
+  // correctly every time. Cost in the gated-off path: one integer
+  // compare. Cost in the active path: zero (the framework's check
+  // already passed).
+  if (r.level < Logger.root.level) return;
   final buf = StringBuffer()
     ..write(r.time.toIso8601String())
     ..write(' ')
