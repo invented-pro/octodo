@@ -48,7 +48,6 @@ dependencies:
   window_manager: ^0.5.1
   flex_color_picker: ^3.8.0
   just_font_scan: ^0.3.0
-  meta: ^1.16.0
 
 dev_dependencies:
   flutter_test:
