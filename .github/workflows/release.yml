@@ -3,8 +3,9 @@ name: release
 # Triggered by pushing a tag like v1.2.3. The runner reads
 # github.ref_name (always includes the "v" prefix) and turns it into:
 #   - --build-name=1.2.3  (semver, no "v" — what package_info_plus reports)
-#   - octodo-v1.2.3-windows-x64.zip      (asset on the release page)
-#   - octodo-v1.2.3-windows-x64.zip.sha256 (sidecar for the in-app updater)
+#   - octodo-v1.2.3-windows-x64.zip      (asset on GitHub + R2 mirror)
+#   - octodo-v1.2.3-windows-x64.zip.sha256 (sidecar)
+#   - manifest.json                      (R2 mirror only)
 on:
   push:
     tags: ['v*']
@@ -15,6 +16,18 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      # Non-secret: the public URL the in-app R2UpdateFeed will GET.
+      # Already includes the `cf1/octodo/` path prefix; the
+      # manifest.json's `browser_download_url` is built as
+      # `${R2_PUBLIC_BASE}/<asset>`, so the in-app GETs match the
+      # object keys we put. Example value:
+      #   https://pub-dd7476e103ca42c3afadd4ec6903d370.r2.dev/cf1/octodo
+      R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+      # Cloudflare dashboard → R2 → Object Storage → bucket name.
+      # For this project: `cf1`.
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -60,8 +73,8 @@ jobs:
 
           # github.ref_name is e.g. "v1.2.3". Strip the leading "v" for
           # --build-name (Dart compares as semver; "v1.2.3" fails parse)
-          # but keep it in the asset filename so GitHub assets and the
-          # git tag stay in lockstep.
+          # but keep it in the asset filename so the asset filename and
+          # the git tag stay in lockstep.
           $tag = "${{ github.ref_name }}"
           $ver = $tag -replace '^v',''
 
@@ -102,11 +115,101 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
           [System.IO.File]::WriteAllText($sha, $hash)
 
-          # Expose the stripped version so the next step can name the
+          # Expose the stripped version so the next steps can name the
           # upload correctly (action expressions don't regex-strip "v").
           "ver=$ver" | Out-File -Append -Encoding ascii -FilePath $env:GITHUB_OUTPUT
 
           Write-Host "Wrote $zip ($hash)"
+
+      # ---------------------------------------------------------------
+      # Synthesize manifest.json — a static JSON describing the current
+      # release, mirrored byte-for-byte from the shape GitHub's
+      # /releases/latest returns so the in-app R2UpdateFeed can reuse
+      # resolveReleaseJson() with zero changes.
+      #
+      # browser_download_url on each asset is rewritten to point at the
+      # R2 PUBLIC base (R2_PUBLIC_BASE) so the in-app download path
+      # pulls the bytes from R2, not from GitHub.
+      #
+      # One manifest per release, overwritten in place at
+      #   cf1/octodo/manifest.json
+      # so the in-app R2UpdateFeed always sees a single, "what's
+      # latest" pointer.
+      # ---------------------------------------------------------------
+      - name: Synthesize R2 manifest.json
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver  = "${{ steps.build.outputs.ver }}"
+          $tag  = "${{ github.ref_name }}"
+          $base = "$env:R2_PUBLIC_BASE"
+          $zip  = "octodo-v$ver-windows-x64.zip"
+          $sha  = "$zip.sha256"
+          $now  = (Get-Date).ToUniversalTime().ToString('o')
+
+          $zipSize = (Get-Item $zip).Length
+          $shaSize = (Get-Item $sha).Length
+
+          # Construct in `[ordered]@{}` order so the JSON keys appear
+          # in the same order GitHub emits — handy for diffing the
+          # byte-level structure against a real GitHub response when
+          # debugging the R2UpdateFeed. `convertto-json -Depth 10`
+          # handles the nested assets array; `ConvertTo-Json` would
+          # emit `Microsoft.PowerShell.Commands.WebResponseObject`
+          # placeholders for anything unquoted by default.
+          $manifest = [ordered]@{
+            tag_name      = $tag
+            name          = $tag
+            prerelease    = $tag.Contains('-')
+            published_at  = $now
+            html_url      = "https://github.com/invented-pro/octodo/releases/tag/$tag"
+            body          = ""
+            assets        = @(
+              [ordered]@{
+                name                 = $zip
+                size                 = $zipSize
+                browser_download_url = "$base/$zip"
+                content_type         = "application/zip"
+              }
+              [ordered]@{
+                name                 = $sha
+                size                 = $shaSize
+                browser_download_url = "$base/$sha"
+                content_type         = "text/plain; charset=utf-8"
+              }
+            )
+          } | ConvertTo-Json -Depth 10
+
+          $manifest | Out-File -Encoding utf8 -FilePath manifest.json
+          Write-Host "Wrote manifest.json:"
+          Get-Content manifest.json
+
+      # Push the zip, the .sha256 sidecar, and manifest.json to R2.
+      # The official wrangler-action handles auth + tool install +
+      # per-run state; we just enumerate the three PUTs in one
+      # command so any failure bubbles up through `$LASTEXITCODE`.
+      #
+      # The credentials read here come from GitHub secrets:
+      #   CLOUDFLARE_API_TOKEN  — Account.Workers R2 Storage: Edit
+      #   CLOUDFLARE_ACCOUNT_ID — from R2 dashboard top-right
+      # Both are passed into the action's `with:` block; we never
+      # echo them so they stay masked in the log.
+      - name: Upload to Cloudflare R2
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            r2 object put ${{ env.R2_BUCKET }}/octodo/octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip
+              --file octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip
+              --content-type application/zip
+            && r2 object put ${{ env.R2_BUCKET }}/octodo/octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
+              --file octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
+              --content-type "text/plain; charset=utf-8"
+            && r2 object put ${{ env.R2_BUCKET }}/octodo/manifest.json
+              --file manifest.json
+              --content-type "application/json; charset=utf-8"
+          workingDirectory: ${{ github.workspace }}
 
       - uses: softprops/action-gh-release@v2
         with:
