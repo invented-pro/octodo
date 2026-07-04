@@ -162,4 +162,59 @@ void main() {
       expect(m.iconName, Icons.restart_alt);
     });
   });
+
+  group('isUpToDate flag', () {
+    test('starts false', () {
+      final m = UpdateStateModel(currentVersion: '1.0.0');
+      expect(m.isUpToDate, isFalse);
+    });
+
+    test('markUpToDate sets the flag', () {
+      final m = UpdateStateModel(currentVersion: '1.0.0');
+      m.markUpToDate();
+      expect(m.isUpToDate, isTrue);
+    });
+
+    test('markUpToDate is idempotent (no duplicate notifications)', () {
+      final m = UpdateStateModel(currentVersion: '1.0.0');
+      var notifications = 0;
+      m.addListener(() => notifications += 1);
+      m.markUpToDate();
+      m.markUpToDate();
+      m.markUpToDate();
+      expect(notifications, 1);
+    });
+
+    test('setAvailable clears the flag when a newer release is found', () {
+      final m = UpdateStateModel(currentVersion: '1.0.0');
+      m.markUpToDate();
+      expect(m.isUpToDate, isTrue);
+      m.setAvailable(_release(version: '1.2.3'));
+      expect(m.isUpToDate, isFalse);
+    });
+
+    test('setError clears the flag (uncertainty)', () {
+      final m = UpdateStateModel(currentVersion: '1.0.0');
+      m.markUpToDate();
+      m.setError(const UpdateErrorPayload(message: 'boom'));
+      expect(m.isUpToDate, isFalse);
+    });
+
+    test('reset preserves the flag (idle after a clean probe)', () {
+      final m = UpdateStateModel(currentVersion: '1.0.0');
+      m.markUpToDate();
+      m.reset();
+      expect(m.state, UpdateState.idle);
+      expect(m.isUpToDate, isTrue);
+    });
+
+    test('setState(notFound) does not touch the flag', () {
+      // The 2.5 s flash is a transient UI signal — it mustn't
+      // stomp the persistent "Latest" indicator.
+      final m = UpdateStateModel(currentVersion: '1.0.0');
+      m.markUpToDate();
+      m.setState(UpdateState.notFound);
+      expect(m.isUpToDate, isTrue);
+    });
+  });
 }

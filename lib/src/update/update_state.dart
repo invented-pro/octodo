@@ -115,6 +115,15 @@ class UpdateStateModel extends ChangeNotifier {
   final String _currentVersion;
   DateTime? _lastCheck;
 
+  /// Persistent "you're up to date" flag — true once any probe
+  /// (initial, periodic, or manual) has confirmed the running
+  /// version matches or exceeds the published release. Cleared
+  /// whenever a newer release is detected or the probe fails
+  /// (uncertainty). Independent of the transient [UpdateState]
+  /// — the 2.5 s `notFound` flash and the idle state both leave
+  /// this flag alone.
+  bool _isUpToDate = false;
+
   UpdateStateModel({required String currentVersion})
       // ignore: prefer_initializing_formals
       : _currentVersion = currentVersion;
@@ -126,6 +135,12 @@ class UpdateStateModel extends ChangeNotifier {
   UpdateErrorPayload? get error => _error;
   String get currentVersion => _currentVersion;
   DateTime? get lastCheck => _lastCheck;
+
+  /// True when the most recent probe confirmed no newer release
+  /// is available. Stays true across the [UpdateState.notFound]
+  /// → [UpdateState.idle] transition so the UI can keep showing
+  /// the "Latest" indicator.
+  bool get isUpToDate => _isUpToDate;
 
   /// True when the pill should be visible. [UpdateState.notFound] is
   /// intentionally hidden — the controller auto-dismisses it after
@@ -211,11 +226,22 @@ class UpdateStateModel extends ChangeNotifier {
   }
 
   void setAvailable(ReleaseInfo release) {
+    // Short-circuit when the controller re-pushes the same release
+    // (e.g. a 1 h periodic probe that finds nothing new). Skipping
+    // the rebuild avoids an AnimatedBuilder pass over the drawer
+    // pill for every redundant probe.
+    if (_state == UpdateState.updateAvailable &&
+        _release != null &&
+        _release!.version == release.version &&
+        _release!.zipUrl == release.zipUrl) {
+      return;
+    }
     _release = release;
     _state = UpdateState.updateAvailable;
     _progress = null;
     _downloaded = null;
     _error = null;
+    _isUpToDate = false;
     _lastCheck = DateTime.now();
     _changesCtrl.add(_state);
     notifyListeners();
@@ -273,8 +299,23 @@ class UpdateStateModel extends ChangeNotifier {
     _release = null;
     _progress = null;
     _downloaded = null;
+    // Error means uncertainty about whether a newer release is
+    // available — drop the "Latest" indicator until the next
+    // probe comes back clean.
+    _isUpToDate = false;
     _lastCheck = DateTime.now();
     _changesCtrl.add(_state);
+    notifyListeners();
+  }
+
+  /// Mark the running app as confirmed up to date. Called by
+  /// the controller from the "probe returned no newer release"
+  /// branch (whether the probe was background or manual).
+  /// Idempotent — short-circuits if the flag is already set so
+  /// the periodic 1 h probe doesn't trigger spurious rebuilds.
+  void markUpToDate() {
+    if (_isUpToDate) return;
+    _isUpToDate = true;
     notifyListeners();
   }
 

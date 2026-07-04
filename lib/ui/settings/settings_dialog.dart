@@ -16,6 +16,7 @@ import '../../src/app_info.dart';
 import '../../src/log.dart';
 import '../../src/settings/setting.dart';
 import '../../src/settings/settings_catalog.dart';
+import '../../src/settings/json_settings_store.dart';
 import '../../src/settings/settings_runtime.dart';
 import '../../src/terminal/font_family_options.dart';
 import '../../src/theme/palette_context.dart';
@@ -369,7 +370,7 @@ class _Detail extends StatelessWidget {
   Widget _buildPaths(BuildContext context) {
     final runtime = SettingsRuntime.instance;
     final store = runtime.store;
-    final path = store.path;
+    final path = (store as JsonSettingsStore).path;
     final palette = context.palette;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -581,7 +582,7 @@ class _Footer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final path = runtime.store.path;
+    final path = (runtime.store as JsonSettingsStore).path;
     final palette = context.palette;
     return Container(
       height: 44,

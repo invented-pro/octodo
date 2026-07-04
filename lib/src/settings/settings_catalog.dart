@@ -163,8 +163,28 @@ class UpdateSettingsSection {
     icon: Icons.cloud_outlined,
   );
 
+  /// Optional. JSON manifest URL mirroring GitHub's release shape
+  /// (typically a Cloudflare R2 + custom domain, or any HTTPS bucket
+  /// of static objects). Used when the primary GitHub feed fails —
+  /// including rate-limit — so the in-app updater can still resolve
+  /// a release. Leave empty to disable the fallback.
+  ///
+  /// Not surfaced in the settings dialog yet; the corresponding
+  /// jsonc key is `update.fallbackUrl`.
+  final fallbackUrl = StringSetting(
+    'update.fallbackUrl',
+    defaultValue: '',
+    title: 'Fallback update feed URL',
+    subtitle:
+        'Optional. JSON manifest mirroring GitHub\'s release shape; '
+        'used when the primary GitHub feed fails (including rate-limit). '
+        'Leave empty to disable.',
+    icon: Icons.cloud_circle_outlined,
+  );
+
   Iterable<Setting<dynamic>> get all sync* {
     yield autoCheck;
     yield repository;
+    yield fallbackUrl;
   }
 }
