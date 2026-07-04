@@ -3,6 +3,7 @@
 
 import 'settings_catalog.dart';
 import 'json_settings_store.dart';
+import 'settings_store.dart';
 
 /// Host-side callbacks. The settings UI calls these for things
 /// that need to reach outside the settings window (reveal a file
@@ -26,7 +27,12 @@ class SettingsHostActions {
 
 class SettingsRuntime {
   final SettingsCatalog catalog;
-  final JsonSettingsStore store;
+
+  /// Typed as [SettingsStore] so callers can substitute fakes in
+  /// tests without the isolate-backed [JsonSettingsStore]. The
+  /// settings UI casts back to [JsonSettingsStore] only where it
+  /// needs the file path (`runtime.store.path`).
+  final SettingsStore store;
   final SettingsHostActions hostActions;
 
   SettingsRuntime._({
@@ -35,10 +41,11 @@ class SettingsRuntime {
     required this.hostActions,
   });
 
-  /// Build the runtime from a single [JsonSettingsStore] plus host
-  /// callbacks.
+  /// Build the runtime from a single [SettingsStore] plus host
+  /// callbacks. Production callers pass a [JsonSettingsStore];
+  /// tests can pass a lightweight in-memory implementation.
   factory SettingsRuntime.create({
-    required JsonSettingsStore store,
+    required SettingsStore store,
     required SettingsHostActions hostActions,
     SettingsCatalog? catalog,
   }) {

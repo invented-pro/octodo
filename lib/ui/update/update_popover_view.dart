@@ -263,10 +263,13 @@ class _AvailableBody extends StatelessWidget {
             ),
             _PrimaryButton(
               label: _downloadLabel(release),
-              onPressed: () {
-                Navigator.of(context).pop();
-                controller.downloadLatest();
-              },
+              // Don't pop — the controller's call to
+              // `model.setDownloading(...)` flips the state to
+              // [UpdateState.downloading], and the AnimatedBuilder
+              // wrapping the dialog body swaps [AvailableBody] for
+              // [DownloadingBody] in-place. Popping here leaves
+              // the user with no surface to observe the progress.
+              onPressed: () => controller.downloadLatest(),
             ),
           ],
         ),
@@ -407,16 +410,30 @@ class _DownloadedBody extends StatelessWidget {
         _Footer(
           left: const SizedBox.shrink(),
           right: [
+            // "Later" intentionally dismisses — unlike the
+            // Download / Restart / Retry actions which are state
+            // transitions, "Later" is an explicit "I'll come back
+            // later" intent. The downloaded payload stays staged
+            // on disk; the user gets the persistent
+            // "Restart to install vX.Y.Z" pill in the drawer and
+            // can re-enter this exact body any time by clicking
+            // it.
             _SecondaryButton(
               label: 'Later',
               onPressed: () => Navigator.of(context).pop(),
             ),
             _PrimaryButton(
               label: 'Restart to install',
-              onPressed: () {
-                Navigator.of(context).pop();
-                controller.applyDownloaded();
-              },
+              // Don't pop — the controller's call to
+              // `model.setInstalling()` flips the state to
+              // [UpdateState.installing] and the AnimatedBuilder
+              // swaps [DownloadedBody] for the [InstallingBody]
+              // spinner in-place. Popping here would dismiss the
+              // visible "Restarting to apply update…" affordance
+              // right as the helper takes over. The original
+              // process exits 2 s after this — the dialog won't
+              // outlive the install anyway.
+              onPressed: () => controller.applyDownloaded(),
             ),
           ],
         ),
@@ -638,6 +655,12 @@ class _AboutBody extends StatelessWidget {
   Widget build(BuildContext context) {
     final version = model.currentVersion;
     final palette = context.palette;
+    // Persistent "Latest" indicator. Stays visible once any
+    // probe (initial, periodic, or manual) has confirmed the
+    // running version is up to date, and clears automatically
+    // when a newer release is detected. See
+    // `UpdateStateModel.isUpToDate`.
+    final upToDate = model.isUpToDate;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -678,7 +701,11 @@ class _AboutBody extends StatelessWidget {
                 color: palette.rowSurface,
               ),
               const SizedBox(height: 12),
-              _AboutRow(label: 'Version:', value: version.isEmpty ? '—' : version),
+              _AboutRow(
+                label: 'Version:',
+                value: version.isEmpty ? '—' : version,
+                trailing: upToDate ? const _LatestBadge() : null,
+              ),
               const SizedBox(height: 6),
               _AboutLinkRow(
                 label: 'Source:',
@@ -693,14 +720,25 @@ class _AboutBody extends StatelessWidget {
           ),
         ),
         _Footer(
+          // Right-aligned (the default): with two actions, pack
+          // them against the right edge — primary on the far
+          // right, secondary to its left. Matches the other
+          // dialogs in this file (AvailableBody, DownloadedBody,
+          // ErrorBody). The header already has its own close
+          // button, so a footer Close would be redundant.
           left: const SizedBox.shrink(),
           right: [
             _SecondaryButton(
-              label: 'Close',
-              onPressed: () => Navigator.of(context).pop(),
+              // Stays in the dialog — the AnimatedBuilder swap on
+              // `model.state` transitions this body to
+              // `_CheckingBody` (spinner) → the result body
+              // (`_AvailableBody`, `_ErrorBody`, or back here via
+              // the brief `notFound` flash).
+              label: 'Check now',
+              onPressed: () => controller.checkForUpdates(),
             ),
             _PrimaryButton(
-              label: 'Open releases page',
+              label: 'GitHub Release',
               onPressed: () {
                 Navigator.of(context).pop();
                 launchUrl(
@@ -719,13 +757,24 @@ class _AboutBody extends StatelessWidget {
 class _AboutRow extends StatelessWidget {
   final String label;
   final String value;
-  const _AboutRow({required this.label, required this.value});
+
+  /// Optional widget rendered after the value, on the same row.
+  /// Used by the Version row to show a "Latest" pill next to
+  /// the version string when the user just confirmed they're
+  /// up to date.
+  final Widget? trailing;
+
+  const _AboutRow({
+    required this.label,
+    required this.value,
+    this.trailing,
+  });
 
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         SizedBox(
           width: 72,
@@ -744,7 +793,49 @@ class _AboutRow extends StatelessWidget {
             ),
           ),
         ),
+        if (trailing != null) ...[
+          const SizedBox(width: 8),
+          trailing!,
+        ],
       ],
+    );
+  }
+}
+
+/// Small green pill with a check icon and "Latest" label.
+/// Rendered next to the Version row when the user just clicked
+/// "Check now" and the probe confirmed there's no newer release.
+class _LatestBadge extends StatelessWidget {
+  const _LatestBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: palette.accentGreen.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: palette.accentGreen.withValues(alpha: 0.5),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.check_circle, size: 10, color: palette.accentGreen),
+          const SizedBox(width: 4),
+          Text(
+            'Latest',
+            style: TextStyle(
+              color: palette.accentGreen,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -872,8 +963,15 @@ class _ErrorBody extends StatelessWidget {
             if (err?.onRetry != null || err?.onDownload != null)
               _PrimaryButton(
                 label: err?.onDownload != null ? 'Retry download' : 'Retry',
+                // Don't pop — `onDownload` flips state to
+                // [UpdateState.downloading] (→ [DownloadingBody])
+                // and `onRetry` flips state to [UpdateState.checking]
+                // (→ [CheckingBody]). The AnimatedBuilder swaps
+                // [ErrorBody] out in-place, keeping the user
+                // oriented to what's happening next. Popping here
+                // would briefly show an empty backdrop before the
+                // user re-opens the popover themselves.
                 onPressed: () {
-                  Navigator.of(context).pop();
                   if (err?.onDownload != null) {
                     err!.onDownload!();
                   } else if (err?.onRetry != null) {

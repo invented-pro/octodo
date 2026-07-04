@@ -9,10 +9,11 @@
 //   * Zip entry paths are normalized and bounds-checked against the
 //     staging extract dir. Any path that resolves outside it
 //     (a classic "zip slip" payload) throws and aborts.
-//   * Symlink paths within the zip would be unusual for a portable
-//     release; if they're encountered, we treat them as regular
-//     files (copy bytes; do not follow). Flutter Windows builds
-//     don't include symlinks anyway.
+//   * Symlinks within the zip are unusual for a portable release;
+//     if encountered, we skip them (Flutter Windows builds don't
+//     include symlinks anyway). Treating a symlink as a regular
+//     file would write its target's bytes, which is rarely what
+//     the upstream intended.
 //   * Files we copy into the install dir are basename-checked
 //     against the expected octodo.exe / DLL layout — defending
 //     against a malicious zip that drops a `..` ladder into
@@ -28,6 +29,7 @@ import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 
+import 'crash_sentinel.dart';
 import 'install_paths.dart';
 
 class StagedApplyException implements Exception {
@@ -62,35 +64,49 @@ class StagedApply {
     Duration overwriteBackoff = const Duration(milliseconds: 500),
     bool relaunchAfter = true,
   }) async {
-    if (!await paths.zipFile.exists()) {
-      throw StagedApplyException(
-        'Staged zip not found at ${paths.zipFile.path}',
+    try {
+      if (!await paths.zipFile.exists()) {
+        throw StagedApplyException(
+          'Staged zip not found at ${paths.zipFile.path}',
+        );
+      }
+
+      await _awaitProcessExit(
+        pidToIgnore,
+        pollInterval: pidPollInterval,
+        timeout: pidTimeout,
+        initialDelay: initialDelay,
       );
-    }
 
-    await _awaitProcessExit(
-      pidToIgnore,
-      pollInterval: pidPollInterval,
-      timeout: pidTimeout,
-      initialDelay: initialDelay,
-    );
+      if (await paths.extractDir.exists()) {
+        // Clean any previous extraction so a re-run is safe.
+        await paths.extractDir.delete(recursive: true);
+      }
+      await paths.extractDir.create(recursive: true);
 
-    if (await paths.extractDir.exists()) {
-      // Clean any previous extraction so a re-run is safe.
-      await paths.extractDir.delete(recursive: true);
-    }
-    await paths.extractDir.create(recursive: true);
+      await _extractZip(paths);
 
-    await _extractZip(paths);
+      await _copyExtractedIntoInstallDir(
+        paths,
+        attempts: overwriteAttempts,
+        backoff: overwriteBackoff,
+      );
 
-    await _copyExtractedIntoInstallDir(
-      paths,
-      attempts: overwriteAttempts,
-      backoff: overwriteBackoff,
-    );
-
-    if (relaunchAfter) {
-      await _relaunch(paths);
+      if (relaunchAfter) {
+        await _relaunch(paths);
+      }
+    } catch (e) {
+      // Best-effort forensic signal. We're either about to throw
+      // (top-level `run` exception) or — more worrying — we made
+      // it partway through `_copyExtractedIntoInstallDir`, in
+      // which case the install dir is in an inconsistent state
+      // (some payload files replaced, some not). Either way the
+      // caller can't observe logs in release/profile builds.
+      await writeHelperCrashSentinel(
+        'StagedApply.run failed mid-flight for ${paths.stagingDir.path}: '
+        '${e.runtimeType}: $e',
+      );
+      rethrow;
     }
   }
 
@@ -147,11 +163,15 @@ class StagedApply {
 
     for (final entry in archive) {
       if (!entry.isFile) {
-        // Skip directories and (best-effort) other kinds.
+        // Skip directories, symlinks, and (best-effort) any other
+        // non-regular entries. Symlinks in particular would write
+        // either their target's content (which is rarely the
+        // intent for a portable release) or nothing; either way
+        // the safer behavior is to drop them.
         continue;
       }
       final name = entry.name;
-      final target = _resolvedTargetPath(paths.extractDir.path, name);
+      final target = resolveTargetPath(paths.extractDir.path, name);
       await target.parent.create(recursive: true);
       final content = entry.content as List<int>;
       await File(target.path).writeAsBytes(
@@ -182,11 +202,6 @@ class StagedApply {
     }
     return File(normalized);
   }
-
-  /// Internal alias kept for the same code paths used before the
-  /// rename to `resolveTargetPath`.
-  static File _resolvedTargetPath(String root, String entryName) =>
-      resolveTargetPath(root, entryName);
 
   static Future<void> _copyExtractedIntoInstallDir(
     InstallerPaths paths, {
@@ -254,11 +269,40 @@ class StagedApply {
         'No executable at ${exe.path} after install',
       );
     }
-    await Process.start(
+    final proc = await Process.start(
       exe.path,
       const <String>[],
       mode: ProcessStartMode.detached,
       workingDirectory: paths.installDir.path,
     );
+    // Detached starts are fire-and-forget, so we can't observe the
+    // exit synchronously. We attach a non-blocking exit watcher
+    // that only fires on *early* failures: if the freshly-replaced
+    // exe dies within [_kEarlyExitWindow] (missing DLL, installer
+    // hook failure, etc.) write a sentinel so the user has a
+    // forensic signal — release/profile builds silence all logging,
+    // so this is the only way the failure is observable. A clean
+    // exit much later (user closed the app, OS-initiated shutdown,
+    // etc.) is normal and must NOT pollute the sentinel log.
+    final spawnedAt = DateTime.now();
+    // ignore: unawaited_futures
+    proc.exitCode.then((code) {
+      final elapsed = DateTime.now().difference(spawnedAt);
+      if (code != 0 && elapsed < _kEarlyExitWindow) {
+        // ignore: unawaited_futures
+        writeHelperCrashSentinel(
+          'relaunched ${exe.path} exited with code $code '
+          'after ${elapsed.inMilliseconds}ms',
+        );
+      }
+    });
   }
 }
+
+/// How long after spawn a non-zero exit is still treated as a
+/// forensic signal of an immediate post-install failure, rather
+/// than a normal user-closed app. Tuned generously — real startup
+/// is well under this on any hardware the project targets — but
+/// short enough that a user closing the app 30 seconds in doesn't
+/// pollute the log.
+const Duration _kEarlyExitWindow = Duration(seconds: 10);

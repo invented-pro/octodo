@@ -150,5 +150,99 @@ void main() {
         ),
       );
     });
+
+    group('rate limit detection', () {
+      test('403 + x-ratelimit-remaining=0 → typed exception with reset',
+          () async {
+        // Reset 30 minutes in the future.
+        final resetEpoch =
+            (DateTime.now().millisecondsSinceEpoch ~/ 1000) + 1800;
+        final mock = MockClient((_) async {
+          return http.Response(
+            '{"message":"API rate limit exceeded"}',
+            403,
+            headers: {
+              'x-ratelimit-remaining': '0',
+              'x-ratelimit-limit': '60',
+              'x-ratelimit-reset': '$resetEpoch',
+            },
+          );
+        });
+        final f = feedFrom(mock);
+        await expectLater(
+          f.fetchLatest(),
+          throwsA(
+            isA<UpdateFeedRateLimitException>()
+                .having((e) => e.remaining, 'remaining', 0)
+                .having((e) => e.limit, 'limit', 60)
+                .having(
+                  (e) => e.resetAt.millisecondsSinceEpoch ~/ 1000,
+                  'resetAt',
+                  resetEpoch,
+                ),
+          ),
+        );
+      });
+
+      test('403 + missing header + body says "rate limit exceeded" → typed',
+          () async {
+        // Proxy stripped the headers but the body is unmistakable.
+        final mock = MockClient((_) async {
+          return http.Response(
+            '{"message":"API rate limit exceeded for 1.2.3.4"}',
+            403,
+          );
+        });
+        final f = feedFrom(mock);
+        await expectLater(
+          f.fetchLatest(),
+          throwsA(isA<UpdateFeedRateLimitException>()),
+        );
+      });
+
+      test('403 + missing header + unrelated body → generic 403, not rate-limit',
+          () async {
+        // Private repo / suspended account / etc. The body
+        // doesn't mention "rate limit exceeded" specifically, so
+        // we should NOT mis-classify this as a rate-limit hit.
+        final mock = MockClient((_) async {
+          return http.Response(
+            '{"message":"Repository access blocked"}',
+            403,
+          );
+        });
+        final f = feedFrom(mock);
+        await expectLater(
+          f.fetchLatest(),
+          throwsA(
+            isA<UpdateFeedException>().having(
+                (e) => e.runtimeType.toString(),
+                'runtimeType',
+                'UpdateFeedException'),
+          ),
+        );
+      });
+
+      test('403 + remaining=5 (under limit) → not rate-limited', () async {
+        // Some other 403 reason (e.g. suspended). The
+        // `remaining` header is still 5 because the account
+        // hasn't exhausted its quota.
+        final mock = MockClient((_) async {
+          return http.Response(
+            '{"message":"Forbidden"}',
+            403,
+            headers: {
+              'x-ratelimit-remaining': '5',
+              'x-ratelimit-limit': '60',
+            },
+          );
+        });
+        final f = feedFrom(mock);
+        await expectLater(
+          f.fetchLatest(),
+          throwsA(isA<UpdateFeedException>()),
+        );
+      });
+    });
   });
 }

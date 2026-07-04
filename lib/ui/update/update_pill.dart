@@ -36,8 +36,8 @@ class UpdatePill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: model,
+    return ListenableBuilder(
+      listenable: model,
       builder: (context, _) {
         final urgent = model.showsPill;
         if (!urgent && !alwaysShow) return const SizedBox.shrink();
@@ -260,9 +260,6 @@ class _Badge extends StatelessWidget {
 
   IconData _iconFor(UpdateState s) {
     switch (s) {
-      case UpdateState.idle:
-      case UpdateState.notFound:
-        return Icons.check_circle_outline;
       case UpdateState.checking:
         return Icons.sync;
       case UpdateState.updateAvailable:
@@ -274,6 +271,13 @@ class _Badge extends StatelessWidget {
         return Icons.restart_alt;
       case UpdateState.error:
         return Icons.error_outline;
+      // `idle` and `notFound` both have `showsPill == false`, so
+      // this badge is never rendered for them — but the switch
+      // has to be exhaustive, so fall through to a sensible
+      // default.
+      case UpdateState.idle:
+      case UpdateState.notFound:
+        return Icons.check_circle_outline;
     }
   }
 }

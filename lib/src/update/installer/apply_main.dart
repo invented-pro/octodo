@@ -20,13 +20,13 @@
 
 import 'dart:io';
 
+import 'crash_sentinel.dart';
 import 'install_paths.dart';
 import 'staged_apply.dart';
 
 const String kHelperFlagEnv = 'OCTODO_UPDATE_HELPER';
 const String kHelperPayloadEnv = 'OCTODO_UPDATE_PAYLOAD';
 const String kHelperPidEnv = 'OCTODO_UPDATE_PID';
-const String _kCrashFileName = 'octodo_apply_crash.log';
 
 /// True when the current process was started in helper mode. The
 /// `main()` entry checks this BEFORE doing any Flutter init.
@@ -40,7 +40,7 @@ Future<int> runUpdateHelper() async {
   final env = Platform.environment;
   final payloadVersion = env[kHelperPayloadEnv];
   if (payloadVersion == null || payloadVersion.isEmpty) {
-    await _writeCrashSentinel(
+    await writeHelperCrashSentinel(
       'helper invoked without $kHelperPayloadEnv',
     );
     return 1;
@@ -53,23 +53,9 @@ Future<int> runUpdateHelper() async {
     await StagedApply.run(paths: paths, pidToIgnore: pidToIgnore);
     return 0;
   } catch (e) {
-    await _writeCrashSentinel(e.toString());
+    await writeHelperCrashSentinel(
+      'helper run failed: ${e.runtimeType}: $e',
+    );
     return 2;
-  }
-}
-
-/// Crash sentinel — best-effort write of any helper-mode
-/// exception to `%TEMP%\octodo_apply_crash.log`. Production
-/// builds (logging silenced) leave no other trace; this is the
-/// one observable signal for a failed update.
-Future<void> _writeCrashSentinel(String message) async {
-  final env = Platform.environment;
-  final temp = env['TEMP'] ?? Directory.systemTemp.path;
-  try {
-    final f = File('$temp\\$_kCrashFileName');
-    final contents = '${DateTime.now().toIso8601String()}\n$message\n';
-    await f.writeAsString(contents, flush: true);
-  } catch (_) {
-    // Best effort.
   }
 }
