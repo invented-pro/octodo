@@ -240,7 +240,8 @@ jobs:
             Write-Host ">> r2 object put $target  ($($u.type))"
             wrangler r2 object put $target `
               --file $u.file `
-              --content-type $u.type
+              --content-type $u.type `
+              --remote
             if ($LASTEXITCODE -ne 0) {
               throw "wrangler upload failed for $target (exit=$LASTEXITCODE)"
             }
