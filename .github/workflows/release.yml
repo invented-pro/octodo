@@ -185,37 +185,38 @@ jobs:
           Get-Content manifest.json
 
       # Push the zip, the .sha256 sidecar, and manifest.json to R2.
-      # We do this in a plain `shell: pwsh` step rather than via
-      # cloudflare/wrangler-action because that action tokenizes the
-      # `command:` input on whitespace and drops everything after the
-      # first arg (we hit "Either the --file or --pipe options are
-      # required" on the first test). Native PowerShell + wrangler
-      # CLI in a foreach loop survives the multi-flag invocation.
+      # Uses R2's S3-compatible endpoint with the bucket-scoped
+      # access key pair (`CLOUDFLARE_ACCESS_ID` / `CLOUDFLARE_ACCESS_KEY`).
+      # Those keys are R2-only by construction, which sidesteps the
+      # auth-scope gotchas that the API-token / wrangler path hit.
       #
-      # Wrangler reads CF_API_TOKEN / CF_ACCOUNT_ID straight from
-      # the step's `env:` block — no UI/no action wrapper needed.
-      # Both names are masked in the action log automatically.
-      - name: Install wrangler
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # wrangler 4.x is current; pin to ^4 to stay off the v3 line
-          # which the test run shipped automatically (and that emitted
-          # the "out of date" warning + 3.x semantics).
-          npm install --silent --no-audit --no-fund -g wrangler@^4
-          wrangler --version
-
-      - name: Upload to Cloudflare R2
+      # `CLOUDFLARE_ACCOUNT_ID` is the account-scoped id used to build
+      # the endpoint URL `<account>.r2.cloudflarestorage.com`. The
+      # R2 access keys themselves encode the bucket scope, so the
+      # `--endpoint-url` is just routing.
+      - name: Upload to Cloudflare R2 (S3-compatible)
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_ACCESS_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $bucket = "$env:R2_BUCKET"
-          $ver    = "${{ steps.build.outputs.ver }}"
-          $zip    = "octodo-v$ver-windows-x64.zip"
-          $sha    = "$zip.sha256"
+
+          # aws-cli ships preinstalled on windows-latest runners; this
+          # is a quick guard in case a future runner image strips it.
+          if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+            Write-Host "aws-cli not on PATH, installing via Chocolatey..."
+            choco install -y --no-progress awscli
+          }
+          aws --version
+
+          $bucket   = "$env:R2_BUCKET"
+          $ver      = "${{ steps.build.outputs.ver }}"
+          $zip      = "octodo-v$ver-windows-x64.zip"
+          $sha      = "$zip.sha256"
+          $endpoint = "https://$env:R2_ACCOUNT.r2.cloudflarestorage.com"
 
           $uploads = @(
             @{
@@ -236,17 +237,18 @@ jobs:
           )
 
           foreach ($u in $uploads) {
-            $target = "$bucket/$($u.key)"
-            Write-Host ">> r2 object put $target  ($($u.type))"
-            wrangler r2 object put $target `
-              --file $u.file `
+            $target = "s3://$bucket/$($u.key)"
+            Write-Host ">> aws s3 cp $($u.file)  $target  ($($u.type))"
+            aws s3 cp $u.file $target `
+              --endpoint-url $endpoint `
               --content-type $u.type `
-              --remote
+              --no-progress `
+              --only-show-errors
             if ($LASTEXITCODE -ne 0) {
-              throw "wrangler upload failed for $target (exit=$LASTEXITCODE)"
+              throw "aws s3 cp failed for $target (exit=$LASTEXITCODE)"
             }
           }
-          Write-Host "R2 mirror complete: $bucket/octodo/{$zip,$sha,manifest.json}"
+          Write-Host "R2 mirror complete: s3://$bucket/octodo/{$zip,$sha,manifest.json}"
 
       - uses: softprops/action-gh-release@v2
         with:
