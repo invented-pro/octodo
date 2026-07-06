@@ -374,13 +374,13 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// [workingDirectory] is always a Windows path. We translate it to
   /// the shell-native form so `Surface.initialCwd == currentCwd`
   /// holds when the user has not `cd`'d (and the `~` shortcut in
-  /// the tab chip can fire). For WSL specifically we additionally
-  /// query the distro's actual `$HOME` (often `/home/<user>`, NOT
-  /// the mount-point we translated to) — WSL's `cd ~` lands the
-  /// shell in the WSL home, and the OSC 7 it then emits would not
-  /// match a `/mnt/c/Users/<user>` initialCwd. The query is awaited
-  /// once per surface creation; if it fails or times out we fall
-  /// back to the translated mount path.
+  /// the tab chip can fire). For WSL we instead query the distro's
+  /// `$HOME` directly as a Linux path (e.g. `/home/<user>`) — bash's
+  /// startup cwd IS the distro's `$HOME`, and OSC 7 emits the same
+  /// Linux string, so the `~` shortcut fires. The translated mount
+  /// path (`/mnt/c/Users/<user>`) does NOT match OSC 7's Linux form
+  /// and is used only as the timeout/failure fallback. The query is
+  /// awaited once per surface creation.
   Future<Surface> _makeSurface(
     ShellProfile profile,
     String workingDirectory,
@@ -391,6 +391,13 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       ..args = profile.args;
   }
 
+  /// Marker sentinel used as `initialCwd` when a WSL distro's `$HOME` could
+  /// not be resolved in time. The shell still starts in `$HOME` thanks to
+  /// the `--cd ~` arg on the WSL profile, so the tab chip's `~` shortcut
+  /// should fire on this path; [Surface.fallbackTitle] matches this
+  /// sentinel specially.
+  static const String _wslHomeUnknownMarker = '~';
+
   Future<String> _resolveInitialCwd(
     ShellProfile profile,
     String workingDirectory,
@@ -398,6 +405,11 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     if (profile.isWsl) {
       final home = await _queryWslHome(profile);
       if (home != null) return home;
+      // Query failed / timed out — bash still starts in $HOME via
+      // `--cd ~`, so we don't translate the Windows cwd down to a
+      // mount path that OSC 7 will never emit. Use a marker and let
+      // `fallbackTitle` recognise it.
+      return _wslHomeUnknownMarker;
     }
     return translateCwdForShell(
       cwd: workingDirectory,
@@ -405,20 +417,25 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     );
   }
 
-  /// Query a WSL distro's actual `$HOME` (e.g. `/home/<user>`), via
-  /// `wsl.exe -d <distro> wslpath -w ~`. Capped at 1 s so a misbehaving
+  /// Query a WSL distro's `$HOME` as a Linux path (e.g. `/home/<user>`),
+  /// via `wsl.exe -d <distro> wslpath -u ~`. Capped at 1 s so a misbehaving
   /// distro can't block tab creation.
   ///
+  /// Linux-form is intentional: bash's startup cwd is the distro's
+  /// `$HOME` (forced by the `--cd ~` arg on the WSL profile), and its
+  /// OSC 7 emits the same `/home/<user>` string. Using the translated
+  /// mount path (`/mnt/c/Users/<user>`) would never compare equal to
+  /// that, so the tab chip's `~` shortcut would never fire.
+  ///
   /// The distro comes from [ShellProfile.wslDistro], so a non-default
-  /// distro resolves its OWN home rather than the default distro's — the
-  /// OSC 7 a tab emits after `cd ~` then matches this initial cwd, and the
-  /// tab chip's `~` shortcut fires correctly. Returns null on timeout /
-  /// failure; callers fall back to the translated mount path.
+  /// distro resolves its OWN home rather than the default distro's.
+  /// Returns null on timeout / failure; callers fall back to the
+  /// translated mount path.
   Future<String?> _queryWslHome(ShellProfile profile) async {
     if (profile.program.isEmpty) return null;
     final args = profile.wslDistro != null
-        ? ['-d', profile.wslDistro!, 'wslpath', '-w', '~']
-        : const ['wslpath', '-w', '~'];
+        ? ['-d', profile.wslDistro!, 'wslpath', '-u', '~']
+        : const ['wslpath', '-u', '~'];
     try {
       final result = await Process.run(
         profile.program,
@@ -427,7 +444,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       if (result.exitCode != 0) {
         _log.log(
           Level.WARNING,
-          'wslpath -w ~ failed (exitCode=${result.exitCode}, stderr=${result.stderr}) for ${profile.program} ${args.join(' ')}',
+          'wslpath -u ~ failed (exitCode=${result.exitCode}, stderr=${result.stderr}) for ${profile.program} ${args.join(' ')}',
         );
         return null;
       }
@@ -435,13 +452,13 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       return home.isEmpty ? null : home;
     } on TimeoutException {
       _log.warning(
-        'wslpath -w ~ timed out after 1s for ${profile.program} ${args.join(' ')}',
+        'wslpath -u ~ timed out after 1s for ${profile.program} ${args.join(' ')}',
       );
       return null;
     } catch (e, st) {
       _log.log(
         Level.WARNING,
-        'wslpath -w ~ threw for ${profile.program} ${args.join(' ')}',
+        'wslpath -u ~ threw for ${profile.program} ${args.join(' ')}',
         e,
         st,
       );
