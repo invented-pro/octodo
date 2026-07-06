@@ -100,10 +100,12 @@ class Surface extends ChangeNotifier {
   ///
   /// The OSC 7 value is the path extracted from the shell's
   /// `file://host/path` URI, which uses forward slashes per
-  /// RFC 8089. We normalize Windows-style paths back to backslashes
+  /// RFC 8089. We normalize drive-rooted paths back to backslashes
   /// so they compare equal against the Windows-style [initialCwd]
-  /// we stored at construction. POSIX paths (WSL, Git Bash) are
-  /// already slash-only and pass through unchanged.
+  /// we stored at construction for Windows-native shells. POSIX
+  /// paths (WSL, Git Bash) — both from OSC 7 and as initialCwd for
+  /// WSL after `_queryWslHome` — are already slash-only and pass
+  /// through unchanged.
   String? _currentCwd;
   String? get currentCwd => _currentCwd;
   set currentCwd(String? value) {
@@ -144,9 +146,13 @@ class Surface extends ChangeNotifier {
   ///
   /// If the cwd still equals [initialCwd] (the shell never `cd`'d
   /// away from its start dir), render the path component as `~` to
-  /// match the shell-prompt shorthand the user is used to — most
-  /// notably WSL, where the distro starts in the user's home and
-  /// OSC 7 reports it as `/mnt/c/Users/<name>` instead of `~`.
+  /// match the shell-prompt shorthand the user is used to. For WSL
+  /// this fires when OSC 7 reports `/home/<user>` (the distro's
+  /// `$HOME`, set as the surface's [initialCwd] at construction —
+  /// see `_queryWslHome` in `terminal_workspace.dart`). When the home
+  /// query timed out, [initialCwd] is the literal `'~'` marker (the
+  /// distro is guaranteed to start in `$HOME` via `--cd ~`); we then
+  /// match any OSC 7 path inside `/home/<…>` as the home shortcut.
   ///
   /// When the shell's profile has `showCwdInTitle == false` (set for
   /// PowerShell 7 / Windows PowerShell / CMD — see shell_profiles.dart
@@ -159,9 +165,13 @@ class Surface extends ChangeNotifier {
     final name = profile?.shortName ?? 'shell';
     final showCwd = profile?.showCwdInTitle ?? false;
     if (!showCwd) return name;
-    final cwd = _currentCwd ?? initialCwd;
+    // Prefer the OSC 7 cwd. Fall back to the initial CWD only if it is a
+    // real path; the WSL unresolved-home sentinel (`'~'`) carries no
+    // path information and must NOT be passed to `p.basename` (which
+    // would happily return `'~'` and put `~` back into the chip).
+    final cwd = _currentCwd ?? (initialCwd == '~' ? null : initialCwd);
     if (cwd == null || cwd.isEmpty) return name;
-    if (cwd == initialCwd) return '$name ~';
+    if (_isAtHome(cwd)) return '$name ~';
     final base = p.basename(cwd);
     if (base.isEmpty) return name;
     return '$name $base';
@@ -178,6 +188,30 @@ class Surface extends ChangeNotifier {
       if (shortened.isNotEmpty) return shortened;
     }
     return fallbackTitle;
+  }
+
+  /// True when [cwd] (an OSC-7-reported or initial-cwd path) should be
+  /// shown as `~` in the tab chip. Three cases qualify:
+  ///   1. WSL sentinel path: [initialCwd] is the literal `'~'` marker
+  ///      (the 1 s `_queryWslHome` call in `terminal_workspace.dart`
+  ///      timed out, but the shell still started in `$HOME` thanks to
+  ///      `--cd ~`). Match any path inside `/home/<…>` as the user's
+  ///      `$HOME` so the `~` shortcut still fires on failed queries.
+  ///      A literal `cwd == '~'` (i.e. OSC 7 hasn't fired yet so
+  ///      fallbackTitle reads `cwd = initialCwd`) intentionally does
+  ///      NOT qualify — the chip should fall back to the bare
+  ///      shortName until a real cwd arrives.
+  ///   2. Resolved absolute home or any non-WSL shell: literal
+  ///      `cwd == initialCwd` — the classic "shell never `cd`'d"
+  ///      check.
+  /// Once the user `cd`s outside the matched shape, this returns false
+  /// and the chip falls back to showing the directory basename.
+  bool _isAtHome(String cwd) {
+    final sentinel = profile?.isWsl == true && initialCwd == '~';
+    if (sentinel) {
+      return cwd == '/home' || cwd.startsWith('/home/');
+    }
+    return initialCwd != null && cwd == initialCwd;
   }
 
   static String _newId() {

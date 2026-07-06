@@ -109,7 +109,7 @@ void main() {
           'assets/icons/debian.svg');
     });
 
-    test('every WSL distro becomes its own profile with -d <distro>', () {
+    test('every WSL distro becomes its own profile with -d <distro> --cd ~', () {
       final profiles = detectShellsFrom(
         fileExists: _existsFor(const {_wslPath}),
         environment: _baseEnv,
@@ -123,7 +123,10 @@ void main() {
       for (final entry in byDistro.entries) {
         expect(entry.value.isWsl, isTrue);
         expect(entry.value.program, _wslPath);
-        expect(entry.value.args, ['-d', entry.key]);
+        // `--cd ~` is what makes bash land in $HOME regardless of the
+        // parent process's Windows cwd (see `_queryWslHome` for the matching
+        // initialCwd query that keeps the tab chip's `~` shortcut in sync).
+        expect(entry.value.args, ['-d', entry.key, '--cd', '~']);
         expect(entry.value.showCwdInTitle, isTrue);
       }
       // Distinct distros get distinct shortNames (so the tab chip differs).

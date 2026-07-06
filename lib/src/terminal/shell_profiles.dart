@@ -62,9 +62,9 @@ class ShellProfile {
 
   /// WSL only: the distro name passed to `wsl.exe -d <distro>`. null for
   /// every other shell. Lets the workspace query each distro's own `$HOME`
-  /// (via `wsl -d <distro> wslpath -w ~`) instead of always resolving the
-  /// default distro's home — which previously drifted when a tab launched a
-  /// non-default distro.
+  /// as a Linux path (via `wsl -d <distro> wslpath -u ~`) instead of
+  /// always resolving the default distro's home — which previously
+  /// drifted when a tab launched a non-default distro.
   final String? wslDistro;
 
   /// `true` for `wsl.exe`-backed profiles. The workspace uses this to decide
@@ -296,11 +296,14 @@ List<ShellProfile> detectShellsFrom({
   //
   // We enumerate distros via `wsl.exe --list --quiet` rather than offering
   // a single "WSL" entry that launches the default distro. Each distro gets
-  // its own profile (`wsl.exe -d <distro>`), so:
+  // its own profile (`wsl.exe -d <distro> --cd ~`), so:
   //   - the dropdown distinguishes Ubuntu / Debian / … , and
-  //   - the workspace can query each distro's OWN `$HOME`
-  //     (`wsl -d <distro> wslpath -w ~`) instead of always resolving the
-  //     default distro's home and drifting on non-default launches.
+  //   - bash starts in each distro's OWN `$HOME`, regardless of whatever
+  //     Windows cwd the parent process happens to have (cmd.exe uses
+  //     the workspace's userHome, and `wsl.exe` would otherwise translate
+  //     it to `/mnt/c/Users/<name>` — see also `_queryWslHome` in
+  //     terminal_workspace.dart, which keeps the Surface's `initialCwd`
+  //     in sync so the tab chip's `~` shortcut fires).
   //
   // `wsl.exe` existing does NOT imply a distro is registered, so we only add
   // profiles for distros the listing actually returns — no dead "WSL" entry
@@ -311,7 +314,7 @@ List<ShellProfile> detectShellsFrom({
       profiles.add(ShellProfile(
         label: distro,
         program: wslPath,
-        args: ['-d', distro],
+        args: ['-d', distro, '--cd', '~'],
         wslDistro: distro,
         // Windows Terminal ships per-distro Tux-style PNGs for WSL
         // profiles (ms-appx:///ProfileIcons/wsl.png + per-distro

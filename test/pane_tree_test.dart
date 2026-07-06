@@ -8,6 +8,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:octodo/src/terminal/pane_tree.dart';
+import 'package:octodo/src/terminal/shell_profiles.dart';
 import 'package:octodo/src/terminal/terminal_workspace.dart'
     show applyCloseSurfaceForTest;
 
@@ -97,6 +98,83 @@ void main() {
         );
       },
     );
+  });
+
+  group('Surface.fallbackTitle — WSL home cwd shape', () {
+    // Builds a WSL profile (program=…\\wsl.exe) with the flag set so
+    // the chip shows the basename of the current cwd. Mirrors what
+    // shell_profiles.dart wires up per distro.
+    ShellProfile wslProfile() => ShellProfile(
+          label: 'Ubuntu',
+          program: r'C:\Windows\System32\wsl.exe',
+          args: const ['-d', 'Ubuntu', '--cd', '~'],
+          icon: Icons.laptop_chromebook,
+          color: const Color(0xFF22C55E),
+          shortName: 'ubuntu',
+          showCwdInTitle: true,
+          wslDistro: 'Ubuntu',
+        );
+
+    test(
+        r'resolved home: OSC 7 == initialCwd → `ubuntu ~` '
+        r'(the resolved-$HOME path)',
+        () {
+      final s = Surface(profile: wslProfile(), initialCwd: '/home/u1');
+      s.currentCwd = '/home/u1';
+      expect(s.fallbackTitle, 'ubuntu ~');
+    });
+
+    test(
+        'unresolved-home sentinel (initialCwd="~"): OSC 7 inside /home → `ubuntu ~`',
+        () {
+      // Sentinel case: `_queryWslHome` timed out in terminal_workspace.dart
+      // so initialCwd is the literal `~`. Shell still starts in $HOME via
+      // `--cd ~`; OSC 7 fires with the distro user's actual `/home/<u>`.
+      final s = Surface(profile: wslProfile(), initialCwd: '~');
+      s.currentCwd = '/home/u1';
+      expect(s.fallbackTitle, 'ubuntu ~');
+    });
+
+    test(
+        'unresolved-home sentinel: cd /tmp → `ubuntu tmp` (basename, not `~`)',
+        () {
+      // After `cd /tmp`, the chip must drop out of the home shortcut —
+      // the structural match against `/home/<…>` shouldn't fire here.
+      final s = Surface(profile: wslProfile(), initialCwd: '~');
+      s.currentCwd = '/tmp';
+      expect(s.fallbackTitle, 'ubuntu tmp');
+    });
+
+    test(
+        'sentinel with empty currentCwd and empty initialCwd → just shortName',
+        () {
+      // OSC 7 hasn't fired yet. Sentinel matches no path; the fallback
+      // is the bare shortName so a brand-new tab is readable.
+      final s = Surface(profile: wslProfile(), initialCwd: '~');
+      expect(s.currentCwd, isNull);
+      expect(s.fallbackTitle, 'ubuntu');
+    });
+
+    test(
+        'non-WSL profile with sentinel-like initialCwd does NOT enter home shortcut',
+        () {
+      // Belt-and-braces: a non-WSL profile whose initialCwd was somehow
+      // set to the literal `~` (should never happen) must not be treated
+      // as a home shortcut.
+      final pwsh = ShellProfile(
+        label: 'pwsh',
+        program: r'C:\Program Files\PowerShell\7\pwsh.exe',
+        args: const ['-NoLogo'],
+        icon: Icons.terminal,
+        color: const Color(0xFF0078D4),
+        shortName: 'pwsh',
+        showCwdInTitle: true,
+      );
+      final s = Surface(profile: pwsh, initialCwd: '~');
+      s.currentCwd = 'C:/Users/tester';
+      // No home shortcut — falls back to basename of currentCwd.
+      expect(s.fallbackTitle, 'pwsh tester');
+    });
   });
 
   group('PaneSplit.removeSurface — nested-collapse focus tracking', () {
