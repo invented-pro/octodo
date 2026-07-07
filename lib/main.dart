@@ -48,11 +48,8 @@ final Logger _log = moduleLogger('main');
 Color get kTerminalBackground {
   final store = SettingsRuntime.instance.store;
   final catalog = SettingsRuntime.instance.catalog;
-  return AppPalettes
-      .byId(store.get(catalog.general.themeName))
-      .surface0;
+  return AppPalettes.byId(store.get(catalog.general.themeName)).surface0;
 }
-
 
 Future<void> main() async {
   // Helper-mode entry: if the previous running app spawned us with
@@ -171,8 +168,8 @@ class _OctodoAppState extends State<OctodoApp> {
     _themeSub = SettingsRuntime.instance.store
         .watch<String>(catalog.general.themeName)
         .listen((_) {
-      if (mounted) setState(() {});
-    });
+          if (mounted) setState(() {});
+        });
   }
 
   @override
@@ -184,8 +181,9 @@ class _OctodoAppState extends State<OctodoApp> {
   @override
   Widget build(BuildContext context) {
     final palette = AppPalettes.byId(
-      SettingsRuntime.instance.store
-          .get(SettingsRuntime.instance.catalog.general.themeName),
+      SettingsRuntime.instance.store.get(
+        SettingsRuntime.instance.catalog.general.themeName,
+      ),
     );
     // The same palette is provided to both `theme` and `darkTheme`;
     // Material picks which one to use based on `themeMode`, which
@@ -220,11 +218,7 @@ class _WorkspaceEntry {
 
   bool exited = false;
 
-  _WorkspaceEntry({
-    required this.id,
-    required this.name,
-    required this.color,
-  });
+  _WorkspaceEntry({required this.id, required this.name, required this.color});
 }
 
 /// Payload carried by a workspace-tile drag. We only ship the
@@ -264,6 +258,7 @@ class _AppShellState extends State<AppShell>
   final List<_WorkspaceEntry> _workspaces = [];
   int _currentIndex = 0;
   int _wsCounter = 0;
+
   /// Available shells for new tabs. `null` while the off-isolate
   /// probe is still running (see [_bootstrapAsync]); the build
   /// shows a loading placeholder in that case.
@@ -273,8 +268,9 @@ class _AppShellState extends State<AppShell>
 
   /// Drawer collapsed = true (icon-only strip), false = full sidebar.
   /// Initial value comes from `general.drawerDefaultCollapsed`.
-  late bool _drawerCollapsed = SettingsRuntime.instance.store
-      .get(SettingsRuntime.instance.catalog.general.drawerDefaultCollapsed);
+  late bool _drawerCollapsed = SettingsRuntime.instance.store.get(
+    SettingsRuntime.instance.catalog.general.drawerDefaultCollapsed,
+  );
 
   /// Cached [BuildContext] of the app-shell subtree, captured on
   /// each [build]. Used by async mutators (e.g. the close-workspace
@@ -303,7 +299,15 @@ class _AppShellState extends State<AppShell>
   /// Built lazily — [ColorTools.createPrimarySwatch] is a runtime
   /// computation, so the map can't be const.
   Map<ColorSwatch<Object>, String> _activeWsColorSwatches() {
-    final names = ['Blue', 'Green', 'Yellow', 'Pink', 'Purple', 'Teal', 'Orange'];
+    final names = [
+      'Blue',
+      'Green',
+      'Yellow',
+      'Pink',
+      'Purple',
+      'Teal',
+      'Orange',
+    ];
     final colors = _activeWsColors();
     return {
       for (var i = 0; i < colors.length; i++)
@@ -316,9 +320,10 @@ class _AppShellState extends State<AppShell>
   /// whenever a workspace-level color decision has to be made
   /// outside a [BuildContext] (e.g. `_newWorkspace`).
   ThemePalette _activePalette() => AppPalettes.byId(
-        SettingsRuntime.instance.store
-            .get(SettingsRuntime.instance.catalog.general.themeName),
-      );
+    SettingsRuntime.instance.store.get(
+      SettingsRuntime.instance.catalog.general.themeName,
+    ),
+  );
 
   @override
   void initState() {
@@ -511,10 +516,6 @@ class _AppShellState extends State<AppShell>
       ...TerminalBindings.build(
         copySelection: _delegateCopySelection,
         paste: _delegatePaste,
-        scrollPageUp: _delegateScrollPageUp,
-        scrollPageDown: _delegateScrollPageDown,
-        scrollPageUpFast: _delegateScrollPageUpFast,
-        scrollPageDownFast: _delegateScrollPageDownFast,
       ),
     };
   }
@@ -598,8 +599,7 @@ class _AppShellState extends State<AppShell>
   // Workspace-level dispatchers. Each one no-ops if there's no
   // active workspace (defensive — the binding only matches while the
   // app is in the foreground, so this should always have a target).
-  void _delegateNewTab() =>
-      _activeWorkspace?.key.currentState?.newTabPublic();
+  void _delegateNewTab() => _activeWorkspace?.key.currentState?.newTabPublic();
   void _delegateCloseTab() =>
       _activeWorkspace?.key.currentState?.closeTabPublic();
   void _delegateNextTab() =>
@@ -621,30 +621,12 @@ class _AppShellState extends State<AppShell>
   // terminal view inside the active workspace; no-ops if no view is
   // available (rare — only the very first frames before
   // `_initRootPane` finishes).
-  void _delegateCopySelection() => _activeWorkspace
-      ?.key.currentState
+  void _delegateCopySelection() => _activeWorkspace?.key.currentState
       ?.getFocusedTerminalViewState()
       ?.copySelectionToClipboardPublic();
-  void _delegatePaste() => _activeWorkspace
-      ?.key.currentState
+  void _delegatePaste() => _activeWorkspace?.key.currentState
       ?.getFocusedTerminalViewState()
       ?.pasteFromClipboardPublic();
-  void _delegateScrollPageUp() => _activeWorkspace
-      ?.key.currentState
-      ?.getFocusedTerminalViewState()
-      ?.scrollPagePublic(-1);
-  void _delegateScrollPageDown() => _activeWorkspace
-      ?.key.currentState
-      ?.getFocusedTerminalViewState()
-      ?.scrollPagePublic(1);
-  void _delegateScrollPageUpFast() => _activeWorkspace
-      ?.key.currentState
-      ?.getFocusedTerminalViewState()
-      ?.scrollPageFastPublic(-1);
-  void _delegateScrollPageDownFast() => _activeWorkspace
-      ?.key.currentState
-      ?.getFocusedTerminalViewState()
-      ?.scrollPageFastPublic(1);
 
   // ── Workspace management ──────────────────────────────────────────
 
@@ -702,34 +684,35 @@ class _AppShellState extends State<AppShell>
   /// returns `bool`, not `Color`).
   Future<Color?> _pickColor(BuildContext context, Color current) async {
     Color working = current;
-    final ok = await ColorPicker(
-      color: current,
-      onColorChanged: (c) => working = c,
-      enableOpacity: false,
-      showColorCode: true,
-      showColorName: true,
-      showMaterialName: false,
-      pickersEnabled: const <ColorPickerType, bool>{
-        ColorPickerType.custom: true,
-        ColorPickerType.wheel: true,
-      },
-      customColorSwatchesAndNames: _activeWsColorSwatches(),
-      width: 36,
-      height: 36,
-      borderRadius: 4,
-      copyPasteBehavior: const ColorPickerCopyPasteBehavior(
-        copyButton: false,
-        pasteButton: false,
-        longPressMenu: false,
-      ),
-    ).showPickerDialog(
-      context,
-      constraints: const BoxConstraints(
-        minHeight: 480,
-        minWidth: 320,
-        maxWidth: 320,
-      ),
-    );
+    final ok =
+        await ColorPicker(
+          color: current,
+          onColorChanged: (c) => working = c,
+          enableOpacity: false,
+          showColorCode: true,
+          showColorName: true,
+          showMaterialName: false,
+          pickersEnabled: const <ColorPickerType, bool>{
+            ColorPickerType.custom: true,
+            ColorPickerType.wheel: true,
+          },
+          customColorSwatchesAndNames: _activeWsColorSwatches(),
+          width: 36,
+          height: 36,
+          borderRadius: 4,
+          copyPasteBehavior: const ColorPickerCopyPasteBehavior(
+            copyButton: false,
+            pasteButton: false,
+            longPressMenu: false,
+          ),
+        ).showPickerDialog(
+          context,
+          constraints: const BoxConstraints(
+            minHeight: 480,
+            minWidth: 320,
+            maxWidth: 320,
+          ),
+        );
     return ok ? working : null;
   }
 
@@ -800,9 +783,7 @@ class _AppShellState extends State<AppShell>
             child: const Text('Cancel'),
           ),
           TextButton(
-            style: TextButton.styleFrom(
-              foregroundColor: palette.accentPink,
-            ),
+            style: TextButton.styleFrom(foregroundColor: palette.accentPink),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Close'),
           ),
@@ -921,8 +902,7 @@ class _AppShellState extends State<AppShell>
     int targetIndex,
     bool after,
   ) {
-    final oldIndex =
-        _workspaces.indexWhere((w) => w.id == sourceWorkspaceId);
+    final oldIndex = _workspaces.indexWhere((w) => w.id == sourceWorkspaceId);
     if (oldIndex < 0) return;
     if (targetIndex < 0 || targetIndex >= _workspaces.length) return;
     if (oldIndex == targetIndex) {
@@ -1001,8 +981,9 @@ class _AppShellState extends State<AppShell>
   /// On cancel: do nothing — the window stays open.
   Future<void> _confirmExit({required String reason}) async {
     final catalog = SettingsRuntime.instance.catalog;
-    final confirmEnabled = SettingsRuntime.instance.store
-        .get<bool>(catalog.general.confirmOnExit);
+    final confirmEnabled = SettingsRuntime.instance.store.get<bool>(
+      catalog.general.confirmOnExit,
+    );
 
     // If the user disabled confirmation in settings, just close.
     if (!confirmEnabled) {
@@ -1035,9 +1016,7 @@ class _AppShellState extends State<AppShell>
             child: const Text('Cancel'),
           ),
           TextButton(
-            style: TextButton.styleFrom(
-              foregroundColor: palette.accentPink,
-            ),
+            style: TextButton.styleFrom(foregroundColor: palette.accentPink),
             onPressed: () => Navigator.of(dctx).pop(true),
             child: const Text('Exit'),
           ),
@@ -1105,9 +1084,7 @@ class _AppShellState extends State<AppShell>
     if (_shells == null) {
       return MaterialApp(
         theme: buildAppTheme(palette: _activePalette()),
-        home: const Scaffold(
-          body: Center(child: CircularProgressIndicator()),
-        ),
+        home: const Scaffold(body: Center(child: CircularProgressIndicator())),
       );
     }
     _shellContext = context;
@@ -1196,11 +1173,8 @@ class _WorkspaceDrawer extends StatelessWidget {
   /// is the index of the drop target in [workspaces] BEFORE the
   /// move; [after] is true if the drop landed on the bottom half of
   /// the target (insert after it) vs. the top half (insert before).
-  final void Function(
-    String sourceWorkspaceId,
-    int targetIndex,
-    bool after,
-  ) onAcceptReorder;
+  final void Function(String sourceWorkspaceId, int targetIndex, bool after)
+  onAcceptReorder;
 
   final UpdateStateModel updateModel;
   final UpdateController updateController;
@@ -1252,9 +1226,7 @@ class _WorkspaceDrawer extends StatelessWidget {
                       : 'Collapse (${describe(LogicalKeyboardKey.keyB, shift: true)})',
                   child: Center(
                     child: Icon(
-                      collapsed
-                          ? Icons.chevron_right
-                          : Icons.chevron_left,
+                      collapsed ? Icons.chevron_right : Icons.chevron_left,
                       size: 18,
                       color: palette.brightness == Brightness.dark
                           ? palette.textMuted
@@ -1299,7 +1271,8 @@ class _WorkspaceDrawer extends StatelessWidget {
             child: GestureDetector(
               onTap: onNew,
               child: Tooltip(
-                message: 'New Workspace (${describe(LogicalKeyboardKey.keyN, shift: true)})',
+                message:
+                    'New Workspace (${describe(LogicalKeyboardKey.keyN, shift: true)})',
                 child: Container(
                   height: 36,
                   margin: const EdgeInsets.fromLTRB(4, 4, 4, 2),
@@ -1310,11 +1283,13 @@ class _WorkspaceDrawer extends StatelessWidget {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.add,
-                          size: 16,
-                          color: palette.brightness == Brightness.dark
-                              ? palette.textMuted
-                              : palette.textBody),
+                      Icon(
+                        Icons.add,
+                        size: 16,
+                        color: palette.brightness == Brightness.dark
+                            ? palette.textMuted
+                            : palette.textBody,
+                      ),
                       if (!collapsed) ...[
                         const SizedBox(width: 6),
                         Text(
@@ -1355,19 +1330,18 @@ class _WorkspaceDrawer extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: Colors.transparent,
                     borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                      color: palette.rowSurface,
-                      width: 1,
-                    ),
+                    border: Border.all(color: palette.rowSurface, width: 1),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.settings,
-                          size: 14,
-                          color: palette.brightness == Brightness.dark
-                              ? palette.textMuted
-                              : palette.textBody),
+                      Icon(
+                        Icons.settings,
+                        size: 14,
+                        color: palette.brightness == Brightness.dark
+                            ? palette.textMuted
+                            : palette.textBody,
+                      ),
                       if (!collapsed) ...[
                         const SizedBox(width: 6),
                         Text(
@@ -1507,8 +1481,7 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
         onTap: widget.onTap,
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-          padding:
-              const EdgeInsets.only(left: 10, right: 4, top: 6, bottom: 6),
+          padding: const EdgeInsets.only(left: 10, right: 4, top: 6, bottom: 6),
           decoration: BoxDecoration(
             // Three-state background:
             //   * active  → the workspace's own color at 15% (the
@@ -1525,8 +1498,8 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
             color: isActive
                 ? widget.color.withValues(alpha: 0.15)
                 : (_hovered
-                    ? palette.accentBlue.withValues(alpha: 0.10)
-                    : Colors.transparent),
+                      ? palette.accentBlue.withValues(alpha: 0.10)
+                      : Colors.transparent),
             borderRadius: BorderRadius.circular(4),
             border: Border(
               left: BorderSide(
@@ -1564,8 +1537,7 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                       ? Focus(
                           onKeyEvent: (node, event) {
                             if (event is KeyDownEvent &&
-                                event.logicalKey ==
-                                    LogicalKeyboardKey.escape) {
+                                event.logicalKey == LogicalKeyboardKey.escape) {
                               _cancelEdit();
                               return KeyEventResult.handled;
                             }
@@ -1631,11 +1603,7 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                       onTap: widget.onClose,
                       child: Padding(
                         padding: const EdgeInsets.all(2),
-                        child: Icon(
-                          Icons.close,
-                          size: 14,
-                          color: subtleText,
-                        ),
+                        child: Icon(Icons.close, size: 14, color: subtleText),
                       ),
                     ),
                   ),
@@ -1690,11 +1658,8 @@ class _DraggableWorkspaceList extends StatelessWidget {
   /// is the position in `workspaces` BEFORE the move (Flutter's
   /// [ReorderableListView] convention). [after] tells whether the
   /// drop was on the bottom half of the target tile (vs top half).
-  final void Function(
-    String sourceWorkspaceId,
-    int targetIndex,
-    bool after,
-  ) onAccept;
+  final void Function(String sourceWorkspaceId, int targetIndex, bool after)
+  onAccept;
 
   const _DraggableWorkspaceList({
     required this.workspaces,
@@ -1747,11 +1712,8 @@ class _DraggableWorkspaceTile extends StatefulWidget {
   final VoidCallback onClose;
   final void Function(String id, String newName) onRename;
   final void Function(String id) onColorChange;
-  final void Function(
-    String sourceWorkspaceId,
-    int targetIndex,
-    bool after,
-  ) onAccept;
+  final void Function(String sourceWorkspaceId, int targetIndex, bool after)
+  onAccept;
 
   const _DraggableWorkspaceTile({
     super.key,
@@ -1773,6 +1735,7 @@ class _DraggableWorkspaceTile extends StatefulWidget {
 class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
   /// True while this tile is the drag origin.
   bool _localDragActive = false;
+
   /// True if the current hover means "insert after me" (vs. before).
   bool _insertAfter = false;
 
@@ -1815,10 +1778,7 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
       height: 32,
       decoration: BoxDecoration(
         color: w.color.withValues(alpha: 0.08),
-        border: Border.all(
-          color: w.color.withValues(alpha: 0.4),
-          width: 1,
-        ),
+        border: Border.all(color: w.color.withValues(alpha: 0.4), width: 1),
         borderRadius: BorderRadius.circular(4),
       ),
     );
@@ -1831,14 +1791,11 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
         ),
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 4),
-          padding:
-              const EdgeInsets.only(left: 10, right: 4, top: 6, bottom: 6),
+          padding: const EdgeInsets.only(left: 10, right: 4, top: 6, bottom: 6),
           decoration: BoxDecoration(
             color: palette.surface2,
             borderRadius: BorderRadius.circular(4),
-            border: Border(
-              left: BorderSide(color: w.color, width: 3),
-            ),
+            border: Border(left: BorderSide(color: w.color, width: 3)),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.5),
@@ -1872,8 +1829,7 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
               ),
               Padding(
                 padding: const EdgeInsets.all(2),
-                child: Icon(Icons.close,
-                    size: 14, color: palette.textOverlay),
+                child: Icon(Icons.close, size: 14, color: palette.textOverlay),
               ),
             ],
           ),
@@ -1891,18 +1847,13 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
       onDraggableCanceled: (_, _) => _setLocalDragActive(false),
       onDragCompleted: () => _setLocalDragActive(false),
       child: DragTarget<_WorkspaceDragData>(
-        onWillAcceptWithDetails: (details) =>
-            details.data.workspaceId != w.id,
+        onWillAcceptWithDetails: (details) => details.data.workspaceId != w.id,
         onMove: (details) => _setHoverAfter(_resolveAfter(details.offset)),
         onLeave: (_) => _setHoverAfter(false),
         onAcceptWithDetails: (details) {
           final after = _resolveAfter(details.offset);
           _setHoverAfter(after);
-          widget.onAccept(
-            details.data.workspaceId,
-            widget.index,
-            after,
-          );
+          widget.onAccept(details.data.workspaceId, widget.index, after);
         },
         builder: (context, candidate, rejected) {
           final showAbove = _insertAfter == false && _localDragActive;
@@ -1912,8 +1863,13 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
             clipBehavior: Clip.none,
             children: [
               tile,
-              if (showAbove) _InsertionLineIndicator(above: true, color: palette.accentBlue),
-              if (showBelow) _InsertionLineIndicator(above: false, color: palette.accentBlue),
+              if (showAbove)
+                _InsertionLineIndicator(above: true, color: palette.accentBlue),
+              if (showBelow)
+                _InsertionLineIndicator(
+                  above: false,
+                  color: palette.accentBlue,
+                ),
               if (candidate.isNotEmpty)
                 Positioned.fill(
                   child: IgnorePointer(
@@ -1979,9 +1935,7 @@ class _InsertionLineIndicator extends StatelessWidget {
               ),
             ),
             // Solid line on top.
-            Positioned.fill(
-              child: ColoredBox(color: color),
-            ),
+            Positioned.fill(child: ColoredBox(color: color)),
             // Left handle dot.
             Positioned(
               left: -1,
@@ -1989,10 +1943,7 @@ class _InsertionLineIndicator extends StatelessWidget {
               child: Container(
                 width: 5,
                 height: 5,
-                decoration: BoxDecoration(
-                  color: color,
-                  shape: BoxShape.circle,
-                ),
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
               ),
             ),
             // Right handle dot.
@@ -2002,10 +1953,7 @@ class _InsertionLineIndicator extends StatelessWidget {
               child: Container(
                 width: 5,
                 height: 5,
-                decoration: BoxDecoration(
-                  color: color,
-                  shape: BoxShape.circle,
-                ),
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
               ),
             ),
           ],
@@ -2025,10 +1973,7 @@ class _WorkspaceEndDropZone extends StatelessWidget {
   final double height;
   final void Function(String sourceWorkspaceId) onAccept;
 
-  const _WorkspaceEndDropZone({
-    required this.height,
-    required this.onAccept,
-  });
+  const _WorkspaceEndDropZone({required this.height, required this.onAccept});
 
   @override
   Widget build(BuildContext context) {
@@ -2048,8 +1993,7 @@ class _WorkspaceEndDropZone extends StatelessWidget {
                   child: IgnorePointer(
                     child: Container(
                       decoration: BoxDecoration(
-                        color: palette.accentBlue
-                            .withValues(alpha: 0.10),
+                        color: palette.accentBlue.withValues(alpha: 0.10),
                         borderRadius: BorderRadius.circular(4),
                       ),
                     ),
@@ -2064,7 +2008,9 @@ class _WorkspaceEndDropZone extends StatelessWidget {
                   right: 0,
                   bottom: 0,
                   child: _InsertionLineIndicator(
-                      above: false, color: palette.accentBlue),
+                    above: false,
+                    color: palette.accentBlue,
+                  ),
                 ),
             ],
           ),
@@ -2121,8 +2067,8 @@ class _CollapsedWorkspaceTileState extends State<_CollapsedWorkspaceTile> {
               color: widget.isActive
                   ? widget.color.withValues(alpha: 0.20)
                   : (_hovered
-                      ? palette.accentBlue.withValues(alpha: 0.10)
-                      : Colors.transparent),
+                        ? palette.accentBlue.withValues(alpha: 0.10)
+                        : Colors.transparent),
               borderRadius: BorderRadius.circular(4),
               border: Border(
                 left: BorderSide(
@@ -2133,19 +2079,19 @@ class _CollapsedWorkspaceTileState extends State<_CollapsedWorkspaceTile> {
             ),
             child: Center(
               child: Container(
-              width: 10,
-              height: 10,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: widget.isActive
-                    ? widget.color
-                    : widget.color.withValues(alpha: 0.5),
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: widget.isActive
+                      ? widget.color
+                      : widget.color.withValues(alpha: 0.5),
+                ),
               ),
             ),
           ),
         ),
       ),
-    ),
     );
   }
 }

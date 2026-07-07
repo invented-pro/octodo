@@ -118,17 +118,13 @@ ShortcutActivator primary(
 /// for any future binding that genuinely wants Alt-only — e.g.,
 /// a developer-mode shortcut that shouldn't collide with the
 /// system primary modifier on any platform.
-ShortcutActivator altOnly(
-  LogicalKeyboardKey key, {
-  bool shift = false,
-}) {
+ShortcutActivator altOnly(LogicalKeyboardKey key, {bool shift = false}) {
   return SingleActivator(key, alt: true, shift: shift);
 }
 
 /// Build a [ShortcutActivator] with no modifier. Used for `PageUp` /
 /// `PageDown` scroll and `Shift+Insert` paste.
-ShortcutActivator plain(LogicalKeyboardKey key) =>
-    SingleActivator(key);
+ShortcutActivator plain(LogicalKeyboardKey key) => SingleActivator(key);
 
 /// Human-readable label of the platform's primary modifier, suitable for
 /// tooltips and docs.
@@ -182,9 +178,7 @@ void showReservedHint(ScaffoldMessengerState? messenger, String message) {
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 2),
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
 }
@@ -311,8 +305,8 @@ class AppShellBindings {
 
     for (var i = 0; i < _digitKeys.length; i++) {
       final idx = i;
-      bindings[primary(_digitKeys[i], shift: true)] =
-          () => jumpToWorkspace(idx);
+      bindings[primary(_digitKeys[i], shift: true)] = () =>
+          jumpToWorkspace(idx);
     }
 
     // Fullscreen: F11 on Windows / Linux (universal binding,
@@ -322,8 +316,12 @@ class AppShellBindings {
     // conventional macOS fullscreen toggle (matches Chrome, VSCode,
     // iTerm2).
     if (Platform.isMacOS) {
-      bindings[const SingleActivator(LogicalKeyboardKey.keyF,
-          control: true, meta: true)] = toggleFullscreen;
+      bindings[const SingleActivator(
+            LogicalKeyboardKey.keyF,
+            control: true,
+            meta: true,
+          )] =
+          toggleFullscreen;
     } else {
       bindings[const SingleActivator(LogicalKeyboardKey.f11)] =
           toggleFullscreen;
@@ -366,15 +364,18 @@ class WorkspaceBindings {
     // `Ctrl+Shift+T` shortcut we now use for new tab).
     bindings[primary(LogicalKeyboardKey.keyT, shift: true)] = newTab;
     bindings[primary(LogicalKeyboardKey.keyK, shift: true)] = closeTab;
-    bindings[SingleActivator(LogicalKeyboardKey.tab, control: true)] =
-        nextTab;
-    bindings[SingleActivator(LogicalKeyboardKey.tab,
-        control: true, shift: true)] = previousTab;
+    bindings[SingleActivator(LogicalKeyboardKey.tab, control: true)] = nextTab;
+    bindings[SingleActivator(
+          LogicalKeyboardKey.tab,
+          control: true,
+          shift: true,
+        )] =
+        previousTab;
 
     for (var i = 0; i < _digitKeys.length; i++) {
       final idx = i;
-      bindings[SingleActivator(_digitKeys[i], control: true)] =
-          () => jumpToTab(idx);
+      bindings[SingleActivator(_digitKeys[i], control: true)] = () =>
+          jumpToTab(idx);
     }
 
     // Split operations.
@@ -388,14 +389,14 @@ class WorkspaceBindings {
     // chord (none does by default — `Ctrl+Shift+arrows` is free in
     // bash, zsh, fish, vim normal mode, tmux default prefix), our
     // dispatch wins and the chord never leaks to the PTY.
-    bindings[primary(LogicalKeyboardKey.arrowUp, shift: true)] =
-        () => focusPaneInDirection(PaneDirection.up);
-    bindings[primary(LogicalKeyboardKey.arrowDown, shift: true)] =
-        () => focusPaneInDirection(PaneDirection.down);
-    bindings[primary(LogicalKeyboardKey.arrowLeft, shift: true)] =
-        () => focusPaneInDirection(PaneDirection.left);
-    bindings[primary(LogicalKeyboardKey.arrowRight, shift: true)] =
-        () => focusPaneInDirection(PaneDirection.right);
+    bindings[primary(LogicalKeyboardKey.arrowUp, shift: true)] = () =>
+        focusPaneInDirection(PaneDirection.up);
+    bindings[primary(LogicalKeyboardKey.arrowDown, shift: true)] = () =>
+        focusPaneInDirection(PaneDirection.down);
+    bindings[primary(LogicalKeyboardKey.arrowLeft, shift: true)] = () =>
+        focusPaneInDirection(PaneDirection.left);
+    bindings[primary(LogicalKeyboardKey.arrowRight, shift: true)] = () =>
+        focusPaneInDirection(PaneDirection.right);
 
     // Maximize / restore.
     bindings[primary(LogicalKeyboardKey.keyM, shift: true)] =
@@ -415,6 +416,22 @@ class WorkspaceBindings {
 /// directly through `_engine.write(...)`, bypassing the Shortcuts
 /// activator entirely so the shell always sees the bytes.
 ///
+/// **PageUp / PageDown / Shift+PageUp / Shift+PageDown are deliberately
+/// NOT in this map.** They used to live here so the app-level early-key
+/// handler could dispatch them — but that handler returns `handled`
+/// after the first match, which (a) prevented `flutter_alacritty`'s
+/// `fa.TerminalView._onKeyFallback` from ever seeing the event and (b)
+/// routed the dispatch through a long `?.` chain that occasionally
+/// resolved to a no-op (the focused terminal view wasn't always
+/// resolvable from `_activeWorkspace?.key.currentState`), so PageUp
+/// silently did nothing. Both classes of fix landed in `terminal_view.dart`
+/// instead: the FA shortcut map now binds PageUp → `ScrollPageIntent`
+/// (which calls `engine.scrollLines` directly), and a `Focus` widget
+/// wrapping the Stack provides a second-line safety net for the
+/// unlikely case that the FA path also fails. See
+/// `terminal_view.dart:1064–1125` (shortcuts) and `:1144–1166` (safety
+/// net) for the full reasoning.
+///
 /// Font zoom (`Ctrl+=` / `Ctrl++` / `Ctrl+-` / `Ctrl+0` and the
 /// `Ctrl+Shift+…` variants) is **not** bound here. Alacritty owns
 /// font-size state — the engine re-emits the configured font size
@@ -433,44 +450,32 @@ class TerminalBindings {
   static Map<ShortcutActivator, VoidCallback> build({
     required VoidCallback copySelection,
     required VoidCallback paste,
-    required VoidCallback scrollPageUp,
-    required VoidCallback scrollPageDown,
-    required VoidCallback scrollPageUpFast,
-    required VoidCallback scrollPageDownFast,
   }) {
     final bindings = <ShortcutActivator, VoidCallback>{};
 
     // Clipboard. We bind:
-//   - `Ctrl+Shift+C`       → copy selection (matches FA's default
-//     but we keep our copy for consistency — works in all paths
-//     including right-click menu / accessibility tools that prefer
-//     us over FA).
-//   - `Ctrl+Insert`        → copy selection (alt).
-//   - `Ctrl+V`             → paste (FA's stock bindings only ship
-//     `Ctrl+Shift+V` for paste, not bare `Ctrl+V`).
-//   - `Shift+Insert`       → paste (alt).
-//
-// `Ctrl+Shift+V` is **deliberately not bound** here. Alacritty's
-// own `defaultTerminalShortcuts` ships `Ctrl+Shift+V → PasteIntent`,
-// and our delegation pattern was producing inconsistent results
-// (the user reported the paste silently failing while `Ctrl+Shift+C`
-// worked). Letting alacritty's bundled `defaultPasteAction(engine,
-// controller)` handle it is the right call — alacritty owns the
-// engine's clipboard-load pathway and we don't want to fight it.
+    //   - `Ctrl+Shift+C`       → copy selection (matches FA's default
+    //     but we keep our copy for consistency — works in all paths
+    //     including right-click menu / accessibility tools that prefer
+    //     us over FA).
+    //   - `Ctrl+Insert`        → copy selection (alt).
+    //   - `Ctrl+V`             → paste (FA's stock bindings only ship
+    //     `Ctrl+Shift+V` for paste, not bare `Ctrl+V`).
+    //   - `Shift+Insert`       → paste (alt).
+    //
+    // `Ctrl+Shift+V` is **deliberately not bound** here. Alacritty's
+    // own `defaultTerminalShortcuts` ships `Ctrl+Shift+V → PasteIntent`,
+    // and our delegation pattern was producing inconsistent results
+    // (the user reported the paste silently failing while `Ctrl+Shift+C`
+    // worked). Letting alacritty's bundled `defaultPasteAction(engine,
+    // controller)` handle it is the right call — alacritty owns the
+    // engine's clipboard-load pathway and we don't want to fight it.
     bindings[primary(LogicalKeyboardKey.keyC, shift: true)] = copySelection;
     bindings[const SingleActivator(LogicalKeyboardKey.insert, control: true)] =
         copySelection;
     bindings[primary(LogicalKeyboardKey.keyV)] = paste;
     bindings[const SingleActivator(LogicalKeyboardKey.insert, shift: true)] =
         paste;
-
-    // Scroll.
-    bindings[plain(LogicalKeyboardKey.pageUp)] = scrollPageUp;
-    bindings[plain(LogicalKeyboardKey.pageDown)] = scrollPageDown;
-    bindings[const SingleActivator(LogicalKeyboardKey.pageUp, shift: true)] =
-        scrollPageUpFast;
-    bindings[const SingleActivator(LogicalKeyboardKey.pageDown, shift: true)] =
-        scrollPageDownFast;
 
     // Readline passthrough (Ctrl+U/K/L/A/E) is NOT in this map — the
     // terminal view wires those directly to `_engine.write(...)` with

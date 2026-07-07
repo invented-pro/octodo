@@ -13,7 +13,8 @@ import 'package:flutter_alacritty/flutter_alacritty.dart'
         defaultTerminalShortcuts,
         DecreaseFontSizeIntent,
         IncreaseFontSizeIntent,
-        ResetFontSizeIntent;
+        ResetFontSizeIntent,
+        ScrollPageIntent;
 import 'package:signals/signals_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../settings/settings_catalog.dart';
@@ -235,6 +236,19 @@ const Duration _kVisualBellDuration = Duration(milliseconds: 100);
 /// array on every call (called from initState, every settings change,
 /// every zoom step).
 final fa.TerminalColors _defaultColors = fa.TerminalConfig.defaults().colors;
+
+/// Intent: scroll the scrollback by 5 pages (Shift+PageUp/Down).
+///
+/// Mirrors the unshifted `ScrollPageIntent` bundled with
+/// `flutter_alacritty`, which has no `multiplier` field. We need a
+/// distinct intent type so we can wire a different action in
+/// [_alacrittyActions] — `defaultTerminalActions` keys actions by
+/// `Type`, so a single `ScrollPageIntent` couldn't carry both the
+/// 1-page and 5-page behaviors.
+class _ScrollFastIntent extends Intent {
+  const _ScrollFastIntent(this.up);
+  final bool up;
+}
 
 /// A self-contained terminal emulator widget backed by `flutter_alacritty`
 /// (Alacritty Rust core via flutter_rust_bridge + `flutter_pty` for ConPTY).
@@ -1061,12 +1075,44 @@ class TerminalViewState extends State<TerminalView> {
   // extended set. We must therefore explicitly re-include every
   // binding alacritty ships in `defaultTerminalShortcuts` (Copy,
   // Paste, ToggleSearch, plus the unshifted zoom forms).
+  //
+  // PageUp/PageDown are also wired here — without these, FA's
+  // `_onKeyFallback` finds no match, falls through to `encodeKey`,
+  // and writes `ESC [ 5 ~` / `ESC [ 6 ~` to the PTY (the shell
+  // receives them as a PageUp keypress instead of the scrollback
+  // scrolling). Routing through FA's `Shortcuts`/`Actions` lets the
+  // match happen BEFORE the encodeKey path runs. `ScrollPageIntent`
+  // already has a bundled action in `defaultTerminalActions`: on
+  // PageUp it calls `engine.scrollLines(+rows)`, and a positive
+  // delta scrolls up into history (see `terminal_engine.dart`),
+  // which is the correct PageUp semantics. This is a deliberate
+  // direction change from the old app-level binding, which used
+  // `scrollLines(-rows)` for PageUp and so scrolled the wrong way
+  // (masked in practice because the `?.` dispatch chain usually
+  // resolved to a no-op). The Shift variants use a custom intent
+  // (see [_ScrollFastIntent]) because the bundled
+  // `ScrollPageIntent` has no multiplier and Shift+PageUp/Down is
+  // meant to scroll 5 pages at a time.
   static final Map<ShortcutActivator, Intent>
   _alacrittyShortcutsWithShiftVariants = <ShortcutActivator, Intent>{
     ...defaultTerminalShortcuts,
+    // PageUp/PageDown → 1-page scrollback scroll.
+    SingleActivator(LogicalKeyboardKey.pageUp): const ScrollPageIntent(
+      up: true,
+    ),
+    SingleActivator(LogicalKeyboardKey.pageDown): const ScrollPageIntent(
+      up: false,
+    ),
+    // Shift+PageUp/PageDown → 5-page scrollback scroll. The
+    // bundled ScrollPageIntent has no multiplier, so route via
+    // a custom intent handled in [_alacrittyActions].
+    SingleActivator(LogicalKeyboardKey.pageUp, shift: true):
+        const _ScrollFastIntent(true),
+    SingleActivator(LogicalKeyboardKey.pageDown, shift: true):
+        const _ScrollFastIntent(false),
     // Shift variants of the zoom bindings. The unshifted forms are
-    // already in `defaultTerminalShortcuts` — we only need to add
-    // the shift variants alacritty doesn't ship.
+    // already in `defaultTerminalShortcuts` — we only need to add the
+    // shift variants alacritty doesn't ship.
     SingleActivator(LogicalKeyboardKey.equal, control: true, shift: true):
         const IncreaseFontSizeIntent(),
     SingleActivator(LogicalKeyboardKey.add, control: true, shift: true):
@@ -1082,6 +1128,20 @@ class TerminalViewState extends State<TerminalView> {
         const ResetFontSizeIntent(),
     SingleActivator(LogicalKeyboardKey.numpad0, control: true, shift: true):
         const ResetFontSizeIntent(),
+  };
+
+  /// Custom intents dispatched by [_alacrittyShortcutsWithShiftVariants]
+  /// whose action handlers don't come from `defaultTerminalActions`.
+  ///
+  /// Kept as a getter (not a `static final`) so the closure can
+  /// capture `this` and call instance methods like `_scrollPageFast`.
+  Map<Type, Action<Intent>> get _alacrittyActions => <Type, Action<Intent>>{
+    _ScrollFastIntent: CallbackAction<_ScrollFastIntent>(
+      onInvoke: (i) {
+        _scrollPageFast(i.up ? 1 : -1);
+        return null;
+      },
+    ),
   };
 
   // ── Public action API ────────────────────────────────────────────
@@ -1106,8 +1166,6 @@ class TerminalViewState extends State<TerminalView> {
   // `IncreaseFontSizeIntent` / `DecreaseFontSizeIntent` /
   // `ResetFontSizeIntent`. No public mirror here — `main.dart`'s
   // early-key handler doesn't reach us for zoom.
-  void scrollPagePublic(int direction) => _scrollPage(direction);
-  void scrollPageFastPublic(int direction) => _scrollPageFast(direction);
 
   // ── Build ────────────────────────────────────────────────────────
 
@@ -1123,10 +1181,6 @@ class TerminalViewState extends State<TerminalView> {
         ...TerminalBindings.build(
           copySelection: _copySelectionToClipboard,
           paste: _pasteFromClipboard,
-          scrollPageUp: () => _scrollPage(-1),
-          scrollPageDown: () => _scrollPage(1),
-          scrollPageUpFast: () => _scrollPageFast(-1),
-          scrollPageDownFast: () => _scrollPageFast(1),
         ),
         // Readline-style Ctrl+U/K/L/A/E — write raw control bytes
         // through the PTY so the shell receives them. These are the
@@ -1140,162 +1194,224 @@ class TerminalViewState extends State<TerminalView> {
         primary(LogicalKeyboardKey.keyA): _sendCtrlA,
         primary(LogicalKeyboardKey.keyE): _sendCtrlE,
       },
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          // fa.TerminalView directly (no outer GestureDetector /
-          // Listener / MouseRegion wrapper). Reasoning:
-          //   * The original v6.0.0 tree wrapped fa.TerminalView in a
-          //     GestureDetector whose internal `RenderPointerListener`
-          //     silently swallowed `PointerHoverEvent` (no matching
-          //     callback → no `super.handleEvent` forwarding), so the
-          //     I-beam cursor never appeared at the pane edges.
-          //   * The pane-edge cursor + selection bug was traced (v6.0.1
-          //     investigation) to the always-present translucent `MetaData`
-          //     of `_PaneDropOverlay`'s four `_EdgeSplitZone` DragTargets
-          //     — fixed by rendering them only while a tab drag is in
-          //     flight (see pane_tree.dart).
-          //   * fa.TerminalView calls `_focus.requestFocus()` inside its
-          //     own `__pointerOnDown`, and carries its own `MouseRegion`
-          //     that dynamically resolves to text / click based on cell
-          //     content (link detection).
-          //
-          // `padding: EdgeInsets.symmetric(horizontal: cellWidthHalf)` —
-          // ~half a letter width. fa.TerminalView uses `widget.padding`
-          // to shrink the available area before computing cols/rows (so the
-          // PTY grid sizes to the padded area, not the full pane — last
-          // column wouldn't be clipped), then wraps the tree in a Padding.
-          // Cascadia Code is roughly `fontSize * 0.6` wide per glyph at
-          // the default lineHeight, so half-letter ≈ `fontSize * 0.3`.
-          Positioned.fill(
-            child: fa.TerminalView(
-              _engine,
-              controller: _controller,
-              focusNode: _focus,
-              autofocus: true,
-              padding: EdgeInsets.symmetric(horizontal: _fontSize * 0.3),
-              // Pass the actual font size/family to fa.TerminalView so its
-              // internal cell metrics match ours. Without this, fa.TerminalView
-              // uses `TerminalStyle.defaults()` (size: 14) regardless of our
-              // settings, which causes LayoutBuilder to compute a wrong grid
-              // size and triggers a cascading `_engine.resize` + `_pty.resize`
-              // on every settings change → some shells clear their screen on
-              // TIOCSWINSZ (cmd.exe, WSL bash with certain configs), wiping
-              // the visible content.
-              textStyle: fa.TerminalStyle(
-                // Mirror `_buildConfig`: primary is the user's
-                // pick when it has Latin 'W' advance, otherwise
-                // pinned to safeFontFamilyFallback (Cascadia
-                // Code). The non-Latin pick goes into the
-                // fallback list for the script it actually
-                // covers. See `hasLatinAdvance` for the
-                // detection logic and the crash class this
-                // avoids in `CellMetrics.measure`.
-                family: effectiveLatinPrimary(fontFamilyPick),
-                fallback: <String>[
-                  if (fontFamilyPick.isNotEmpty &&
-                      fontFamilyPick != safeFontFamilyFallback &&
-                      fontFamilyPick != effectiveLatinPrimary(fontFamilyPick))
-                    fontFamilyPick,
-                  _cjkFontFamily,
-                  'Microsoft YaHei UI',
-                  'SimSun',
-                  'Consolas',
-                  'monospace',
-                ],
-                size: _fontSize,
-                lineHeight: _lineHeight,
+      // Safety-net Focus wrapping the terminal tree. The PRIMARY
+      // path for PageUp/PageDown is `fa.TerminalView._onKeyFallback`,
+      // which (after the change at `_alacrittyShortcutsWithShiftVariants`
+      // above) now finds our `PageUp → ScrollPageIntent` /
+      // `PageDown → ScrollPageIntent` binding and invokes the bundled
+      // `ScrollPageIntent` action (→ `engine.scrollLines`).
+      // That path requires the action lookup to succeed; if it
+      // somehow returns null (e.g. an FA Actions-tree quirk in some
+      // scenario we haven't reproduced), the event propagates up the
+      // focus tree and reaches THIS Focus. We catch plain
+      // PageUp/PageDown and Shift+PageUp/PageDown here and call
+      // `_scrollPage` / `_scrollPageFast` directly, returning
+      // `handled` so the ancestor `CallbackShortcuts` doesn't
+      // double-fire. Ctrl/Alt/Meta combinations are intentionally
+      // ignored — those belong to other parts of the shortcut system.
+      child: Focus(
+        onKeyEvent: _handleScrollFallbackKey,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // fa.TerminalView directly (no outer GestureDetector /
+            // Listener / MouseRegion wrapper). Reasoning:
+            //   * The original v6.0.0 tree wrapped fa.TerminalView in a
+            //     GestureDetector whose internal `RenderPointerListener`
+            //     silently swallowed `PointerHoverEvent` (no matching
+            //     callback → no `super.handleEvent` forwarding), so the
+            //     I-beam cursor never appeared at the pane edges.
+            //   * The pane-edge cursor + selection bug was traced (v6.0.1
+            //     investigation) to the always-present translucent `MetaData`
+            //     of `_PaneDropOverlay`'s four `_EdgeSplitZone` DragTargets
+            //     — fixed by rendering them only while a tab drag is in
+            //     flight (see pane_tree.dart).
+            //   * fa.TerminalView calls `_focus.requestFocus()` inside its
+            //     own `__pointerOnDown`, and carries its own `MouseRegion`
+            //     that dynamically resolves to text / click based on cell
+            //     content (link detection).
+            //
+            // `padding: EdgeInsets.symmetric(horizontal: cellWidthHalf)` —
+            // ~half a letter width. fa.TerminalView uses `widget.padding`
+            // to shrink the available area before computing cols/rows (so the
+            // PTY grid sizes to the padded area, not the full pane — last
+            // column wouldn't be clipped), then wraps the tree in a Padding.
+            // Cascadia Code is roughly `fontSize * 0.6` wide per glyph at
+            // the default lineHeight, so half-letter ≈ `fontSize * 0.3`.
+            Positioned.fill(
+              child: fa.TerminalView(
+                _engine,
+                controller: _controller,
+                focusNode: _focus,
+                autofocus: true,
+                padding: EdgeInsets.symmetric(horizontal: _fontSize * 0.3),
+                // Pass the actual font size/family to fa.TerminalView so its
+                // internal cell metrics match ours. Without this, fa.TerminalView
+                // uses `TerminalStyle.defaults()` (size: 14) regardless of our
+                // settings, which causes LayoutBuilder to compute a wrong grid
+                // size and triggers a cascading `_engine.resize` + `_pty.resize`
+                // on every settings change → some shells clear their screen on
+                // TIOCSWINSZ (cmd.exe, WSL bash with certain configs), wiping
+                // the visible content.
+                textStyle: fa.TerminalStyle(
+                  // Mirror `_buildConfig`: primary is the user's
+                  // pick when it has Latin 'W' advance, otherwise
+                  // pinned to safeFontFamilyFallback (Cascadia
+                  // Code). The non-Latin pick goes into the
+                  // fallback list for the script it actually
+                  // covers. See `hasLatinAdvance` for the
+                  // detection logic and the crash class this
+                  // avoids in `CellMetrics.measure`.
+                  family: effectiveLatinPrimary(fontFamilyPick),
+                  fallback: <String>[
+                    if (fontFamilyPick.isNotEmpty &&
+                        fontFamilyPick != safeFontFamilyFallback &&
+                        fontFamilyPick != effectiveLatinPrimary(fontFamilyPick))
+                      fontFamilyPick,
+                    _cjkFontFamily,
+                    'Microsoft YaHei UI',
+                    'SimSun',
+                    'Consolas',
+                    'monospace',
+                  ],
+                  size: _fontSize,
+                  lineHeight: _lineHeight,
+                ),
+                // Font zoom — let alacritty own it. We pass `defaultTerminalShortcuts`
+                // plus our shift variants so users who hold Shift while pressing
+                // `=` / `-` / `0` (yielding `+` / `_` / `)` on US layouts) get
+                // zoom too. Alacritty's stock `defaultTerminalShortcuts` only
+                // ships the unshifted forms (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`), so
+                // without this merge a `Ctrl+Shift+=` press would fall through
+                // to `encodeKey` and write `+` into the PTY.
+                shortcuts: _alacrittyShortcutsWithShiftVariants,
+                // Custom action handlers for intents whose behavior isn't
+                // covered by `defaultTerminalActions` (see
+                // [_alacrittyActions]). The `defaultTerminalActions`
+                // merge happens inside fa.TerminalView's build, with
+                // our overrides layered on top — the ScrollPageIntent
+                // bundled handler keeps its 1-page behavior, and our
+                // _ScrollFastIntent handler takes over for 5-page
+                // scrolling.
+                actions: _alacrittyActions,
+                // Visual bell: fa.TerminalView paints its own overlay when
+                // bellDuration > zero (driven by settings.bellMode == visual).
+                bellDuration: _bellDurationForView,
+                onViewportResize: _onViewportResize,
+                onSecondaryTapUp: _onSecondaryTapUp,
+                onLinkActivate: _onLinkActivate,
               ),
-              // Font zoom — let alacritty own it. We pass `defaultTerminalShortcuts`
-              // plus our shift variants so users who hold Shift while pressing
-              // `=` / `-` / `0` (yielding `+` / `_` / `)` on US layouts) get
-              // zoom too. Alacritty's stock `defaultTerminalShortcuts` only
-              // ships the unshifted forms (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`), so
-              // without this merge a `Ctrl+Shift+=` press would fall through
-              // to `encodeKey` and write `+` into the PTY.
-              shortcuts: _alacrittyShortcutsWithShiftVariants,
-              // Visual bell: fa.TerminalView paints its own overlay when
-              // bellDuration > zero (driven by settings.bellMode == visual).
-              bellDuration: _bellDurationForView,
-              onViewportResize: _onViewportResize,
-              onSecondaryTapUp: _onSecondaryTapUp,
-              onLinkActivate: _onLinkActivate,
             ),
-          ),
-          SignalBuilder(
-            builder: (_) => _exited.value
-                ? const Positioned.fill(
-                    child: ColoredBox(
-                      color: Colors.black54,
-                      child: Center(
-                        child: Text(
-                          '[process exited]',
-                          style: TextStyle(
-                            color: Color(0xFFBDBDBD),
-                            fontSize: 16,
+            SignalBuilder(
+              builder: (_) => _exited.value
+                  ? const Positioned.fill(
+                      child: ColoredBox(
+                        color: Colors.black54,
+                        child: Center(
+                          child: Text(
+                            '[process exited]',
+                            style: TextStyle(
+                              color: Color(0xFFBDBDBD),
+                              fontSize: 16,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  )
-                : const SizedBox.shrink(),
-          ),
-          SignalBuilder(
-            builder: (_) {
-              if (_hasReceivedOutput.value || _exited.value) {
-                return const SizedBox.shrink();
-              }
-              return Positioned.fill(
-                child: IgnorePointer(
-                  child: ColoredBox(
-                    color: Colors.black,
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                Color(0xFF89B4FA),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+            SignalBuilder(
+              builder: (_) {
+                if (_hasReceivedOutput.value || _exited.value) {
+                  return const SizedBox.shrink();
+                }
+                return Positioned.fill(
+                  child: IgnorePointer(
+                    child: ColoredBox(
+                      color: Colors.black,
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Color(0xFF89B4FA),
+                                ),
                               ),
                             ),
-                          ),
-                          const SizedBox(height: 12),
-                          const Text(
-                            'Starting shell…',
-                            style: TextStyle(
-                              color: Color(0xFFBDBDBD),
-                              fontSize: 13,
+                            const SizedBox(height: 12),
+                            const Text(
+                              'Starting shell…',
+                              style: TextStyle(
+                                color: Color(0xFFBDBDBD),
+                                fontSize: 13,
+                              ),
                             ),
-                          ),
-                          SignalBuilder(
-                            builder: (_) => _showSlowHint.value
-                                ? const Padding(
-                                    padding: EdgeInsets.only(top: 6),
-                                    child: Text(
-                                      'WSL cold start can take 10-30 s on first launch.',
-                                      style: TextStyle(
-                                        color: Color(0xFF7F7F7F),
-                                        fontSize: 11,
+                            SignalBuilder(
+                              builder: (_) => _showSlowHint.value
+                                  ? const Padding(
+                                      padding: EdgeInsets.only(top: 6),
+                                      child: Text(
+                                        'WSL cold start can take 10-30 s on first launch.',
+                                        style: TextStyle(
+                                          color: Color(0xFF7F7F7F),
+                                          fontSize: 11,
+                                        ),
                                       ),
-                                    ),
-                                  )
-                                : const SizedBox.shrink(),
-                          ),
-                        ],
+                                    )
+                                  : const SizedBox.shrink(),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-              );
-            },
-          ),
-        ],
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
+  }
+
+  /// Second-line handler for PageUp / PageDown / Shift+PageUp /
+  /// Shift+PageDown. The PRIMARY path lives inside `fa.TerminalView`
+  /// (`_onKeyFallback` → our `ScrollPageIntent` shortcut → bundled
+  /// action → `engine.scrollLines`). This handler is the safety net:
+  /// if that path returns `ignored` for any reason (e.g. an action
+  /// lookup miss), the event propagates up the focus tree to this
+  /// `Focus` widget, which intercepts the same set of keys and calls
+  /// `_scrollPage` / `_scrollPageFast` directly.
+  ///
+  /// Modifier policy: only intercept when no Ctrl / Alt / Meta is
+  /// pressed. Shift is allowed (and determines 1-page vs 5-page
+  /// scroll). Any chord involving Ctrl / Alt / Meta falls through
+  /// to the rest of the shortcut system.
+  KeyEventResult _handleScrollFallbackKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final hw = HardwareKeyboard.instance;
+    if (hw.isControlPressed || hw.isAltPressed || hw.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    final isPageUp = event.logicalKey == LogicalKeyboardKey.pageUp;
+    final isPageDown = event.logicalKey == LogicalKeyboardKey.pageDown;
+    if (!isPageUp && !isPageDown) {
+      return KeyEventResult.ignored;
+    }
+    final direction = isPageUp ? 1 : -1;
+    if (hw.isShiftPressed) {
+      _scrollPageFast(direction);
+    } else {
+      _scrollPage(direction);
+    }
+    return KeyEventResult.handled;
   }
 
   @override
