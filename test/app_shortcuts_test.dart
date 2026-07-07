@@ -9,8 +9,11 @@ void main() {
       final a = primary(LogicalKeyboardKey.keyB, shift: true);
       expect(a, isA<SingleActivator>());
       final s = a as SingleActivator;
-      expect(s.control != s.meta, isTrue,
-          reason: 'exactly one of control/meta must be set');
+      expect(
+        s.control != s.meta,
+        isTrue,
+        reason: 'exactly one of control/meta must be set',
+      );
       expect(s.shift, isTrue);
       expect(s.trigger, LogicalKeyboardKey.keyB);
     });
@@ -88,8 +91,11 @@ void main() {
         quit: () {},
         showReservedHint: (_) {},
       );
-      expect(bindings.length, greaterThan(10),
-          reason: 'expected workspace + digit + fullscreen + reserved');
+      expect(
+        bindings.length,
+        greaterThan(10),
+        reason: 'expected workspace + digit + fullscreen + reserved',
+      );
     });
   });
 
@@ -127,7 +133,8 @@ void main() {
       int dirHits = 0;
       for (final entry in bindings.entries) {
         final a = entry.key as SingleActivator;
-        final isArrow = a.trigger == LogicalKeyboardKey.arrowUp ||
+        final isArrow =
+            a.trigger == LogicalKeyboardKey.arrowUp ||
             a.trigger == LogicalKeyboardKey.arrowDown ||
             a.trigger == LogicalKeyboardKey.arrowLeft ||
             a.trigger == LogicalKeyboardKey.arrowRight;
@@ -136,13 +143,15 @@ void main() {
         // modifier (matching every other app shortcut) rather than
         // the Alt-only convention we used previously, which had no
         // discoverable mnemonic.
-        final isPrimaryShift =
-            (a.control || a.meta) && a.shift && !a.alt;
+        final isPrimaryShift = (a.control || a.meta) && a.shift && !a.alt;
         if (isArrow && isPrimaryShift) dirHits++;
       }
-      expect(dirHits, 4,
-          reason:
-              'expected Ctrl/Cmd+Shift+{Up,Down,Left,Right} → focus pane in direction');
+      expect(
+        dirHits,
+        4,
+        reason:
+            'expected Ctrl/Cmd+Shift+{Up,Down,Left,Right} → focus pane in direction',
+      );
     });
   });
 
@@ -151,10 +160,6 @@ void main() {
       final bindings = TerminalBindings.build(
         copySelection: () {},
         paste: () {},
-        scrollPageUp: () {},
-        scrollPageDown: () {},
-        scrollPageUpFast: () {},
-        scrollPageDownFast: () {},
       );
       expect(bindings, isNotEmpty);
       for (final entry in bindings.entries) {
@@ -175,48 +180,56 @@ void main() {
       final bindings = TerminalBindings.build(
         copySelection: () {},
         paste: () {},
-        scrollPageUp: () {},
-        scrollPageDown: () {},
-        scrollPageUpFast: () {},
-        scrollPageDownFast: () {},
       );
 
       // None of the zoom activators should be present.
       bool hasZoomActivator(bool Function(SingleActivator) test) =>
           bindings.keys.any((a) => a is SingleActivator && test(a));
       expect(
-        hasZoomActivator((a) =>
-            a.trigger == LogicalKeyboardKey.equal &&
-            (a.control || a.meta) &&
-            !a.shift &&
-            !a.alt),
+        hasZoomActivator(
+          (a) =>
+              a.trigger == LogicalKeyboardKey.equal &&
+              (a.control || a.meta) &&
+              !a.shift &&
+              !a.alt,
+        ),
         isFalse,
         reason: 'Ctrl+= zoom should NOT be in TerminalBindings',
       );
       expect(
-        hasZoomActivator((a) =>
-            a.trigger == LogicalKeyboardKey.minus &&
-            (a.control || a.meta) &&
-            !a.shift &&
-            !a.alt),
+        hasZoomActivator(
+          (a) =>
+              a.trigger == LogicalKeyboardKey.minus &&
+              (a.control || a.meta) &&
+              !a.shift &&
+              !a.alt,
+        ),
         isFalse,
         reason: 'Ctrl+- zoom should NOT be in TerminalBindings',
       );
       expect(
-        hasZoomActivator((a) =>
-            a.trigger == LogicalKeyboardKey.digit0 &&
-            (a.control || a.meta) &&
-            !a.shift &&
-            !a.alt),
+        hasZoomActivator(
+          (a) =>
+              a.trigger == LogicalKeyboardKey.digit0 &&
+              (a.control || a.meta) &&
+              !a.shift &&
+              !a.alt,
+        ),
         isFalse,
         reason: 'Ctrl+0 zoom should NOT be in TerminalBindings',
       );
       expect(
-        bindings.keys.any((a) => a is CharacterActivator &&
-            (a.character == '=' || a.character == '+' ||
-             a.character == '-' || a.character == '0')),
+        bindings.keys.any(
+          (a) =>
+              a is CharacterActivator &&
+              (a.character == '=' ||
+                  a.character == '+' ||
+                  a.character == '-' ||
+                  a.character == '0'),
+        ),
         isFalse,
-        reason: 'CharacterActivator zoom fallbacks should NOT be in '
+        reason:
+            'CharacterActivator zoom fallbacks should NOT be in '
             'TerminalBindings',
       );
     });
@@ -258,14 +271,7 @@ void main() {
           focusPaneInDirection: (_) {},
           toggleMaximizePane: () {},
         ),
-        TerminalBindings.build(
-          copySelection: () {},
-          paste: () {},
-          scrollPageUp: () {},
-          scrollPageDown: () {},
-          scrollPageUpFast: () {},
-          scrollPageDownFast: () {},
-        ),
+        TerminalBindings.build(copySelection: () {}, paste: () {}),
       ];
       final readlineKeys = <LogicalKeyboardKey>{
         LogicalKeyboardKey.keyA,
@@ -301,13 +307,13 @@ void main() {
         for (final key in map.keys) {
           if (key is! SingleActivator) continue;
           final s = key;
-          final isBarePrimary =
-              (s.control ^ s.meta) && !s.shift && !s.alt;
+          final isBarePrimary = (s.control ^ s.meta) && !s.shift && !s.alt;
           if (isBarePrimary && readlineKeys.contains(s.trigger)) {
             fail(
-                'Bare Ctrl/Cmd-letter bound: '
-                '${s.control ? "Ctrl" : "Cmd"}+${s.trigger.keyLabel} '
-                '— would conflict with readline / vim.');
+              'Bare Ctrl/Cmd-letter bound: '
+              '${s.control ? "Ctrl" : "Cmd"}+${s.trigger.keyLabel} '
+              '— would conflict with readline / vim.',
+            );
           }
         }
       }
