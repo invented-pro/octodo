@@ -933,6 +933,36 @@ class PaneLayout extends StatelessWidget {
   /// Used both by [_buildSplit] (which calls [_buildNode] for each side)
   /// and by [_buildHiddenTree] (which substitutes a [SizedBox.shrink]
   /// for the focused subtree during maximize).
+  ///
+  /// **Why not `LayoutBuilder`+`Stack`+`Positioned`**: an earlier
+  /// version used a `LayoutBuilder` here to compute pixel sizes for
+  /// two `Positioned` pane children. The `LayoutBuilder`'s
+  /// `_rebuildWithConstraints` runs inside `buildScope` during the
+  /// layout pass; the `buildScope` mounts the pane subtrees (the
+  /// `first`/`second` widgets and everything inside them). Those
+  /// subtrees contain tab bars whose `IconButton` tooltips and
+  /// `PopupMenuButton` hold `OverlayPortal`s. On mount,
+  /// `OverlayPortal.activate()` → `_RenderTheater._addDeferredChild`
+  /// → `adoptChild` → `attach` → `markNeedsLayout` on a
+  /// `_RenderLayoutBuilder` that is NOT an ancestor of the one
+  /// currently performing layout — tripping
+  /// `A _RenderLayoutBuilder was mutated in
+  /// _RenderLayoutBuilder.performLayout`. This happened every time a
+  /// NEW pane was mounted for the first time inside the split
+  /// (split-right, split-down, restore-from-maximize into a split).
+  ///
+  /// Using `Row`/`Column` + `Expanded` instead moves the pane subtree
+  /// build OUT of any `LayoutBuilder`'s `buildScope` and into the
+  /// normal BUILD phase, where `OverlayPortal` activation is safe.
+  /// The divider is overlaid via a `Stack`/`Positioned` that carries
+  /// NO pane subtree — just the thin `_Divider` hit area — so even
+  /// though the `Stack` is the split root, its `Positioned` children
+  /// don't pull in `OverlayPortal`s. The divider's `onDrag` reads
+  /// the split's current pixel size via a `GlobalKey` lookup at
+  /// drag time (rather than capturing it from a `LayoutBuilder`
+  /// constraint at build time), which is the only piece of
+  /// information the old `LayoutBuilder` was providing beyond
+  /// sizing.
   Widget _buildSplitWithChildren(
     BuildContext context,
     PaneSplit split,
@@ -940,79 +970,62 @@ class PaneLayout extends StatelessWidget {
     Widget second,
   ) {
     final isHorizontal = split.direction == Axis.horizontal;
+    final firstFlex = (split.ratio * 1000).round().clamp(1, 999);
+    final secondFlex = (1000 - firstFlex).clamp(1, 999);
+    final splitKey = GlobalKey();
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
+    final divider = _Divider(
+      isHorizontal: isHorizontal,
+      onDrag: (delta, _) {
+        final renderBox =
+            splitKey.currentContext?.findRenderObject() as RenderBox?;
+        if (renderBox == null || !renderBox.hasSize) return;
         final totalSize = isHorizontal
-            ? constraints.maxWidth
-            : constraints.maxHeight;
-        final firstSize = totalSize * split.ratio;
-        final secondSize = totalSize - firstSize;
+            ? renderBox.size.width
+            : renderBox.size.height;
+        if (totalSize <= 0) return;
+        final newRatio = (split.ratio + delta / totalSize).clamp(0.1, 0.9);
+        onResize(split, newRatio.toDouble());
+      },
+    );
 
-        final divider = _Divider(
-          isHorizontal: isHorizontal,
-          onDrag: (delta, _) {
-            final newRatio = (split.ratio + delta / totalSize).clamp(0.1, 0.9);
-            onResize(split, newRatio.toDouble());
-          },
-        );
-
-        // Stack + Positioned so the two panes sit flush against each
-        // other (no gutter). The divider is a zero-width widget whose
-        // hit area is a Positioned rectangle straddling the boundary.
-        if (isHorizontal) {
-          return Stack(
+    // The panes are laid out by Row/Column+Expanded (no LayoutBuilder,
+    // no Positioned — the pane subtrees build in the normal BUILD
+    // phase). The divider is overlaid in a Stack on top, positioned
+    // at the split ratio. Because the Stack's only Positioned child
+    // is the thin divider hit area (no pane subtree inside), the
+    // OverlayPortal-on-mount issue doesn't apply to it.
+    final panes = isHorizontal
+        ? Row(
             children: [
-              Positioned(
-                left: 0,
-                top: 0,
-                width: firstSize,
-                height: constraints.maxHeight,
-                child: first,
-              ),
-              Positioned(
-                left: firstSize,
-                top: 0,
-                width: secondSize,
-                height: constraints.maxHeight,
-                child: second,
-              ),
-              Positioned(
-                left: firstSize - _Divider.hitSize / 2,
-                top: 0,
-                width: _Divider.hitSize,
-                height: constraints.maxHeight,
-                child: divider,
-              ),
+              Expanded(flex: firstFlex, child: first),
+              Expanded(flex: secondFlex, child: second),
+            ],
+          )
+        : Column(
+            children: [
+              Expanded(flex: firstFlex, child: first),
+              Expanded(flex: secondFlex, child: second),
             ],
           );
-        }
-        return Stack(
-          children: [
-            Positioned(
-              left: 0,
-              top: 0,
-              width: constraints.maxWidth,
-              height: firstSize,
-              child: first,
-            ),
-            Positioned(
-              left: 0,
-              top: firstSize,
-              width: constraints.maxWidth,
-              height: secondSize,
-              child: second,
-            ),
-            Positioned(
-              left: 0,
-              top: firstSize - _Divider.hitSize / 2,
-              width: constraints.maxWidth,
-              height: _Divider.hitSize,
-              child: divider,
-            ),
-          ],
-        );
-      },
+
+    return Stack(
+      key: splitKey,
+      children: [
+        Positioned.fill(child: panes),
+        Align(
+          alignment: isHorizontal
+              ? Alignment(split.ratio * 2 - 1, 0)
+              : Alignment(0, split.ratio * 2 - 1),
+          widthFactor: isHorizontal ? null : 1,
+          heightFactor: isHorizontal ? 1 : null,
+          child: SizedBox(
+            width: isHorizontal ? _Divider.hitSize : double.infinity,
+            height: isHorizontal ? double.infinity : _Divider.hitSize,
+            child: divider,
+          ),
+        ),
+      ],
     );
   }
 }
