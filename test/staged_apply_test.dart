@@ -183,4 +183,108 @@ void main() {
       expect(File(p.join(workDir.path, 'sneaky.txt')).existsSync(), isFalse);
     });
   });
+
+  group('_relaunch helper-env override (regression for recursion bug)', () {
+    late Directory relayWorkDir;
+
+    // Compiled once per test suite. `dart compile exe` takes a
+    // few seconds; caching keeps the suite fast on re-runs.
+    setUpAll(() async {
+      final src = File('test/_support/relay_env.dart');
+      final exe = File('test/_support/relay_env.exe');
+      if (!exe.existsSync() ||
+          exe.statSync().modified.isBefore(src.statSync().modified)) {
+        final result = await Process.run(
+          Platform.resolvedExecutable,
+          ['compile', 'exe', src.path, '-o', exe.path],
+        );
+        if (result.exitCode != 0) {
+          throw StateError(
+            'Failed to compile relay_env.dart (exit '
+            '${result.exitCode}):\n${result.stderr}',
+          );
+        }
+      }
+    });
+
+    setUp(() async {
+      relayWorkDir = await Directory.systemTemp.createTemp('relay_test_');
+    });
+
+    tearDown(() async {
+      // Sweep any pid-scoped relay outputs we wrote. The basename
+      // prefix `octodo_relay_` already disambiguates concurrent
+      // runs of the same test by PID, so we don't need to also
+      // scope by relayWorkDir — earlier code attempted that via a
+      // `.contains(...)` clause that always evaluated to true
+      // (`String.contains('')` is a tautology), so it was a no-op
+      // in practice.
+      final tmp = Directory(Directory.systemTemp.path);
+      if (await tmp.exists()) {
+        await for (final ent in tmp.list(followLinks: false)) {
+          if (ent is File &&
+              p.basename(ent.path).startsWith('octodo_relay_')) {
+            try {
+              await ent.delete();
+            } catch (_) {}
+          }
+        }
+      }
+      if (await relayWorkDir.exists()) {
+        await relayWorkDir.delete(recursive: true);
+      }
+    });
+
+    test('spawned child sees helper env vars as empty (no recursion)',
+        () async {
+      // We don't need a real staging dir for this test — `_relaunch`
+      // only reads `paths.installDir.path` (used as workingDirectory).
+      final installDir =
+          Directory(p.join(relayWorkDir.path, 'install'))..createSync();
+      final paths = InstallerPaths(
+        installDir: installDir,
+        stagingDir: Directory(p.join(relayWorkDir.path, 'unused_staging')),
+        zipFile: File(p.join(relayWorkDir.path, 'unused.zip')),
+        extractDir: Directory(p.join(relayWorkDir.path, 'unused_extracted')),
+      );
+
+      final relayExe = File('test/_support/relay_env.exe').absolute.path;
+      final proc = await StagedApply.relaunchForTest(
+        paths,
+        exePathForTest: relayExe,
+      );
+
+      // The relay writes its env snapshot to
+      // `<systemTemp>/octodo_relay_<pid>.log` and exits. Poll until
+      // it appears, then read it back.
+      final outputFile = File(
+        p.join(
+          Directory.systemTemp.path,
+          'octodo_relay_${proc.pid}.log',
+        ),
+      );
+      var appeared = false;
+      for (var i = 0; i < 50; i++) {
+        if (outputFile.existsSync()) {
+          appeared = true;
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      expect(appeared, isTrue,
+          reason: 'relay did not write ${outputFile.path} within 5s');
+
+      final snapshot = await outputFile.readAsString();
+      // The helper env vars must be CLEARED. The override in
+      // _relaunch sets them to '' so `isHelperMode` is false. If the
+      // override is removed (or includeParentEnvironment leaks them
+      // through) the snapshot would contain `OCTODO_UPDATE_HELPER=1`
+      // and the new exe would re-enter helper mode at the top of
+      // main(), recursing forever instead of showing the GUI window.
+      expect(snapshot, contains('OCTODO_UPDATE_HELPER=\n'));
+      expect(snapshot, contains('OCTODO_UPDATE_PAYLOAD=\n'));
+      expect(snapshot, contains('OCTODO_UPDATE_PID=\n'));
+      expect(snapshot, isNot(contains('OCTODO_UPDATE_HELPER=1')));
+    });
+  });
 }

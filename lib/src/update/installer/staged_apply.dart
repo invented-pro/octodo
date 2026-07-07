@@ -26,9 +26,10 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:meta/meta.dart';
 import 'package:path/path.dart' as p;
 
+import 'apply_main.dart';
 import 'crash_sentinel.dart';
 import 'install_paths.dart';
 
@@ -259,8 +260,26 @@ class StagedApply {
     }
   }
 
-  static Future<void> _relaunch(InstallerPaths paths) async {
-    final exe = File(p.join(
+  /// Test-only hook: drives [_relaunch] with a custom exe path.
+  /// Production callers leave [exePathForTest] null and the helper
+  /// resolves `octodo.exe` next to the install dir as usual. Tests
+  /// inject a stub binary that records its environment, so we can
+  /// assert the helper env vars are cleared (regression for the
+  /// "new exe re-enters helper mode and the chain recurses"
+  /// bug fixed in this file). Returns the spawned [Process] so the
+  /// test can read back its [Process.pid] and locate its output.
+  @visibleForTesting
+  static Future<Process> relaunchForTest(
+    InstallerPaths paths, {
+    required String exePathForTest,
+  }) =>
+      _relaunch(paths, exePathForTest: exePathForTest);
+
+  static Future<Process> _relaunch(
+    InstallerPaths paths, {
+    String? exePathForTest,
+  }) async {
+    final exe = File(exePathForTest ?? p.join(
       paths.installDir.path,
       InstallerPaths.executableBasename(),
     ));
@@ -272,6 +291,23 @@ class StagedApply {
     final proc = await Process.start(
       exe.path,
       const <String>[],
+      // Clear the helper env vars so the newly-spawned exe does NOT
+      // re-enter helper mode via the `isHelperMode` check at the
+      // top of `main()`. Process.start defaults to
+      // includeParentEnvironment: true, so without these overrides
+      // the child inherits OCTODO_UPDATE_HELPER=1 from the helper.
+      // In the legacy in-process path that routes back into
+      // runUpdateHelper and the chain recurses forever (no GUI
+      // window ever appears); in the current build main() exits
+      // with a crash sentinel instead, but the spawn is still
+      // pointless. Overriding with empty strings is enough because
+      // the helper-mode predicate is
+      // `Platform.environment[kHelperFlagEnv] == '1'`.
+      environment: <String, String>{
+        kHelperFlagEnv: '',
+        kHelperPayloadEnv: '',
+        kHelperPidEnv: '',
+      },
       mode: ProcessStartMode.detached,
       workingDirectory: paths.installDir.path,
     );
@@ -285,17 +321,30 @@ class StagedApply {
     // exit much later (user closed the app, OS-initiated shutdown,
     // etc.) is normal and must NOT pollute the sentinel log.
     final spawnedAt = DateTime.now();
-    // ignore: unawaited_futures
-    proc.exitCode.then((code) {
-      final elapsed = DateTime.now().difference(spawnedAt);
-      if (code != 0 && elapsed < _kEarlyExitWindow) {
-        // ignore: unawaited_futures
-        writeHelperCrashSentinel(
-          'relaunched ${exe.path} exited with code $code '
-          'after ${elapsed.inMilliseconds}ms',
-        );
-      }
-    });
+    // Detached processes don't expose `exitCode` — accessing it
+    // throws `Bad state: Process is detached`. The watcher below
+    // is therefore unreachable for detached spawns (which is what
+    // _relaunch always uses). Wrapping in try/on StateError keeps
+    // the watcher available for any future non-detached caller
+    // without crashing the helper when the child is detached.
+    try {
+      // ignore: unawaited_futures
+      proc.exitCode.then((code) {
+        final elapsed = DateTime.now().difference(spawnedAt);
+        if (code != 0 && elapsed < _kEarlyExitWindow) {
+          // ignore: unawaited_futures
+          writeHelperCrashSentinel(
+            'relaunched ${exe.path} exited with code $code '
+            'after ${elapsed.inMilliseconds}ms',
+          );
+        }
+      });
+    } on StateError {
+      // Detached process — exitCode is unavailable; the early-exit
+      // sentinel path is unreachable. This is the normal case for
+      // _relaunch.
+    }
+    return proc;
   }
 }
 

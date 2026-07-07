@@ -92,6 +92,22 @@ jobs:
             --build-name=$ver `
             --build-number=$env:GITHUB_RUN_NUMBER
 
+          # Compile the standalone update helper exe into the
+          # Release dir so it's bundled in the zip. The helper is
+          # spawned by UpdateController.applyDownloaded to extract +
+          # apply the staged payload — it MUST be a separate binary
+          # because octodo.exe statically imports plugin DLLs that
+          # Windows locks into the process address space, blocking
+          # the in-place overwrite. See tool/update_helper.dart for
+          # the full rationale.
+          #
+          # Delegates to tool/build_helper.dart so the dev and CI
+          # paths can't drift — the script is the single source of
+          # truth for output path + post-build existence check.
+          # Implemented in Dart rather than PowerShell so it runs
+          # regardless of the runner's ExecutionPolicy.
+          dart run tool/build_helper.dart
+
           $src = 'build\windows\x64\runner\Release'
           $zip = "octodo-v$ver-windows-x64.zip"
           $sha = "$zip.sha256"
