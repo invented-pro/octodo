@@ -350,6 +350,16 @@ class _AppShellState extends State<AppShell>
     // keystroke before it bubbles up).
     _installEarlyKeyHandler();
 
+    // Rebuild whenever the user flips the master shortcuts toggle
+    // in Settings → Shortcuts. The merged binding map reads the
+    // flag fresh on every `build`, so a single `setState` is all
+    // we need — no per-binding rebinding logic.
+    _shortcutsEnabledSub = SettingsRuntime.instance.store
+        .watch<bool>(SettingsRuntime.instance.catalog.shortcuts.enabled)
+        .listen((_) {
+          if (mounted) setState(() {});
+        });
+
     // Intercept the OS-level close signal so we can show the
     // "Exit Octodo?" dialog when the user clicks the window's × button.
     // The handler checks `general.confirmOnExit` at close time
@@ -466,6 +476,14 @@ class _AppShellState extends State<AppShell>
   /// Cached merged binding map, rebuilt on each [build].
   Map<ShortcutActivator, VoidCallback>? _mergedShortcuts;
 
+  /// Subscription to the `shortcuts.enabled` setting. When the
+  /// user flips the master toggle in Settings → Shortcuts, the
+  /// store fires this stream and we call `setState` to rebuild the
+  /// app shell — which re-runs `_buildMergedShortcuts`, which
+  /// re-reads the flag and short-circuits to an empty map when
+  /// disabled. Same pattern as `_OctodoAppState._themeSub`.
+  StreamSubscription<bool>? _shortcutsEnabledSub;
+
   /// Install in [initState]; uninstall in [dispose].
   void _installEarlyKeyHandler() {
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKeyEvent);
@@ -490,6 +508,17 @@ class _AppShellState extends State<AppShell>
   Map<ShortcutActivator, VoidCallback> _buildMergedShortcuts(
     BuildContext buildContext,
   ) {
+    // Master gate. When the user disables shortcuts via
+    // Settings → Shortcuts, return an empty map so the early-key
+    // handler finds no matches and falls through to the focus tree
+    // (and ultimately to `flutter_alacritty`, which encodes unbound
+    // chords as PTY bytes — so bare Ctrl-letter presses still reach
+    // the shell, just without the app intercepting them).
+    if (!SettingsRuntime.instance.store.get<bool>(
+      SettingsRuntime.instance.catalog.shortcuts.enabled,
+    )) {
+      return const {};
+    }
     return {
       ...AppShellBindings.build(
         toggleDrawer: _toggleDrawer,
@@ -1060,6 +1089,7 @@ class _AppShellState extends State<AppShell>
 
   @override
   void dispose() {
+    _shortcutsEnabledSub?.cancel();
     _uninstallEarlyKeyHandler();
     windowManager.removeListener(this);
     WidgetsBinding.instance.removeObserver(this);

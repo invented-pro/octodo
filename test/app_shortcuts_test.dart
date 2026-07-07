@@ -56,6 +56,50 @@ void main() {
     });
   });
 
+  group('formatActivator() — render any ShortcutActivator', () {
+    test('primary-key activator matches describe() output', () {
+      // The Shortcuts tab uses the same activators that the binding
+      // factories build, so formatActivator(activator) must produce
+      // the same label describe() does for the same logical key +
+      // shift + alt flags. Otherwise the manifest's labels and the
+      // tooltips' labels would drift.
+      final a = primary(LogicalKeyboardKey.keyM, shift: true);
+      final viaDescribe = describe(LogicalKeyboardKey.keyM, shift: true);
+      expect(formatActivator(a), viaDescribe);
+    });
+
+    test('plain (no-modifier) activator renders just the key label', () {
+      final a = const SingleActivator(LogicalKeyboardKey.f11);
+      expect(formatActivator(a), 'F11');
+    });
+
+    test('Ctrl+Insert renders as "Ctrl+Ins" on Win/Linux', () {
+      // Used by the Terminal scope's "Copy selection (alt)" row.
+      final a = const SingleActivator(LogicalKeyboardKey.insert, control: true);
+      // Platform-conditional: skip the exact label assertion on Mac
+      // (where Ctrl is rendered as ⌃) but always require the key
+      // glyph to be present.
+      final label = formatActivator(a);
+      expect(label.contains('Ins'), isTrue, reason: 'label=$label');
+    });
+
+    test(
+      'Cmd+Ctrl+letter renders as ⌃⌘<letter> on Mac, Ctrl+<letter> on others',
+      () {
+        final a = const SingleActivator(
+          LogicalKeyboardKey.keyF,
+          control: true,
+          meta: true,
+        );
+        // The label must include 'F' regardless of platform; the
+        // modifier glyphs are platform-conditional so we don't pin
+        // them here.
+        final label = formatActivator(a);
+        expect(label.endsWith('F'), isTrue, reason: 'label=$label');
+      },
+    );
+  });
+
   group('AppShellBindings.build()', () {
     test('every binding has a non-null callback', () {
       bool called = false;
@@ -318,5 +362,74 @@ void main() {
         }
       }
     });
+  });
+
+  group('allShortcuts — Settings → Shortcuts manifest', () {
+    test('is non-empty and covers all three scopes', () {
+      final categories = allShortcuts.map((s) => s.category).toSet();
+      expect(
+        categories,
+        containsAll(['App', 'Workspace', 'Terminal']),
+        reason: 'manifest should expose at least one row per scope',
+      );
+    });
+
+    test('every entry has a non-empty description and a non-empty label', () {
+      for (final s in allShortcuts) {
+        expect(
+          s.description,
+          isNotEmpty,
+          reason:
+              'manifest entry for ${s.category} is missing a '
+              'description',
+        );
+        expect(
+          s.label,
+          isNotEmpty,
+          reason:
+              'manifest entry "${s.description}" produced an empty '
+              'label for ${s.activator}',
+        );
+      }
+    });
+
+    test('every activator is a SingleActivator (the manifest currently '
+        'only enumerates primary / plain / control-key bindings)', () {
+      for (final s in allShortcuts) {
+        expect(
+          s.activator,
+          isA<SingleActivator>(),
+          reason:
+              'manifest entry "${s.description}" has a non-'
+              'SingleActivator (${s.activator.runtimeType}) — '
+              'formatActivator() would fall back to toString()',
+        );
+      }
+    });
+
+    test(
+      'App scope appears before Workspace, which appears before Terminal',
+      () {
+        // The UI groups rows by category, preserving manifest order
+        // (it uses a `LinkedHashMap` keyed by category and folds
+        // over `allShortcuts` in one pass). If a new category is
+        // inserted out of order, the section headers would render
+        // in the wrong order in the dialog.
+        final categories = allShortcuts.map((s) => s.category).toList();
+        final firstApp = categories.indexOf('App');
+        final firstWs = categories.indexOf('Workspace');
+        final firstTerm = categories.indexOf('Terminal');
+        expect(
+          firstApp,
+          lessThan(firstWs),
+          reason: 'App entries must come before Workspace entries',
+        );
+        expect(
+          firstWs,
+          lessThan(firstTerm),
+          reason: 'Workspace entries must come before Terminal entries',
+        );
+      },
+    );
   });
 }

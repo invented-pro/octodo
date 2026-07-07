@@ -156,6 +156,38 @@ String describe(
   return parts.join(mac ? '' : '+');
 }
 
+/// Render an arbitrary [ShortcutActivator] as a human label. Mirrors
+/// [describe] for the common `primary(...)` / `plain(...)` cases and
+/// additionally handles the macOS-only `Cmd+Ctrl+letter` form used
+/// by the fullscreen binding (`Ctrl+Cmd+F` on Mac vs `F11` on
+/// Windows / Linux). Returns [activator.toString] for non-
+/// [SingleActivator] inputs as a safe fallback.
+String formatActivator(ShortcutActivator activator) {
+  if (activator is! SingleActivator) return activator.toString();
+  final s = activator;
+  final mac = _useMetaAsPrimary;
+  final parts = <String>[];
+  if (mac) {
+    if (s.alt) parts.add('⌥');
+    if (s.shift) parts.add('⇧');
+    if (s.control && s.meta) {
+      // Cmd+Ctrl+letter — macOS fullscreen convention. Render as a
+      // single glyph pair so it stays compact in the chip.
+      parts.add('⌃⌘');
+    } else if (s.meta) {
+      parts.add(primaryLabel);
+    } else if (s.control) {
+      parts.add('⌃');
+    }
+  } else {
+    if (s.control) parts.add('Ctrl');
+    if (s.alt) parts.add('Alt');
+    if (s.shift) parts.add('Shift');
+  }
+  parts.add(_keyLabel(s.trigger));
+  return parts.join(mac ? '' : '+');
+}
+
 /// Show a transient floating snackbar for shortcuts whose feature
 /// isn't built yet (search, vi mode, …). The snackbar auto-dismisses
 /// after 2 seconds and floats above the bottom edge so it doesn't
@@ -489,3 +521,206 @@ class TerminalBindings {
 
 /// Cardinal direction for `Ctrl/Cmd+Shift+arrow` pane focus.
 enum PaneDirection { up, down, left, right }
+
+// ─────────────────────────────────────────────────────────────────────
+// Manifest — enumeration of every shortcut the app exposes, for the
+// Settings → Shortcuts tab.
+//
+// Kept separate from the [AppShellBindings.build] /
+// [WorkspaceBindings.build] / [TerminalBindings.build] factories so
+// the UI can iterate a `(description, activator)` list without
+// constructing callback closures. The factories remain the source
+// of truth for *behavior*; this list is the source of truth for
+// *display*.
+//
+// Drift between the two is a real risk: if a new binding is added
+// to a factory without a matching entry here, the user will see
+// fewer rows in the Shortcuts tab than the app actually responds
+// to. The trade-off is acceptable for a docs-only feature, and
+// `test/app_shortcuts_test.dart` locks down the manifest's shape
+// (every entry has a non-empty description, a valid activator, a
+// known category) so unintentional breakage is caught by CI.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Display metadata for a single shortcut. Rendered as a row in
+/// the Shortcuts settings tab: description on the left, [label] on
+/// the right.
+class ShortcutInfo {
+  /// One of `'App'`, `'Workspace'`, `'Terminal'`. The Settings UI
+  /// groups rows by this value and renders a section header per
+  /// group (preserving the order returned by [allShortcuts]).
+  final String category;
+
+  /// Human-readable description, e.g. `'Toggle sidebar drawer'`.
+  /// Rendered as the row's title.
+  final String description;
+
+  /// The [ShortcutActivator] that triggers the binding. The row's
+  /// trailing chip is rendered from this via [formatActivator].
+  final ShortcutActivator activator;
+
+  const ShortcutInfo({
+    required this.category,
+    required this.description,
+    required this.activator,
+  });
+
+  String get label => formatActivator(activator);
+}
+
+/// Every shortcut the app exposes, in dispatch order
+/// (App → Workspace → Terminal, matching the merge order in
+/// `_AppShellState._buildMergedShortcuts`). Re-evaluated on each
+/// call so the platform-conditional fullscreen entry picks the
+/// right activator (F11 on Win/Linux, Cmd+Ctrl+F on macOS).
+///
+/// Categories are preserved in the order `App`, `Workspace`,
+/// `Terminal`. The Settings UI relies on this order to decide
+/// which section header to render first.
+List<ShortcutInfo> get allShortcuts => [
+  // ── App scope ────────────────────────────────────────
+  ShortcutInfo(
+    category: 'App',
+    description: 'Toggle sidebar drawer',
+    activator: primary(LogicalKeyboardKey.keyB, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'New workspace',
+    activator: primary(LogicalKeyboardKey.keyN, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'Close current workspace',
+    activator: primary(LogicalKeyboardKey.keyW, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'Next workspace',
+    activator: primary(LogicalKeyboardKey.bracketRight, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'Previous workspace',
+    activator: primary(LogicalKeyboardKey.bracketLeft, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'Jump to workspace 1–9',
+    activator: primary(LogicalKeyboardKey.digit1, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'Toggle fullscreen',
+    activator: Platform.isMacOS
+        ? const SingleActivator(
+            LogicalKeyboardKey.keyF,
+            control: true,
+            meta: true,
+          )
+        : const SingleActivator(LogicalKeyboardKey.f11),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'Quit',
+    activator: primary(LogicalKeyboardKey.keyQ, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'Search (reserved — coming soon)',
+    activator: primary(LogicalKeyboardKey.keyF, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'App',
+    description: 'Vi mode (reserved — coming soon)',
+    activator: primary(LogicalKeyboardKey.space, shift: true),
+  ),
+
+  // ── Workspace scope ──────────────────────────────────
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'New tab',
+    activator: primary(LogicalKeyboardKey.keyT, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Close tab',
+    activator: primary(LogicalKeyboardKey.keyK, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Next tab',
+    activator: const SingleActivator(LogicalKeyboardKey.tab, control: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Previous tab',
+    activator: const SingleActivator(
+      LogicalKeyboardKey.tab,
+      control: true,
+      shift: true,
+    ),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Jump to tab 1–9',
+    activator: const SingleActivator(LogicalKeyboardKey.digit1, control: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Split right',
+    activator: primary(LogicalKeyboardKey.keyD, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Split down',
+    activator: primary(LogicalKeyboardKey.keyE, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Focus pane up',
+    activator: primary(LogicalKeyboardKey.arrowUp, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Focus pane down',
+    activator: primary(LogicalKeyboardKey.arrowDown, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Focus pane left',
+    activator: primary(LogicalKeyboardKey.arrowLeft, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Focus pane right',
+    activator: primary(LogicalKeyboardKey.arrowRight, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Workspace',
+    description: 'Maximize / restore pane',
+    activator: primary(LogicalKeyboardKey.keyM, shift: true),
+  ),
+
+  // ── Terminal scope ───────────────────────────────────
+  ShortcutInfo(
+    category: 'Terminal',
+    description: 'Copy selection',
+    activator: primary(LogicalKeyboardKey.keyC, shift: true),
+  ),
+  ShortcutInfo(
+    category: 'Terminal',
+    description: 'Copy selection (alt)',
+    activator: const SingleActivator(LogicalKeyboardKey.insert, control: true),
+  ),
+  ShortcutInfo(
+    category: 'Terminal',
+    description: 'Paste',
+    activator: primary(LogicalKeyboardKey.keyV),
+  ),
+  ShortcutInfo(
+    category: 'Terminal',
+    description: 'Paste (alt)',
+    activator: const SingleActivator(LogicalKeyboardKey.insert, shift: true),
+  ),
+];
