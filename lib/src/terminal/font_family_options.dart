@@ -153,6 +153,7 @@ class FontFamilyCache extends ChangeNotifier {
   List<String> _fonts = const <String>[];
   bool _loading = false;
   Object? _error;
+  bool _disposed = false;
 
   /// The most recent scan result. Empty until [load] completes at
   /// least once. Listeners are notified when the value changes
@@ -168,6 +169,12 @@ class FontFamilyCache extends ChangeNotifier {
   Object? get error => _error;
 
   Future<void>? _inflight;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
 
   /// Kick off (or join) the scan. Idempotent: if a scan is
   /// already in flight, the returned Future completes when that
@@ -186,15 +193,17 @@ class FontFamilyCache extends ChangeNotifier {
   Future<void> _runScan() async {
     try {
       final result = await _scanner();
+      if (_disposed) return;
       _fonts = result;
       _error = null;
     } catch (e) {
+      if (_disposed) return;
       _error = e;
       _fonts = const <String>[];
     } finally {
       _loading = false;
       _inflight = null;
-      notifyListeners();
+      if (!_disposed) notifyListeners();
     }
   }
 
