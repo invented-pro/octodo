@@ -1,6 +1,6 @@
 // The settings dialog:
-//   * NavigationDrawer on the left (General / Terminal / Settings
-//     files).
+//   * NavigationDrawer on the left (General / Terminal / Shortcuts
+//     / Settings files).
 //   * Detail pane on the right: a single eager (non-lazy)
 //     SingleChildScrollView with all sections upfront, so any
 //     row can be scrolled to via GlobalKey.
@@ -18,6 +18,7 @@ import '../../src/settings/setting.dart';
 import '../../src/settings/settings_catalog.dart';
 import '../../src/settings/json_settings_store.dart';
 import '../../src/settings/settings_runtime.dart';
+import '../../src/shortcuts/app_shortcuts.dart';
 import '../../src/terminal/font_family_options.dart';
 import '../../src/theme/palette_context.dart';
 import 'chrome/settings_card.dart';
@@ -214,6 +215,7 @@ class _Sidebar extends StatelessWidget {
   static const _items = [
     ('general', 'General', Icons.tune),
     ('terminal', 'Terminal', Icons.terminal),
+    ('shortcuts', 'Shortcuts', Icons.keyboard),
     ('paths', 'Settings files', Icons.folder),
   ];
 
@@ -319,6 +321,7 @@ class _Detail extends StatelessWidget {
         child: switch (section) {
           'general' => _buildGeneral(),
           'terminal' => _buildTerminal(),
+          'shortcuts' => _buildShortcuts(),
           'paths' => _buildPaths(context),
           _ => const SizedBox.shrink(),
         },
@@ -343,6 +346,40 @@ class _Detail extends StatelessWidget {
             _rowFor(catalog.terminal.bellMode, showJsonPaths, store),
           ],
         ),
+      ],
+    );
+  }
+
+  Widget _buildShortcuts() {
+    final store = SettingsRuntime.instance.store;
+    // Group by category, preserving the manifest's iteration order
+    // (App → Workspace → Terminal — see [allShortcuts] in
+    // `app_shortcuts.dart`). We use a `LinkedHashMap` (the default)
+    // to keep insertion order stable across rebuilds, and we fold
+    // over the manifest rather than building three separate lists
+    // by hand so adding a new category to the manifest is a
+    // one-line change.
+    final grouped = <String, List<ShortcutInfo>>{};
+    for (final s in allShortcuts) {
+      grouped.putIfAbsent(s.category, () => []).add(s);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // ── Master toggle ──────────────────────────────────
+        const SettingsSectionHeader('SHORTCUTS'),
+        SettingsCard(
+          children: [_rowFor(catalog.shortcuts.enabled, showJsonPaths, store)],
+        ),
+        // ── Per-scope reference list ───────────────────────
+        for (final entry in grouped.entries) ...[
+          SettingsSectionHeader('${entry.key.toUpperCase()} SHORTCUTS'),
+          SettingsCard(
+            children: [
+              for (final info in entry.value) _ShortcutRow(info: info),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -485,6 +522,54 @@ class _Detail extends StatelessWidget {
       return ColorHexFieldTrailing(setting: setting, store: store);
     }
     return const SizedBox.shrink();
+  }
+}
+
+/// One row in the Shortcuts reference list. Description on the
+/// left, key-combo chip on the right. Non-interactive — the
+/// master toggle above owns the disable state; individual rows
+/// are documentation, not controls.
+class _ShortcutRow extends StatelessWidget {
+  final ShortcutInfo info;
+  const _ShortcutRow({required this.info});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return SettingsCardRow(
+      title: info.description,
+      leadingIcon: _iconForCategory(info.category),
+      trailing: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: palette.rowSurface,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: palette.outline, width: 1),
+        ),
+        child: Text(
+          info.label,
+          style: TextStyle(
+            color: palette.textPrimary,
+            fontSize: 11,
+            fontFamily: 'monospace',
+            fontWeight: FontWeight.w500,
+            height: 1.1,
+          ),
+        ),
+      ),
+    );
+  }
+
+  IconData _iconForCategory(String category) {
+    switch (category) {
+      case 'App':
+        return Icons.apps;
+      case 'Workspace':
+        return Icons.dashboard;
+      case 'Terminal':
+        return Icons.terminal;
+    }
+    return Icons.keyboard;
   }
 }
 

@@ -8,6 +8,7 @@ import 'setting.dart';
 import 'setting_codec.dart';
 
 enum CursorStyle { block, underline, bar }
+
 enum BellMode { none, visual, sound }
 
 String _enumName(Enum e) => e.name;
@@ -15,6 +16,7 @@ String _enumName(Enum e) => e.name;
 class SettingsCatalog {
   final general = GeneralSettingsSection();
   final terminal = TerminalSettingsSection();
+  final shortcuts = ShortcutSettingsSection();
   final update = UpdateSettingsSection();
 
   /// All settings in declaration order. Used by the settings UI
@@ -22,6 +24,7 @@ class SettingsCatalog {
   Iterable<Setting<dynamic>> get all sync* {
     yield* general.all;
     yield* terminal.all;
+    yield* shortcuts.all;
     yield* update.all;
   }
 }
@@ -143,13 +146,43 @@ class GeneralSettingsSection {
   }
 }
 
+class ShortcutSettingsSection {
+  /// Master switch for the app-level early-key-event handler in
+  /// `_AppShellState._buildMergedShortcuts`. When `false`, the
+  /// merged binding map is replaced with an empty map so every
+  /// shortcut in `AppShortcuts.all` is dispatched to `ignored`
+  /// and the event falls through to the normal focus tree (and
+  /// eventually to `flutter_alacritty`, which encodes unbound
+  /// chords into PTY bytes — so a bare Ctrl+letter press still
+  /// reaches the shell, just without the app intercepting it).
+  ///
+  /// Default `true` — every binding in the merged map is active
+  /// at launch. Toggling it off is for users who want pure
+  /// terminal behavior with no app-level key handling (e.g. a
+  /// tmux power user who wants to bind Ctrl+Shift+B to a tmux
+  /// command without conflicting with our drawer toggle).
+  final enabled = BoolSetting(
+    'shortcuts.enabled',
+    defaultValue: true,
+    title: 'Enable keyboard shortcuts',
+    subtitle:
+        'Turn off to disable every app-level shortcut. Bare Ctrl-letter '
+        'chords will fall through to the shell, where they can be used by '
+        'readline / vim / tmux / etc.',
+    icon: Icons.keyboard,
+  );
+
+  Iterable<Setting<dynamic>> get all sync* {
+    yield enabled;
+  }
+}
+
 class UpdateSettingsSection {
   final autoCheck = BoolSetting(
     'update.autoCheck',
     defaultValue: true,
     title: 'Check for updates automatically',
-    subtitle:
-        'Probe the update feed on launch and once an hour while running.',
+    subtitle: 'Probe the update feed on launch and once an hour while running.',
     icon: Icons.sync,
   );
 
