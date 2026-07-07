@@ -1572,7 +1572,7 @@ class ContainerTabBarState extends State<_ContainerTabBar> {
           constraints: const BoxConstraints.tightFor(width: 32, height: 32),
           tooltip: widget.isMaximized
               ? 'Restore Layout (${describe(LogicalKeyboardKey.keyM, shift: true)})'
-              : 'Maximize Pane — ${describe(LogicalKeyboardKey.keyM, shift: true)}',
+              : 'Maximize Pane (${describe(LogicalKeyboardKey.keyM, shift: true)})',
           onPressed: widget.onToggleMaximize,
         ),
         const SizedBox(width: 2),
