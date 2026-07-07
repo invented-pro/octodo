@@ -18,6 +18,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -112,6 +113,38 @@ UpdateFeed _feedFrom(MockClient mock) => UpdateFeed(
       client: mock,
     );
 
+/// Build a R2-style manifest JSON body — same shape as GitHub's
+/// `/releases/latest` payload so the existing resolver parses it
+/// without changes. Advertises the asset under `s3.example.test`
+/// (the test host) so we can route both feeds in one MockClient
+/// by branching on `req.url.host`. Hoisted to file scope so the
+/// retry/fallback tests below can use it; the original inline
+/// definition in the `fallback feed (R2)` group called into this
+/// via `r2ManifestBody(...)`.
+String r2ManifestBody({
+  String tagName = 'v9.9.9',
+  int zipSize = 99887766,
+}) {
+  final zipName = 'octodo-$tagName-windows-x64.zip';
+  return jsonEncode(<String, dynamic>{
+    'tag_name': tagName,
+    'name': tagName,
+    'prerelease': false,
+    'published_at': '2026-06-15T12:00:00Z',
+    'html_url':
+        'https://github.com/invented-pro/octodo/releases/tag/$tagName',
+    'body': 'R2 mirror.',
+    'assets': <Map<String, dynamic>>[
+      {
+        'name': zipName,
+        'size': zipSize,
+        'browser_download_url': 'https://s3.example.test/octodo/$zipName',
+        'content_type': 'application/zip',
+      },
+    ],
+  });
+}
+
 /// Wait until [predicate] returns true or [timeout] elapses.
 /// Polls every 5 ms; capped at [timeout]. Necessary because
 /// `Future<void>.delayed(Duration.zero)` doesn't reliably pump
@@ -149,6 +182,11 @@ void main() {
       ),
     );
     SettingsRuntime.instance = runtime;
+    // Neutralize the production default fallbackUrl (the public R2
+    // mirror) so tests that don't explicitly configure a fallback
+    // don't make real network calls. Individual tests that exercise
+    // the fallback path set their own URL (typically a mock).
+    await store.set(catalog.update.fallbackUrl, '');
     model = UpdateStateModel(currentVersion: '1.0.0');
     tmp = await Directory.systemTemp.createTemp('octodo-upd-test-');
     skipListFile = File(p.join(tmp.path, 'update_skipped.json'));
@@ -177,13 +215,21 @@ void main() {
     }
   });
 
-  UpdateController buildController(MockClient mock) {
+  UpdateController buildController(
+    MockClient mock, {
+    UpdateFeedSource Function(Uri, String)? fallbackFeedFactory,
+  }) {
     return UpdateController(
       model: model,
       settings: catalog.update,
       userAgentVersion: '1.0.0',
       primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+      fallbackFeedFactory: fallbackFeedFactory,
       skipListFileFactory: () => skipListFile,
+      // Skip the 400 ms / 800 ms inter-attempt backoff so a
+      // 6-attempt failure (3 primary + 3 fallback) doesn't burn
+      // ~2 s per test.
+      retryDelayFactor: Duration.zero,
     );
   }
 
@@ -305,6 +351,7 @@ void main() {
         primaryFeedFactory: (r, u) =>
             UpdateFeed(repository: r, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
 
       // Complete the initial probe so start() returns.
@@ -455,6 +502,7 @@ void main() {
         settings: catalog.update,
         userAgentVersion: '1.0.0',
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
       await controller.start();
       controller.dispose();
@@ -477,29 +525,6 @@ void main() {
     // can reuse `_releaseBody(...)` for both. The only difference is
     // the asset `browser_download_url` host — the controller cares
     // only that the manifest is parseable.
-    String r2ManifestBody({
-      String tagName = 'v9.9.9',
-      int zipSize = 99887766,
-    }) {
-      final zipName = 'octodo-$tagName-windows-x64.zip';
-      return jsonEncode(<String, dynamic>{
-        'tag_name': tagName,
-        'name': tagName,
-        'prerelease': false,
-        'published_at': '2026-06-15T12:00:00Z',
-        'html_url':
-            'https://github.com/invented-pro/octodo/releases/tag/$tagName',
-        'body': 'R2 mirror.',
-        'assets': <Map<String, dynamic>>[
-          {
-            'name': zipName,
-            'size': zipSize,
-            'browser_download_url': 'https://s3.example.test/octodo/$zipName',
-            'content_type': 'application/zip',
-          },
-        ],
-      });
-    }
 
     test('empty `update.fallbackUrl` setting → no fallback tried',
         () async {
@@ -524,6 +549,7 @@ void main() {
               client: primary,
             ),
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.idle);
@@ -562,6 +588,7 @@ void main() {
               client: mock,
             ),
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.updateAvailable);
@@ -604,6 +631,7 @@ void main() {
               client: mock,
             ),
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.updateAvailable);
@@ -654,6 +682,7 @@ void main() {
               client: mock,
             ),
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.idle);
@@ -692,6 +721,7 @@ void main() {
               client: mock,
             ),
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.idle);
@@ -734,6 +764,7 @@ void main() {
               client: mock,
             ),
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.updateAvailable);
@@ -773,6 +804,7 @@ void main() {
               client: mock,
             ),
         skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
       );
       await c.start();
       await _waitFor(() => primaryCalls >= 1);
@@ -813,4 +845,291 @@ void main() {
       expect(true, isTrue);
     });
   });
+
+  // Retry + fallback behavior added in the v1.0.10 reliability
+  // pass. These tests verify the project's "3 attempts primary,
+  // then 3 attempts fallback" contract end-to-end at the
+  // controller layer; the lower-level retry mechanics are
+  // covered by the `package:retry` tests themselves.
+  group('probe retry + fallback', () {
+    test('primary fails 2x then succeeds → no fallback hit', () async {
+      var primaryCalls = 0;
+      final mock = MockClient((req) async {
+        primaryCalls += 1;
+        if (primaryCalls <= 2) return http.Response('', 503);
+        return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+      });
+      const fallbackUrl = 'https://s3.example.test/octodo/manifest.json';
+      await store.set(catalog.update.fallbackUrl, fallbackUrl);
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      // Third attempt (the one that wins) — never 4 attempts.
+      expect(primaryCalls, 3);
+      expect(model.detected?.version, '9.9.9');
+      c.dispose();
+    });
+
+    test('primary fails 3x → fallback tried (and wins)', () async {
+      var primaryCalls = 0;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com') {
+          primaryCalls += 1;
+          return http.Response('', 503);
+        }
+        return http.Response(r2ManifestBody(tagName: 'v8.8.8'), 200);
+      });
+      const fallbackUrl = 'https://s3.example.test/octodo/manifest.json';
+      await store.set(catalog.update.fallbackUrl, fallbackUrl);
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      // Primary exhausted all 3 attempts before fallback fired.
+      expect(primaryCalls, _kMaxAttemptsPerSource);
+      expect(model.detected?.version, '8.8.8');
+      c.dispose();
+    });
+
+    test('primary fails 3x → fallback fails 3x → primary error propagates',
+        () async {
+      var primaryCalls = 0;
+      var fallbackCalls = 0;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com') {
+          primaryCalls += 1;
+          return http.Response('', 503);
+        }
+        fallbackCalls += 1;
+        return http.Response('', 502);
+      });
+      const fallbackUrl = 'https://s3.example.test/octodo/manifest.json';
+      await store.set(catalog.update.fallbackUrl, fallbackUrl);
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.idle);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      await c.checkForUpdates();
+      await _waitFor(() => model.state == UpdateState.error);
+
+      // The probe runs twice (initial background + manual check);
+      // both feeds hit exactly _kMaxAttemptsPerSource times per
+      // probe. 2 probes × 3 attempts × 2 feeds = the totals below.
+      // No silent infinite retry; the periodic timer (~1 h later)
+      // is the next round.
+      expect(primaryCalls, _kMaxAttemptsPerSource * 2);
+      expect(fallbackCalls, _kMaxAttemptsPerSource * 2);
+      // No update surfaces; the error pill carries the primary's
+      // last message (with the fallback's recorded in the log).
+      expect(model.detected, isNull);
+      c.dispose();
+    });
+  });
+
+  group('download retry + fallback', () {
+    test('primary zip fails 3x → fallback zip succeeds → downloaded',
+        () async {
+      // Build a real (small) zip with a single stub file so the
+      // SHA-256 verification step has something to digest. This is
+      // the minimum valid payload the download chain can produce.
+      final realZip = _buildStubZip();
+      final computedDigest = _sha256HexOfBytes(realZip);
+
+      // Counts per host so the test can assert exact retry counts
+      // without confusing zip and manifest requests.
+      var primaryZipCalls = 0;
+      var fallbackManifestCalls = 0;
+      var fallbackZipCalls = 0;
+
+      final mock = MockClient((req) async {
+        // Primary manifest — `api.github.com` for GitHub releases.
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(
+            _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length),
+            200,
+          );
+        }
+        // Primary zip — `_releaseBody` advertises it on
+        // `example.com` (placeholder host for tests). Always 503.
+        if (req.url.host == 'example.com') {
+          primaryZipCalls += 1;
+          return http.Response('', 503);
+        }
+        if (req.url.host == 's3.example.test' &&
+            req.url.path.endsWith('manifest.json')) {
+          fallbackManifestCalls += 1;
+          // The R2 manifest must advertise v9.9.9 too so the
+          // version-mismatch check (in downloadLatest) passes and
+          // the fallback URL is actually used.
+          return http.Response(
+            r2ManifestBody(tagName: 'v9.9.9', zipSize: realZip.length),
+            200,
+          );
+        }
+        if (req.url.host == 's3.example.test' &&
+            req.url.path.endsWith('.sha256')) {
+          // Fallback sidecar (R2).
+          return http.Response(computedDigest, 200);
+        }
+        if (req.url.host == 's3.example.test') {
+          // Fallback zip — wins on the 1st attempt.
+          fallbackZipCalls += 1;
+          return http.Response.bytes(realZip, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      const fallbackUrl = 'https://s3.example.test/octodo/manifest.json';
+      await store.set(catalog.update.fallbackUrl, fallbackUrl);
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await c.downloadLatest();
+      await _waitFor(
+        () =>
+            model.state == UpdateState.downloaded ||
+            model.state == UpdateState.error,
+      );
+
+      // The primary zip saw 3 attempts (the budget), the fallback
+      // manifest was fetched once, and the fallback zip was tried
+      // exactly once (it succeeded). The downloaded zip matched
+      // the sidecar's digest and surfaced as `downloaded`.
+      expect(primaryZipCalls, _kMaxAttemptsPerSource);
+      expect(fallbackManifestCalls, 1);
+      expect(fallbackZipCalls, 1);
+      expect(model.state, UpdateState.downloaded,
+          reason: 'fallback chain should have rescued the download');
+      c.dispose();
+    });
+
+    test('primary zip fails 3x → fallback zip fails 3x → error',
+        () async {
+      var primaryZipCalls = 0;
+      var fallbackZipCalls = 0;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+        }
+        if (req.url.host == 'example.com') {
+          primaryZipCalls += 1;
+          return http.Response('', 503);
+        }
+        if (req.url.host == 's3.example.test' &&
+            req.url.path.endsWith('manifest.json')) {
+          return http.Response(
+            r2ManifestBody(tagName: 'v9.9.9'),
+            200,
+          );
+        }
+        if (req.url.host == 's3.example.test') {
+          fallbackZipCalls += 1;
+          return http.Response('', 502);
+        }
+        return http.Response('UNEXPECTED', 500);
+      });
+
+      const fallbackUrl = 'https://s3.example.test/octodo/manifest.json';
+      await store.set(catalog.update.fallbackUrl, fallbackUrl);
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await c.downloadLatest();
+      await _waitFor(() => model.state == UpdateState.error);
+
+      // 3 + 3 = 6 zip attempts total. No partial recovery.
+      expect(primaryZipCalls, _kMaxAttemptsPerSource);
+      expect(fallbackZipCalls, _kMaxAttemptsPerSource);
+      expect(model.state, UpdateState.error);
+      c.dispose();
+    });
+  });
+}
+
+/// Test-only constant exported for the retry/fallback assertions
+/// above. Kept as a top-level so the test file doesn't reach into
+/// the controller's privates just to assert "3".
+const int _kMaxAttemptsPerSource = 3;
+
+/// Build a minimal valid zip containing one stub entry. Used by
+/// the download tests so the SHA-256 verification step has real
+/// bytes to digest. Tiny (40-ish bytes); not a real Flutter build.
+List<int> _buildStubZip() {
+  // We don't actually need a parseable zip for the download tests
+  // because the verification step's only consumer is
+  // `verifySha256Hex`, which hashes the file as bytes regardless
+  // of zip validity. The test asserts the chain runs end-to-end
+  // and surfaces `downloaded`, not that the helper actually
+  // installs it.
+  return utf8.encode('not-a-real-zip-but-it-has-bytes-for-hashing');
+}
+
+/// Standalone SHA-256 hex of an in-memory byte sequence. Mirrors
+/// [src.update.digest.sha256HexOfFile] for the test-only
+/// "compute the digest of these bytes" use case.
+String _sha256HexOfBytes(List<int> bytes) {
+  return sha256.convert(bytes).toString();
 }

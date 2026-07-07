@@ -200,13 +200,18 @@ class UpdateSettingsSection {
   /// (typically a Cloudflare R2 + custom domain, or any HTTPS bucket
   /// of static objects). Used when the primary GitHub feed fails —
   /// including rate-limit — so the in-app updater can still resolve
-  /// a release. Leave empty to disable the fallback.
+  /// a release.
+  ///
+  /// Defaults to the project's public R2 mirror so the fallback is
+  /// active out of the box for official `invented-pro/octodo` builds.
+  /// Forks point this at their own mirror (or set it to '' in their
+  /// `settings.json` to disable the fallback entirely).
   ///
   /// Not surfaced in the settings dialog yet; the corresponding
   /// jsonc key is `update.fallbackUrl`.
   final fallbackUrl = StringSetting(
     'update.fallbackUrl',
-    defaultValue: '',
+    defaultValue: 'https://s3.primorial.net/octodo/manifest.json',
     title: 'Fallback update feed URL',
     subtitle:
         'Optional. JSON manifest mirroring GitHub\'s release shape; '

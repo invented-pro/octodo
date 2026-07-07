@@ -35,6 +35,12 @@ devtools_options.yaml
 /build/
 /coverage/
 
+# Test helpers compiled by dart compile exe (e.g. relay_env.exe in
+# staged_apply_test.dart). The setUpAll in the test recompiles on
+# demand when the source is newer, so checking the binary in just
+# bloats the repo.
+test/_support/*.exe
+
 # Symbolication related
 app.*.symbols
 

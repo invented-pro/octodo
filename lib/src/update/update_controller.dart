@@ -13,6 +13,7 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
+import 'package:retry/retry.dart';
 
 import '../log.dart';
 import '../settings/settings_catalog.dart';
@@ -42,6 +43,19 @@ const Duration _kHelperStartupDelay = Duration(seconds: 2);
 /// the 5 s timeout applied by both [UpdateFeed] and
 /// [R2UpdateFeed] for their primary `fetchLatest` calls.
 const Duration _kSidecarTimeout = Duration(seconds: 5);
+
+/// Total attempts per source (1 initial + 2 retries) for both
+/// the manifest probe and the zip download. The retry package's
+/// backoff (400 ms, 800 ms, 1600 ms ... with ±25% jitter) is
+/// short enough that the user-visible delay for a transient
+/// blip stays under ~5 s in the worst case.
+const int _kMaxAttemptsPerSource = 3;
+
+/// Filename of the standalone helper exe spawned by [applyDownloaded].
+/// Lives next to `octodo.exe` in the install dir. Compiled from
+/// `tool/update_helper.dart`. See [_spawnHelper] for why a separate
+/// binary is required.
+const String _kHelperExeName = 'octodo_helper.exe';
 
 class UpdateController {
   final UpdateStateModel model;
@@ -113,6 +127,21 @@ class UpdateController {
   /// accumulated on their machine.
   final File Function()? skipListFileFactory;
 
+  /// Optional override for the [http.Client] used by
+  /// [_downloadAndVerify]. Production callers leave this null
+  /// and a fresh `http.Client()` is constructed per attempt
+  /// (cheap, and lets each retry start with a clean connection
+  /// pool). Tests inject a `MockClient` so the retry chain can
+  /// be exercised deterministically without hitting the network.
+  final http.Client Function()? downloadClientFactory;
+
+  /// Base for the exponential backoff between retry attempts.
+  /// Production: 200 ms (the `package:retry` default — yields
+  /// 400 ms / 800 ms gaps between attempts, ±25% jitter).
+  /// Tests: typically [Duration.zero] so the suite stays fast even
+  /// when 6+ attempts run sequentially (3 primary + 3 fallback).
+  final Duration retryDelayFactor;
+
   UpdateController({
     required this.model,
     required this.settings,
@@ -120,11 +149,44 @@ class UpdateController {
     this.primaryFeedFactory,
     this.fallbackFeedFactory,
     this.skipListFileFactory,
+    this.downloadClientFactory,
+    this.retryDelayFactor = const Duration(milliseconds: 200),
   });
 
   /// The default (and recommended) GitHub repo. Visible so the
   /// settings UI can show a "Reset" hint.
   static String get defaultRepository => _defaultRepository;
+
+  /// Wrapper around the `retry` package that applies the
+  /// project-wide defaults: 3 total attempts (1 initial + 2
+  /// retries) and the controller's [retryDelayFactor] backoff.
+  /// Used by both the probe path and the download path so the
+  /// "3 retries on primary, then 3 on fallback" semantics apply
+  /// uniformly.
+  ///
+  /// `retryIf` always returns true except for the internal
+  /// [_DownloadCancelledException] sentinel — every other exception
+  /// thrown by the feed/download paths is considered transient at
+  /// this layer (network errors, 5xx, parse hiccups, mid-stream
+  /// resets). The underlying feed classes have already translated
+  /// low-level SocketException / TimeoutException / http.ClientException
+  /// into [UpdateFeedException] before we get here, so the retry
+  /// budget is the only signal we need to act on.
+  Future<T> _withRetry<T>(
+    Future<T> Function() fn, {
+    required String label,
+  }) {
+    return retry(
+      fn,
+      maxAttempts: _kMaxAttemptsPerSource,
+      delayFactor: retryDelayFactor,
+      retryIf: (e) => e is! _DownloadCancelledException,
+      onRetry: (e) {
+        if (e is _DownloadCancelledException) return;
+        _log.warning('$label retry: ${e.runtimeType}: $e');
+      },
+    );
+  }
 
   String _resolveRepository() {
     final repo = SettingsRuntime.instance.store.get(settings.repository);
@@ -229,29 +291,55 @@ class UpdateController {
     );
   }
 
-  /// Probe primary, then optional fallback. Throws primary's
-  /// exception if both fail — that's the one the user configured
-  /// explicitly, so its error message is what reaches the UI.
+  /// Probe primary, then optional fallback. Each source is given
+  /// [_kMaxAttemptsPerSource] (3) attempts via the `retry` package
+  /// before falling through. Throws primary's last exception if
+  /// both fail — that's the one the user configured explicitly,
+  /// so its error message is what reaches the UI.
+  ///
+  /// Sequence (per [Start background + periodic probe flow]):
+  ///   1. Primary — up to 3 attempts (1 initial + 2 retries).
+  ///   2. Fallback (if configured) — up to 3 attempts.
+  ///   3. If both fail, propagate the primary's last error; the
+  ///      periodic probe timer ([_scheduleNextProbe]) re-runs
+  ///      the whole chain ~1 hour later.
   Future<ReleaseInfo> _fetchWithFallback() async {
+    final resolved = await _fetchWithFallbackResolved();
+    _currentReleaseSource = resolved.source;
+    return resolved.release;
+  }
+
+  /// Inner probe that returns a [_ResolvedRelease] (carries the
+  /// source alongside the release). Kept separate from
+  /// [_fetchWithFallback] so the download path can re-derive the
+  /// same source it should route sidecar fetches through when it
+  /// falls back to the alternate URL mid-download.
+  Future<_ResolvedRelease> _fetchWithFallbackResolved() async {
     final primary = _primaryFeed;
     if (primary == null) {
       throw UpdateFeedException('no primary feed configured');
     }
     try {
-      final release = await primary.fetchLatest();
-      _currentReleaseSource = primary;
-      return release;
-    } on UpdateFeedException catch (primaryError) {
+      final release = await _withRetry(
+        () => primary.fetchLatest(),
+        label: 'primary ${primary.kind}',
+      );
+      return _ResolvedRelease(release: release, source: primary);
+    } on Object catch (primaryError) {
       final fallback = _fallbackFeed;
       if (fallback == null) rethrow;
       _log.warning(
-          'Primary ${primary.kind} feed failed (${primaryError.message}); '
+          'Primary ${primary.kind} feed failed after '
+          '$_kMaxAttemptsPerSource attempts (${primaryError.runtimeType}: '
+          '${(primaryError is UpdateFeedException) ? primaryError.message : primaryError}); '
           'trying ${fallback.kind} fallback.');
       try {
-        final release = await fallback.fetchLatest();
-        _currentReleaseSource = fallback;
-        return release;
-      } on UpdateFeedException catch (_) {
+        final release = await _withRetry(
+          () => fallback.fetchLatest(),
+          label: 'fallback ${fallback.kind}',
+        );
+        return _ResolvedRelease(release: release, source: fallback);
+      } on Object catch (_) {
         // Both failed: surface the primary's error, since that's
         // the user's explicit configuration. The fallback's error
         // is recorded in the log at warning level above.
@@ -276,6 +364,19 @@ class UpdateController {
   /// Download the asset the model currently has as [detected].
   /// Transitions: updateAvailable → downloading → downloaded (or
   /// → error).
+  ///
+  /// Reliability chain (per request): try the primary URL
+  /// ([_kMaxAttemptsPerSource] attempts via [package:retry]); if
+  /// all 3 fail, fetch the fallback feed's manifest (also 3
+  /// attempts) and try its URL (3 more attempts); if both chains
+  /// fail, surface the last error so the user can manually retry.
+  /// The download stream itself has **no timeout** — package size
+  /// and bandwidth are both unknown, and a stalled connection is
+  /// detected via the stream's own error path (not a wall clock).
+  ///
+  /// Cancellation: a single [CancelToken] is shared across the
+  /// whole chain, so clicking "Cancel" aborts whichever attempt is
+  /// currently in flight and prevents the next retry from starting.
   Future<void> downloadLatest() async {
     final release = model.detected;
     if (release == null) return;
@@ -291,113 +392,283 @@ class UpdateController {
 
     _downloadCancel = CancelToken();
 
+    // Primary attempt: source = whatever the probe produced.
+    final primarySource = _currentReleaseSource;
+
+    bool primaryOk = false;
+    // Last error from the primary chain — preserved so the
+    // terminal error UI can produce a specific message (network
+    // vs. timeout vs. SHA-256 mismatch) instead of a generic
+    // "Download failed". Only assigned when primaryOk stays false.
+    Object? primaryFailure;
     try {
-      await stagingDir.create(recursive: true);
-      final client = http.Client();
-      _downloadClient = client;
-      final req = http.Request('GET', release.zipUrl)
-        ..headers.addAll({
-          'Accept': 'application/octet-stream',
-          'User-Agent': 'octodo/$userAgentVersion',
-        });
-      final resp = await client.send(req);
-
-      if (resp.statusCode < 200 || resp.statusCode >= 300) {
-        throw UpdateFeedException(
-          'HTTP ${resp.statusCode} from ${release.zipUrl}',
-        );
-      }
-
-      final declaredTotal = release.zipSizeBytes > 0
-          ? release.zipSizeBytes
-          : (resp.contentLength ?? 0);
-
-      _downloadSink = zipPath.openWrite();
-      var received = 0;
-      _downloadSub = resp.stream.listen(
-        (chunk) {
-          if (_downloadCancel?.cancelled == true) return;
-          _downloadSink!.add(chunk);
-          received += chunk.length;
-          model.updateDownloadProgress(
-            version: release.version,
-            receivedBytes: received,
-            totalBytes: declaredTotal,
-          );
-        },
-        onDone: () {},
-        cancelOnError: true,
+      await _withRetry(
+        () => _downloadAndVerify(
+          release: release,
+          source: primarySource,
+          zipPath: zipPath,
+        ),
+        label: 'primary download (${primarySource?.kind ?? "?"})',
       );
+      primaryOk = true;
+    } on _DownloadCancelledException {
+      // User clicked Cancel — bail without falling back. The
+      // cancelDownload() call already cleaned up the partial
+      // staging dir and reset the model state.
+      return;
+    } on Object catch (primaryError) {
+      primaryFailure = primaryError;
+      _log.warning('Primary download failed after '
+          '$_kMaxAttemptsPerSource attempts: $primaryError');
+    }
 
-      try {
-        await _downloadSub!.asFuture<void>();
-      } on Exception catch (_) {
-        if (_downloadCancel?.cancelled == true) {
-          // Caller (cancelDownload) cleaned up; no error dialog.
+    if (_downloadCancel?.cancelled == true) return;
+
+    if (!primaryOk) {
+      // Try the fallback feed. Need its URL — re-fetch the manifest
+      // with the same retry budget, then attempt the download.
+      final fallback = _fallbackFeed;
+      if (fallback != null) {
+        try {
+          final fallbackRelease = await _withRetry(
+            () => fallback.fetchLatest(),
+            label: 'fallback ${fallback.kind} manifest for download',
+          );
+          if (fallbackRelease.version != release.version) {
+            _log.warning('Fallback manifest version '
+                '${fallbackRelease.version} does not match primary '
+                '${release.version}; refusing to download from fallback.');
+          } else {
+            await _withRetry(
+              () => _downloadAndVerify(
+                release: fallbackRelease,
+                source: fallback,
+                zipPath: zipPath,
+              ),
+              label: 'fallback download (${fallback.kind})',
+            );
+            primaryOk = true;
+          }
+        } on _DownloadCancelledException {
           return;
+        } on Object catch (fallbackError) {
+          _log.warning('Fallback download chain failed: $fallbackError');
         }
-        rethrow;
-      }
-
-      // All bytes received. Flush + close the file sink.
-      try {
-        await _downloadSink?.flush();
-        await _downloadSink?.close();
-      } catch (_) {
-        // Best effort; if close fails (locked file, broken pipe)
-        // we still want to attempt the integrity check below —
-        // the staging dir cleanup in the outer catch handles any
-        // partial state.
-      }
-      _downloadSink = null;
-      client.close();
-      _downloadClient = null;
-      _downloadSub = null;
-
-      // Verify SHA-256 against the .sha256 sidecar if one was
-      // advertised. A missing sidecar is allowed (older releases
-      // may not have one); we trust TLS + the asset URL comes
-      // from the source. We do log a warning so the gap is at
-      // least visible in debug logs.
-      //
-      // The fetch routes through the source that advertised the
-      // release (captured in `_currentReleaseSource` during the
-      // successful `_fetchWithFallback`). A sidecar hosted on R2
-      // is fetched from R2, never via GitHub's client.
-      var digestVerified = false;
-      if (release.digestUrl != null) {
-        final expectedHex = await _fetchDigestSidecar(
-          source: _currentReleaseSource,
-          url: release.digestUrl!,
-        );
-        await verifySha256Hex(file: zipPath, expectedHex: expectedHex);
-        digestVerified = true;
-      } else {
-        _log.warning(
-          'Release ${release.version} has no .sha256 sidecar; '
-          'installing without integrity check.',
-        );
-      }
-
-      final size = await zipPath.length();
-      model.setDownloaded(DownloadedPayload(
-        version: release.version,
-        zipPath: zipPath,
-        sizeBytes: size,
-        digestVerified: digestVerified,
-      ));
-    } catch (e) {
-      // Clean up partial staging unless it was a user cancel.
-      if (_downloadCancel?.cancelled != true) {
-        await _cleanupStaging(stagingDir);
-        model.setError(UpdateErrorPayload(
-          message: _userFacingMessageForDownload(e),
-          technicalDetails: e.toString(),
-          onDownload: downloadLatest,
-          onDismiss: () => model.reset(),
-        ));
       }
     }
+
+    if (_downloadCancel?.cancelled == true) return;
+
+    if (!primaryOk) {
+      // Both chains exhausted (or no fallback configured). Mark
+      // staging as failed and surface a tailored error message:
+      // the headline wording depends on whether a fallback was
+      // actually attempted, and on whether the failure looked like
+      // a network blip, a timeout, or a SHA-256 mismatch (the
+      // security-relevant signal).
+      final fallbackConfigured = _fallbackFeed != null;
+      final headline = _userFacingMessageForDownload(
+        primaryFailure,
+        fallbackConfigured: fallbackConfigured,
+      );
+      await _cleanupStaging(stagingDir);
+      final fallbackKind = _fallbackFeed?.kind;
+      final technicalDetails = fallbackKind == null
+          ? 'Primary: ${primarySource?.kind ?? "?"} '
+              '($_kMaxAttemptsPerSource attempts); no fallback configured.'
+          : 'Primary: ${primarySource?.kind ?? "?"} '
+              '($_kMaxAttemptsPerSource attempts); '
+              'fallback: $fallbackKind '
+              '($_kMaxAttemptsPerSource attempts each).';
+      model.setError(UpdateErrorPayload(
+        message: headline,
+        technicalDetails: technicalDetails,
+        onDownload: downloadLatest,
+        onDismiss: () => model.reset(),
+      ));
+    }
+  }
+
+  /// Map the download chain's terminal error to a user-facing
+  /// message. Three cases worth distinguishing:
+  ///
+  ///   * `DigestMismatchException` — the bytes landed but failed
+  ///     the SHA-256 sidecar check. Security-relevant: a mismatch
+  ///     implies either a corrupted download or a tampered asset.
+  ///     Surfacing it distinctly lets the user distinguish "try
+  ///     again" from "your connection is being meddled with".
+  ///   * `TimeoutException` — the connection hung mid-stream.
+  ///   * Anything else — generic network/HTTP error.
+  ///
+  /// [fallbackConfigured] decides whether the headline says
+  /// "both sources" (true) or just "the download" (false). The
+  /// common case in v1 is no fallback configured, so saying
+  /// "both" when only one source was tried is misleading.
+  String _userFacingMessageForDownload(
+    Object? error, {
+    required bool fallbackConfigured,
+  }) {
+    if (error is DigestMismatchException) {
+      return 'Download failed integrity check. The downloaded file '
+          'does not match the published SHA-256 — try again, and if '
+          'it persists, report it.';
+    }
+    final generic = fallbackConfigured
+        ? 'Download failed on both sources. Check your network and try again.'
+        : 'Download failed. Check your network and try again.';
+    return generic;
+  }
+
+  /// Inner unit of the download retry chain: open a stream from
+  /// [release.zipUrl], pipe bytes to [zipPath], then verify via the
+  /// source's `.sha256` sidecar (if any). The function is
+  /// cancellation-aware — a user-cancelled run returns early
+  /// without throwing, so the retry budget isn't spent on
+  /// already-cancelled attempts.
+  ///
+  /// Throws [UpdateFeedException] (or any underlying
+  /// SocketException / http.ClientException) on failure; the retry
+  /// wrapper in [downloadLatest] handles the budget.
+  ///
+  /// Throws [_DownloadCancelledException] (which the retry
+  /// wrapper short-circuits past — see [_withRetry]) when the
+  /// user clicks Cancel before this attempt starts or while it's
+  /// streaming. Without this throw, the retry chain would happily
+  /// re-enter a cancelled run until the budget ran out.
+  Future<void> _downloadAndVerify({
+    required ReleaseInfo release,
+    required UpdateFeedSource? source,
+    required File zipPath,
+  }) async {
+    if (_downloadCancel?.cancelled == true) {
+      throw const _DownloadCancelledException();
+    }
+
+    await zipPath.parent.create(recursive: true);
+    final client = downloadClientFactory?.call() ?? http.Client();
+    _downloadClient = client;
+    final req = http.Request('GET', release.zipUrl)
+      ..headers.addAll({
+        'Accept': 'application/octet-stream',
+        'User-Agent': 'octodo/$userAgentVersion',
+      });
+    final http.StreamedResponse resp;
+    try {
+      resp = await client.send(req);
+    } catch (e) {
+      client.close();
+      _downloadClient = null;
+      rethrow;
+    }
+
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      client.close();
+      _downloadClient = null;
+      throw UpdateFeedException(
+        'HTTP ${resp.statusCode} from ${release.zipUrl}',
+      );
+    }
+
+    final declaredTotal = release.zipSizeBytes > 0
+        ? release.zipSizeBytes
+        : (resp.contentLength ?? 0);
+
+    // Reset progress to 0 at the start of each attempt so the UI
+    // doesn't show stale bytes from a previous (failed) attempt
+    // while we're still establishing this connection.
+    model.updateDownloadProgress(
+      version: release.version,
+      receivedBytes: 0,
+      totalBytes: declaredTotal,
+    );
+
+    _downloadSink = zipPath.openWrite();
+    var received = 0;
+    _downloadSub = resp.stream.listen(
+      (chunk) {
+        if (_downloadCancel?.cancelled == true) return;
+        _downloadSink!.add(chunk);
+        received += chunk.length;
+        model.updateDownloadProgress(
+          version: release.version,
+          receivedBytes: received,
+          totalBytes: declaredTotal,
+        );
+      },
+      onDone: () {},
+      cancelOnError: true,
+    );
+
+    try {
+      await _downloadSub!.asFuture<void>();
+    } on Exception catch (e) {
+      // Best-effort cleanup of the partial stream/sink. Rethrow so
+      // the outer retry budget can take over (unless the user
+      // cancelled, in which case we throw the cancel sentinel so
+      // the retry wrapper doesn't spin another attempt).
+      try {
+        await _downloadSink?.close();
+      } catch (_) {}
+      _downloadSink = null;
+      try {
+        client.close();
+      } catch (_) {}
+      _downloadClient = null;
+      _downloadSub = null;
+      if (_downloadCancel?.cancelled == true) {
+        throw const _DownloadCancelledException();
+      }
+      throw UpdateFeedException(
+        'Download stream error: ${e.runtimeType}: $e',
+        e,
+      );
+    }
+
+    // All bytes received. Flush + close the file sink.
+    try {
+      await _downloadSink?.flush();
+      await _downloadSink?.close();
+    } catch (_) {
+      // Best effort; the integrity check below will catch any
+      // truncation via the SHA-256 mismatch.
+    }
+    _downloadSink = null;
+    client.close();
+    _downloadClient = null;
+    _downloadSub = null;
+
+    // Verify SHA-256 against the .sha256 sidecar if one was
+    // advertised. A missing sidecar is allowed (older releases
+    // may not have one); we trust TLS + the asset URL comes
+    // from the source. We do log a warning so the gap is at
+    // least visible in debug logs.
+    //
+    // The fetch routes through whichever source produced the zip
+    // we just downloaded (passed as [source] above). When we
+    // fell back to R2 mid-download, [source] is the R2 feed and
+    // the sidecar is fetched from R2, never via GitHub's client.
+    var digestVerified = false;
+    if (release.digestUrl != null) {
+      final expectedHex = await _fetchDigestSidecar(
+        source: source,
+        url: release.digestUrl!,
+      );
+      await verifySha256Hex(file: zipPath, expectedHex: expectedHex);
+      digestVerified = true;
+    } else {
+      _log.warning(
+        'Release ${release.version} has no .sha256 sidecar; '
+        'installing without integrity check.',
+      );
+    }
+
+    final size = await zipPath.length();
+    model.setDownloaded(DownloadedPayload(
+      version: release.version,
+      zipPath: zipPath,
+      sizeBytes: size,
+      digestVerified: digestVerified,
+    ));
   }
 
   /// Aborts an in-flight download. Returns the model to
@@ -426,17 +697,31 @@ class UpdateController {
     }
   }
 
-  /// Spawns a helper-mode copy of the running exe with the right
-  /// env vars, then exits the original process. The helper detects
-  /// the env var early in `main()`, applies the staged payload over
-  /// the install dir, and relaunches the freshly-replaced exe.
+  /// Spawns the standalone helper executable (`octodo_helper.exe`)
+  /// with the right env vars, then exits the original process. The
+  /// helper reads its env vars at the top of its `main()`, applies
+  /// the staged payload over the install dir, and relaunches the
+  /// freshly-replaced `octodo.exe`.
+  ///
+  /// Why a *separate* exe (not `octodo.exe` with env vars):
+  /// `octodo.exe` statically imports five plugin DLLs
+  /// (`desktop_drop_plugin.dll`, `flutter_windows.dll`,
+  /// `screen_retriever_windows_plugin.dll`,
+  /// `url_launcher_windows_plugin.dll`, `window_manager_plugin.dll`).
+  /// The Windows loader maps them into the process address space
+  /// *before* `main()` runs, so a helper-mode spawn of `octodo.exe`
+  /// cannot overwrite them — Windows returns `ERROR_ALREADY_EXISTS`
+  /// (errno 183) on every retry attempt. The standalone helper
+  /// (compiled from `tool/update_helper.dart`) doesn't link against
+  /// any of those DLLs, so it can freely overwrite every file in the
+  /// install dir.
   ///
   /// Sequence:
   ///   1. setInstalling() — UI shows "Restarting to apply update…".
-  ///   2. spawn helper detached with env vars + currrent PID.
+  ///   2. spawn helper detached with env vars + current PID.
   ///   3. wait ~2s so the helper begins and notices it's in helper
   ///      mode (pre-empts file-lock collisions while we're alive).
-  ///   4. exit(0) — the helper then copies + relaunches.
+  ///   4. exit(0) — the helper then extracts + copies + relaunches.
   Future<void> applyDownloaded() async {
     final d = model.downloaded;
     if (d == null) return;
@@ -452,14 +737,41 @@ class UpdateController {
     exit(0);
   }
 
+  /// Resolve the standalone helper exe path next to the running
+  /// `octodo.exe`. Returns null if the file is absent — the caller
+  /// surfaces a clear error in that case so the user knows to
+  /// reinstall rather than retry blindly.
+  File? _resolveHelperExe() {
+    final installDir = p.dirname(Platform.resolvedExecutable);
+    final helperPath = p.join(installDir, _kHelperExeName);
+    final f = File(helperPath);
+    return f.existsSync() ? f : null;
+  }
+
   Future<void> _spawnHelper({
     required String version,
     required int pid,
   }) async {
-    final executable = Platform.resolvedExecutable;
+    final helper = _resolveHelperExe();
+    if (helper == null) {
+      // Without the standalone helper exe we cannot safely apply
+      // the update: the legacy in-process path (spawn octodo.exe
+      // with env vars) hits the DLL-self-lock bug and corrupts the
+      // install dir partway. Refuse with a clear error and no
+      // retry button — the only recovery is to reinstall.
+      final installDir = p.dirname(Platform.resolvedExecutable);
+      model.setError(UpdateErrorPayload(
+        message: 'Update helper is missing. Reinstall Octodo '
+            'to apply this update.',
+        technicalDetails:
+            'Expected $_kHelperExeName next to octodo.exe at $installDir.',
+        onDismiss: () => model.reset(),
+      ));
+      return;
+    }
     try {
       await Process.start(
-        executable,
+        helper.path,
         const <String>[],
         environment: <String, String>{
           'OCTODO_UPDATE_HELPER': '1',
@@ -603,16 +915,6 @@ class UpdateController {
       return 'Fallback update feed is unreachable.';
     }
     return 'Update check failed.';
-  }
-
-  String _userFacingMessageForDownload(Object e) {
-    final raw = e.toString();
-    if (raw.contains('Timed out')) return 'Download timed out.';
-    if (raw.contains('Network error')) return 'Download interrupted.';
-    if (raw.contains('DigestMismatchException')) {
-      return 'Download failed integrity check.';
-    }
-    return 'Download failed.';
   }
 
   /// Format a user-facing rate-limit message from the typed
@@ -801,6 +1103,30 @@ class UpdateController {
   }
 }
 
+/// Internal carrier for the result of [_fetchWithFallback]. The
+/// download path uses [source] to route the `.sha256` sidecar
+/// fetch through whichever feed produced [release], so the
+/// fallback-to-R2 download branch can verify R2's zip against
+/// R2's sidecar (not GitHub's).
+class _ResolvedRelease {
+  final ReleaseInfo release;
+  final UpdateFeedSource source;
+
+  const _ResolvedRelease({
+    required this.release,
+    required this.source,
+  });
+}
+
 class CancelToken {
   bool cancelled = false;
+}
+
+/// Internal sentinel thrown by [_downloadAndVerify] when the user
+/// has clicked Cancel. [`_withRetry`] is configured to NOT retry
+/// on this exception, so the retry budget isn't burned on already-
+/// cancelled attempts. [`downloadLatest`] catches it explicitly
+/// and returns without falling back to the alternate feed.
+class _DownloadCancelledException implements Exception {
+  const _DownloadCancelledException();
 }

@@ -16,6 +16,7 @@ import 'src/shortcuts/app_shortcuts.dart';
 import 'src/terminal/shell_profiles.dart';
 import 'src/terminal/terminal_workspace.dart';
 import 'src/update/installer/apply_main.dart';
+import 'src/update/installer/crash_sentinel.dart';
 import 'src/update/update_controller.dart';
 import 'src/update/update_state.dart';
 import 'src/theme/app_theme.dart';
@@ -52,15 +53,30 @@ Color get kTerminalBackground {
 }
 
 Future<void> main() async {
-  // Helper-mode entry: if the previous running app spawned us with
-  // OCTODO_UPDATE_HELPER=1 (i.e. "apply the staged update and exit"),
-  // we route away from any Flutter / window initialization. See
-  // lib/src/update/installer/apply_main.dart.
+  // Helper-mode entry: octodo.exe was spawned with
+  // OCTODO_UPDATE_HELPER=1 by *something* (an older in-app updater
+  // that pre-dates the standalone octodo_helper.exe, or a developer
+  // invoking the legacy path manually). The current upgrade flow
+  // uses a separate helper exe (see UpdateController._spawnHelper
+  // and tool/update_helper.dart) because octodo.exe statically
+  // imports plugin DLLs that Windows locks into our address space
+  // before main() runs — running StagedApply.run from here would
+  // hit ERROR_ALREADY_EXISTS on the very first DLL copy and leave
+  // the install dir in an inconsistent state.
+  //
+  // Rather than silently do nothing (which would just boot the GUI
+  // and confuse the user, since the spawning parent already exited
+  // expecting us to apply the update), write a forensic sentinel
+  // and exit with a non-zero code so the failure is observable.
   if (isHelperMode) {
-    final code = await runUpdateHelper();
-    // Use the dart:io exit; Flutter's binding isn't initialized
-    // here, so we can't `runApp` on the helper-mode path.
-    exit(code);
+    await writeHelperCrashSentinel(
+      'Legacy helper-mode spawn of octodo.exe detected. '
+      'This build requires octodo_helper.exe for staged apply; '
+      'the in-process path was removed because Windows locks '
+      'the plugin DLLs octodo.exe statically imports. '
+      'Reopen Octodo and apply the update again.',
+    );
+    exit(2);
   }
 
   WidgetsFlutterBinding.ensureInitialized();
