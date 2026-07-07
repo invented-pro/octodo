@@ -934,83 +934,101 @@ class PaneLayout extends StatelessWidget {
   /// and by [_buildHiddenTree] (which substitutes a [SizedBox.shrink]
   /// for the focused subtree during maximize).
   ///
-  /// **Why not `LayoutBuilder`+`Stack`+`Positioned`**: an earlier
-  /// version used a `LayoutBuilder` here to compute pixel sizes for
-  /// two `Positioned` pane children. The `LayoutBuilder`'s
-  /// `_rebuildWithConstraints` runs inside `buildScope` during the
-  /// layout pass; the `buildScope` mounts the pane subtrees (the
-  /// `first`/`second` widgets and everything inside them). Those
-  /// subtrees contain tab bars whose `IconButton` tooltips and
-  /// `PopupMenuButton` hold `OverlayPortal`s. On mount,
-  /// `OverlayPortal.activate()` → `_RenderTheater._addDeferredChild`
-  /// → `adoptChild` → `attach` → `markNeedsLayout` on a
-  /// `_RenderLayoutBuilder` that is NOT an ancestor of the one
-  /// currently performing layout — tripping
-  /// `A _RenderLayoutBuilder was mutated in
-  /// _RenderLayoutBuilder.performLayout`. This happened every time a
-  /// NEW pane was mounted for the first time inside the split
-  /// (split-right, split-down, restore-from-maximize into a split).
-  ///
-  /// Using `Row`/`Column` + `Expanded` instead moves the pane subtree
-  /// build OUT of any `LayoutBuilder`'s `buildScope` and into the
-  /// normal BUILD phase, where `OverlayPortal` activation is safe.
-  /// The divider is overlaid via a `Stack`/`Positioned` that carries
-  /// NO pane subtree — just the thin `_Divider` hit area — so even
-  /// though the `Stack` is the split root, its `Positioned` children
-  /// don't pull in `OverlayPortal`s. The divider's `onDrag` reads
-  /// the split's current pixel size via a `GlobalKey` lookup at
-  /// drag time (rather than capturing it from a `LayoutBuilder`
-  /// constraint at build time), which is the only piece of
-  /// information the old `LayoutBuilder` was providing beyond
-  /// sizing.
+  /// **Why this delegates to [_SplitStack]**: the divider drag handler
+  /// needs the split's current pixel size to convert a drag delta into
+  /// a ratio. The split root is a `Stack`; a `Stack` needs a non-
+  /// positioned child to size itself, so we wrap the divider in an
+  /// `Align` and compute the pixel size from the Stack's render box
+  /// at drag time (via a `GlobalKey` on the Stack). The key MUST live
+  /// in a `StatefulWidget` — creating it inline in `build` caused the
+  /// Stack to unmount/remount on every parent rebuild, detaching the
+  /// key the drag closure was holding, so subsequent drag ticks
+  /// silently no-op'd.
   Widget _buildSplitWithChildren(
     BuildContext context,
     PaneSplit split,
     Widget first,
     Widget second,
   ) {
+    return _SplitStack(
+      split: split,
+      first: first,
+      second: second,
+      onResize: onResize,
+    );
+  }
+}
+
+/// Split root: a [Stack] of two `Expanded` panes inside a [Row]/[Column]
+/// (so the pane subtrees build in the normal BUILD phase, not in a
+/// [LayoutBuilder]'s `buildScope` — see [PaneLayout] for the assertion
+/// that the older `LayoutBuilder`+`Positioned` form tripped on every
+/// pane-tree-mutating click) with a thin `_Divider` hit area overlaid
+/// by an [Align] widget.
+///
+/// Owns the [GlobalKey] attached to the [Stack] in [State] — the
+/// divider's drag handler reads the split's current pixel size via
+/// this key at drag time. The key is stable across rebuilds (one
+/// allocation in [initState]), so the drag closure always sees a
+/// valid [currentContext] and works on every drag tick.
+class _SplitStack extends StatefulWidget {
+  final PaneSplit split;
+  final Widget first;
+  final Widget second;
+  final void Function(PaneSplit, double) onResize;
+  const _SplitStack({
+    required this.split,
+    required this.first,
+    required this.second,
+    required this.onResize,
+  });
+
+  @override
+  State<_SplitStack> createState() => _SplitStackState();
+}
+
+class _SplitStackState extends State<_SplitStack> {
+  final GlobalKey _splitKey = GlobalKey();
+
+  @override
+  Widget build(BuildContext context) {
+    final split = widget.split;
     final isHorizontal = split.direction == Axis.horizontal;
     final firstFlex = (split.ratio * 1000).round().clamp(1, 999);
     final secondFlex = (1000 - firstFlex).clamp(1, 999);
-    final splitKey = GlobalKey();
 
     final divider = _Divider(
       isHorizontal: isHorizontal,
       onDrag: (delta, _) {
         final renderBox =
-            splitKey.currentContext?.findRenderObject() as RenderBox?;
+            _splitKey.currentContext?.findRenderObject() as RenderBox?;
         if (renderBox == null || !renderBox.hasSize) return;
         final totalSize = isHorizontal
             ? renderBox.size.width
             : renderBox.size.height;
         if (totalSize <= 0) return;
-        final newRatio = (split.ratio + delta / totalSize).clamp(0.1, 0.9);
-        onResize(split, newRatio.toDouble());
+        final newRatio =
+            (split.ratio + delta / totalSize).clamp(0.1, 0.9);
+        widget.onResize(split, newRatio.toDouble());
       },
     );
 
-    // The panes are laid out by Row/Column+Expanded (no LayoutBuilder,
-    // no Positioned — the pane subtrees build in the normal BUILD
-    // phase). The divider is overlaid in a Stack on top, positioned
-    // at the split ratio. Because the Stack's only Positioned child
-    // is the thin divider hit area (no pane subtree inside), the
-    // OverlayPortal-on-mount issue doesn't apply to it.
     final panes = isHorizontal
         ? Row(
             children: [
-              Expanded(flex: firstFlex, child: first),
-              Expanded(flex: secondFlex, child: second),
+              Expanded(flex: firstFlex, child: widget.first),
+              Expanded(flex: secondFlex, child: widget.second),
             ],
           )
         : Column(
             children: [
-              Expanded(flex: firstFlex, child: first),
-              Expanded(flex: secondFlex, child: second),
+              Expanded(flex: firstFlex, child: widget.first),
+              Expanded(flex: secondFlex, child: widget.second),
             ],
           );
 
     return Stack(
-      key: splitKey,
+      key: _splitKey,
       children: [
         Positioned.fill(child: panes),
         Align(
