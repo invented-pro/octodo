@@ -933,86 +933,117 @@ class PaneLayout extends StatelessWidget {
   /// Used both by [_buildSplit] (which calls [_buildNode] for each side)
   /// and by [_buildHiddenTree] (which substitutes a [SizedBox.shrink]
   /// for the focused subtree during maximize).
+  ///
+  /// **Why this delegates to [_SplitStack]**: the divider drag handler
+  /// needs the split's current pixel size to convert a drag delta into
+  /// a ratio. The split root is a `Stack`; a `Stack` needs a non-
+  /// positioned child to size itself, so we wrap the divider in an
+  /// `Align` and compute the pixel size from the Stack's render box
+  /// at drag time (via a `GlobalKey` on the Stack). The key MUST live
+  /// in a `StatefulWidget` — creating it inline in `build` caused the
+  /// Stack to unmount/remount on every parent rebuild, detaching the
+  /// key the drag closure was holding, so subsequent drag ticks
+  /// silently no-op'd.
   Widget _buildSplitWithChildren(
     BuildContext context,
     PaneSplit split,
     Widget first,
     Widget second,
   ) {
+    return _SplitStack(
+      split: split,
+      first: first,
+      second: second,
+      onResize: onResize,
+    );
+  }
+}
+
+/// Split root: a [Stack] of two `Expanded` panes inside a [Row]/[Column]
+/// (so the pane subtrees build in the normal BUILD phase, not in a
+/// [LayoutBuilder]'s `buildScope` — see [PaneLayout] for the assertion
+/// that the older `LayoutBuilder`+`Positioned` form tripped on every
+/// pane-tree-mutating click) with a thin `_Divider` hit area overlaid
+/// by an [Align] widget.
+///
+/// Owns the [GlobalKey] attached to the [Stack] in [State] — the
+/// divider's drag handler reads the split's current pixel size via
+/// this key at drag time. The key is stable across rebuilds (one
+/// allocation in [initState]), so the drag closure always sees a
+/// valid [currentContext] and works on every drag tick.
+class _SplitStack extends StatefulWidget {
+  final PaneSplit split;
+  final Widget first;
+  final Widget second;
+  final void Function(PaneSplit, double) onResize;
+  const _SplitStack({
+    required this.split,
+    required this.first,
+    required this.second,
+    required this.onResize,
+  });
+
+  @override
+  State<_SplitStack> createState() => _SplitStackState();
+}
+
+class _SplitStackState extends State<_SplitStack> {
+  final GlobalKey _splitKey = GlobalKey();
+
+  @override
+  Widget build(BuildContext context) {
+    final split = widget.split;
     final isHorizontal = split.direction == Axis.horizontal;
+    final firstFlex = (split.ratio * 1000).round().clamp(1, 999);
+    final secondFlex = (1000 - firstFlex).clamp(1, 999);
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
+    final divider = _Divider(
+      isHorizontal: isHorizontal,
+      onDrag: (delta, _) {
+        final renderBox =
+            _splitKey.currentContext?.findRenderObject() as RenderBox?;
+        if (renderBox == null || !renderBox.hasSize) return;
         final totalSize = isHorizontal
-            ? constraints.maxWidth
-            : constraints.maxHeight;
-        final firstSize = totalSize * split.ratio;
-        final secondSize = totalSize - firstSize;
+            ? renderBox.size.width
+            : renderBox.size.height;
+        if (totalSize <= 0) return;
+        final newRatio =
+            (split.ratio + delta / totalSize).clamp(0.1, 0.9);
+        widget.onResize(split, newRatio.toDouble());
+      },
+    );
 
-        final divider = _Divider(
-          isHorizontal: isHorizontal,
-          onDrag: (delta, _) {
-            final newRatio = (split.ratio + delta / totalSize).clamp(0.1, 0.9);
-            onResize(split, newRatio.toDouble());
-          },
-        );
-
-        // Stack + Positioned so the two panes sit flush against each
-        // other (no gutter). The divider is a zero-width widget whose
-        // hit area is a Positioned rectangle straddling the boundary.
-        if (isHorizontal) {
-          return Stack(
+    final panes = isHorizontal
+        ? Row(
             children: [
-              Positioned(
-                left: 0,
-                top: 0,
-                width: firstSize,
-                height: constraints.maxHeight,
-                child: first,
-              ),
-              Positioned(
-                left: firstSize,
-                top: 0,
-                width: secondSize,
-                height: constraints.maxHeight,
-                child: second,
-              ),
-              Positioned(
-                left: firstSize - _Divider.hitSize / 2,
-                top: 0,
-                width: _Divider.hitSize,
-                height: constraints.maxHeight,
-                child: divider,
-              ),
+              Expanded(flex: firstFlex, child: widget.first),
+              Expanded(flex: secondFlex, child: widget.second),
+            ],
+          )
+        : Column(
+            children: [
+              Expanded(flex: firstFlex, child: widget.first),
+              Expanded(flex: secondFlex, child: widget.second),
             ],
           );
-        }
-        return Stack(
-          children: [
-            Positioned(
-              left: 0,
-              top: 0,
-              width: constraints.maxWidth,
-              height: firstSize,
-              child: first,
-            ),
-            Positioned(
-              left: 0,
-              top: firstSize,
-              width: constraints.maxWidth,
-              height: secondSize,
-              child: second,
-            ),
-            Positioned(
-              left: 0,
-              top: firstSize - _Divider.hitSize / 2,
-              width: constraints.maxWidth,
-              height: _Divider.hitSize,
-              child: divider,
-            ),
-          ],
-        );
-      },
+
+    return Stack(
+      key: _splitKey,
+      children: [
+        Positioned.fill(child: panes),
+        Align(
+          alignment: isHorizontal
+              ? Alignment(split.ratio * 2 - 1, 0)
+              : Alignment(0, split.ratio * 2 - 1),
+          widthFactor: isHorizontal ? null : 1,
+          heightFactor: isHorizontal ? 1 : null,
+          child: SizedBox(
+            width: isHorizontal ? _Divider.hitSize : double.infinity,
+            height: isHorizontal ? double.infinity : _Divider.hitSize,
+            child: divider,
+          ),
+        ),
+      ],
     );
   }
 }
