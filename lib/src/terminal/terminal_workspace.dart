@@ -1106,7 +1106,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
 
       // 4) Replace `target` in the tree with a Split.
       final updatedRoot = _rootPane!;
-      if (identical(updatedRoot, target) && root is PaneContainer) {
+      if (identical(updatedRoot, target) && updatedRoot is PaneContainer) {
         // Single-pane workspace: wrap the root in a new split.
         _rootPane = PaneSplit(
           direction: direction,
