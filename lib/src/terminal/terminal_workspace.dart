@@ -48,6 +48,46 @@ CloseSurfaceResult? applyCloseSurfaceForTest(
   return CloseSurfaceResult._(r.tree, r.focused);
 }
 
+/// Return value of [TerminalWorkspaceState._applyDropToSplitEdge]: the
+/// new pane tree root + the new pane container that should receive focus.
+class _DropResult {
+  final PaneNode tree;
+  final PaneContainer focused;
+  _DropResult(this.tree, this.focused);
+}
+
+/// Public shim around [TerminalWorkspaceState._applyDropToSplitEdge] for
+/// unit tests in `pane_tree_test.dart`. The real workspace wires this
+/// into a `setState` + postFrame focus request; tests just need the
+/// pure tree-mutation result.
+@visibleForTesting
+class DropToSplitEdgeResult {
+  final PaneNode tree;
+  final PaneContainer focused;
+  DropToSplitEdgeResult._(this.tree, this.focused);
+}
+
+@visibleForTesting
+DropToSplitEdgeResult? applyDropToSplitEdgeForTest({
+  required PaneNode root,
+  required PaneContainer fromContainer,
+  required Surface surface,
+  required PaneContainer target,
+  required Axis direction,
+  required bool isFirst,
+}) {
+  final r = TerminalWorkspaceState._applyDropToSplitEdge(
+    root: root,
+    fromContainer: fromContainer,
+    surface: surface,
+    target: target,
+    direction: direction,
+    isFirst: isFirst,
+  );
+  if (r == null) return null;
+  return DropToSplitEdgeResult._(r.tree, r.focused);
+}
+
 final Logger _log = moduleLogger('terminal.terminal_workspace');
 
 // ── Workspace widget ─────────────────────────────────────────────────
@@ -1070,72 +1110,119 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     final fromContainer = _findContainerById(drag.sourceContainerId);
     final surface = _findSurfaceById(drag.surfaceId);
     if (fromContainer == null || surface == null) return;
-    if (identical(fromContainer, target) &&
-        fromContainer.surfaces.length == 1) {
-      // Can't split the only surface off into a new pane and leave
-      // the source empty — it's a no-op.
-      return;
-    }
 
-    final direction = edge.splitDirection;
-    final isFirst = edge.newContainerIsFirst;
+    final result = _applyDropToSplitEdge(
+      root: root,
+      fromContainer: fromContainer,
+      surface: surface,
+      target: target,
+      direction: edge.splitDirection,
+      isFirst: edge.newContainerIsFirst,
+    );
+    if (result == null) return;
 
     setState(() {
-      // 1) Remove from source.
-      fromContainer.surfaces.remove(surface);
-      if (fromContainer.focusedIndex >= fromContainer.surfaces.length) {
-        fromContainer.focusedIndex = fromContainer.surfaces.isEmpty
-            ? 0
-            : fromContainer.surfaces.length - 1;
-      }
-
-      // 2) Collapse source if it became empty.
-      if (fromContainer.surfaces.isEmpty &&
-          root is PaneSplit &&
-          !identical(fromContainer, target)) {
-        final newRoot = root.removeContainer(fromContainer);
-        if (newRoot != null) {
-          _rootPane = newRoot;
-        }
-      }
-
-      // 3) Build the new container holding the dragged tab.
-      final newContainer = PaneContainer()
-        ..surfaces.add(surface)
-        ..focusedIndex = 0;
-
-      // 4) Replace `target` in the tree with a Split.
-      final updatedRoot = _rootPane!;
-      if (identical(updatedRoot, target) && updatedRoot is PaneContainer) {
-        // Single-pane workspace: wrap the root in a new split.
-        _rootPane = PaneSplit(
-          direction: direction,
-          first: isFirst ? newContainer : target,
-          second: isFirst ? target : newContainer,
-          ratio: 0.5,
-        );
-      } else if (updatedRoot is PaneSplit) {
-        final r = updatedRoot.replaceContainerWithSplit(
-          target,
-          newContainer,
-          direction,
-          isFirst,
-        );
-        if (r == null) {
-          // Target not found — shouldn't happen because we rendered
-          // an overlay for it. Defensive: revert the surface insert.
-          target.surfaces.add(surface);
-          return;
-        }
-      }
-
-      // 5) Focus the new container.
-      _focusedContainer = newContainer;
+      _rootPane = result.tree;
+      _focusedContainer = result.focused;
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       surface.focusNode.requestFocus();
     });
+  }
+
+  /// Pure helper behind [_dropToSplitEdge]: removes [surface] from
+  /// [fromContainer], collapses [fromContainer] if it emptied, builds
+  /// a new container holding [surface], and replaces [target] in the
+  /// tree with a split pairing [target] + the new container.
+  ///
+  /// Returns null for the no-op case (dragging the only surface of a
+  /// container onto one of its own edges).
+  ///
+  /// CRITICAL: the "wrap the root in a new split" branch must test the
+  /// **post-collapse** root ([updatedRoot]), not [root] captured at
+  /// entry. When [fromContainer] collapses and its sibling becomes the
+  /// new root, that sibling is a [PaneContainer] identical to [target]
+  /// — testing the stale entry-time [root] (a [PaneSplit]) skips the
+  /// branch and the new container is never attached, so the dragged
+  /// terminal vanishes. Exercised by `pane_tree_test.dart`'s
+  /// "applyDropToSplitEdgeForTest" group.
+  static _DropResult? _applyDropToSplitEdge({
+    required PaneNode root,
+    required PaneContainer fromContainer,
+    required Surface surface,
+    required PaneContainer target,
+    required Axis direction,
+    required bool isFirst,
+  }) {
+    // No-op: dragging the only surface of a pane onto one of its own
+    // edges would just empty the source and immediately re-wrap it.
+    if (identical(fromContainer, target) &&
+        fromContainer.surfaces.length == 1) {
+      return null;
+    }
+
+    // 1) Remove from source.
+    fromContainer.surfaces.remove(surface);
+    if (fromContainer.focusedIndex >= fromContainer.surfaces.length) {
+      fromContainer.focusedIndex = fromContainer.surfaces.isEmpty
+          ? 0
+          : fromContainer.surfaces.length - 1;
+    }
+
+    // 2) Collapse source if it became empty. Only a split root has a
+    //    sibling to splice in; the guard against [target] is belt-and-
+    //    braces (the no-op check above already handled same-container).
+    var updatedRoot = root;
+    if (fromContainer.surfaces.isEmpty &&
+        root is PaneSplit &&
+        !identical(fromContainer, target)) {
+      final newRoot = root.removeContainer(fromContainer);
+      if (newRoot != null) {
+        updatedRoot = newRoot;
+      }
+    }
+
+    // 3) Build the new container holding the dragged tab.
+    final newContainer = PaneContainer()
+      ..surfaces.add(surface)
+      ..focusedIndex = 0;
+
+    // 4) Replace `target` in the tree with a Split.
+    if (identical(updatedRoot, target) && updatedRoot is PaneContainer) {
+      // Single-pane workspace (or post-collapse single container that
+      // IS the target): wrap the root in a new split.
+      return _DropResult(
+        PaneSplit(
+          direction: direction,
+          first: isFirst ? newContainer : target,
+          second: isFirst ? target : newContainer,
+          ratio: 0.5,
+        ),
+        newContainer,
+      );
+    }
+    if (updatedRoot is PaneSplit) {
+      final r = updatedRoot.replaceContainerWithSplit(
+        target,
+        newContainer,
+        direction,
+        isFirst,
+      );
+      if (r == null) {
+        // Target not found in the tree — shouldn't happen because we
+        // rendered an overlay for it. Defensive: revert the surface
+        // insert and leave the tree as the post-collapse root.
+        target.surfaces.add(surface);
+        return _DropResult(updatedRoot, target);
+      }
+      return _DropResult(r, newContainer);
+    }
+
+    // updatedRoot is a PaneContainer != target: target isn't reachable.
+    // Defensive revert (same as above).
+    target.surfaces.add(surface);
+    return _DropResult(updatedRoot, target);
   }
 
   PaneContainer? _findContainerById(String id) {

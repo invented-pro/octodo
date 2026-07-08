@@ -10,7 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:octodo/src/terminal/pane_tree.dart';
 import 'package:octodo/src/terminal/shell_profiles.dart';
 import 'package:octodo/src/terminal/terminal_workspace.dart'
-    show applyCloseSurfaceForTest;
+    show applyCloseSurfaceForTest, applyDropToSplitEdgeForTest;
 
 List<PaneContainer> _allLeaves(PaneNode root) {
   final out = <PaneContainer>[];
@@ -174,6 +174,137 @@ void main() {
       s.currentCwd = 'C:/Users/tester';
       // No home shortcut — falls back to basename of currentCwd.
       expect(s.fallbackTitle, 'pwsh tester');
+    });
+  });
+
+  group('applyDropToSplitEdgeForTest — source-pane collapse (regression: '
+      'dragged terminal must dock, not disappear)', () {
+    // Regression for the bug where _dropToSplitEdge captured
+    // root = _rootPane at entry, but the source-collapse step then
+    // reassigned _rootPane to the surviving sibling. The "wrap the
+    // root in a new split" branch tested the STALE entry-time root
+    // (still a PaneSplit) instead of the post-collapse root (a
+    // PaneContainer identical to the target), so neither attach
+    // branch ran and the new container holding the dragged tab was
+    // orphaned — the terminal vanished from the workspace.
+
+    test(
+        '2 panes each 1 tab, drag A onto B edge: '
+        'tab docks into a new split, A collapses away', () {
+      final a = PaneContainer()..surfaces.add(Surface());
+      final b = PaneContainer()..surfaces.add(Surface());
+      final split = PaneSplit(direction: Axis.horizontal, first: a, second: b);
+      final dragged = a.surfaces.first;
+
+      final result = applyDropToSplitEdgeForTest(
+        root: split,
+        fromContainer: a,
+        surface: dragged,
+        target: b,
+        direction: Axis.horizontal,
+        isFirst: false, // right edge → new container on the second side
+      );
+
+      expect(result, isNotNull);
+      // Tree must be a fresh split (NOT the stale root, NOT a lone
+      // container with the surface reverted into b).
+      expect(result!.tree, isA<PaneSplit>());
+      final newSplit = result.tree as PaneSplit;
+      // b survived as `first`; the new container is `second`.
+      expect(identical(newSplit.first, b), isTrue);
+      expect(newSplit.second, isA<PaneContainer>());
+      expect(identical(newSplit.second, a), isFalse,
+          reason: 'a collapsed and was disposed; must not reappear');
+      // The dragged tab landed in the new container.
+      final newContainer = newSplit.second as PaneContainer;
+      expect(newContainer.surfaces, contains(dragged));
+      expect(newContainer.surfaces.length, 1);
+      // b still holds exactly its original tab (no accidental revert).
+      expect(b.surfaces.length, 1);
+      // Focus transfers to the new container.
+      expect(identical(result.focused, newContainer), isTrue);
+    });
+
+    test('vertical split variant: outcome is orientation-agnostic', () {
+      // The user reported the bug for both vertically- and
+      // horizontally-split layouts; the attach logic doesn't depend
+      // on orientation, but pin the vertical case too.
+      final top = PaneContainer()..surfaces.add(Surface());
+      final bottom = PaneContainer()..surfaces.add(Surface());
+      final split =
+          PaneSplit(direction: Axis.vertical, first: top, second: bottom);
+      final dragged = top.surfaces.first;
+
+      final result = applyDropToSplitEdgeForTest(
+        root: split,
+        fromContainer: top,
+        surface: dragged,
+        target: bottom,
+        direction: Axis.vertical,
+        isFirst: true, // top edge → new container on the first side
+      );
+
+      expect(result, isNotNull);
+      final newSplit = result!.tree as PaneSplit;
+      // bottom survived and is now `second`; new container is `first`.
+      expect(identical(newSplit.second, bottom), isTrue);
+      expect(newSplit.first, isA<PaneContainer>());
+      expect((newSplit.first as PaneContainer).surfaces, contains(dragged));
+    });
+
+    test(
+        'source keeps other tabs: A retains its remaining tab, '
+        'B is wrapped in an inner split with the new container', () {
+      // Non-collapsing case — this path worked before the fix too;
+      // included as a non-regression guard so the collapse fix
+      // doesn't accidentally break the normal multi-tab move.
+      final a = PaneContainer()..surfaces.addAll([Surface(), Surface()]);
+      final b = PaneContainer()..surfaces.add(Surface());
+      final split = PaneSplit(direction: Axis.horizontal, first: a, second: b);
+      final dragged = a.surfaces.first;
+
+      final result = applyDropToSplitEdgeForTest(
+        root: split,
+        fromContainer: a,
+        surface: dragged,
+        target: b,
+        direction: Axis.horizontal,
+        isFirst: false,
+      );
+
+      expect(result, isNotNull);
+      // Root split object survives (no top-level collapse).
+      expect(identical(result!.tree, split), isTrue);
+      // a still in tree, now with one tab; the dragged one is gone.
+      expect(a.surfaces.length, 1);
+      expect(a.surfaces.contains(dragged), isFalse);
+      // b was replaced by an inner split (b + new container).
+      final inner = split.second as PaneSplit;
+      expect(identical(inner.first, b), isTrue);
+      expect((inner.second as PaneContainer).surfaces, contains(dragged));
+      // Focus goes to the new container.
+      expect(identical(result.focused, inner.second), isTrue);
+    });
+
+    test(
+        'no-op: dragging the only tab onto its own pane edge '
+        'returns null and leaves the tree untouched', () {
+      final a = PaneContainer()..surfaces.add(Surface());
+      final b = PaneContainer()..surfaces.add(Surface());
+      final split = PaneSplit(direction: Axis.horizontal, first: a, second: b);
+
+      final result = applyDropToSplitEdgeForTest(
+        root: split,
+        fromContainer: a,
+        surface: a.surfaces.first,
+        target: a, // same container
+        direction: Axis.horizontal,
+        isFirst: false,
+      );
+
+      expect(result, isNull);
+      expect(identical(split.first, a), isTrue);
+      expect(a.surfaces.length, 1);
     });
   });
 
