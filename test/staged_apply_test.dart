@@ -212,6 +212,72 @@ void main() {
     });
   });
 
+  group('_replaceRunningImage (rename-aside self-replace)', () {
+    // Regression for the "files swapped but app not auto-started"
+    // bug: octodo_helper.exe ships inside the update zip, and the
+    // running helper cannot File.copy over its own locked image.
+    // The fix renames the running image aside then copies the fresh
+    // one into its place. These tests exercise that path with
+    // regular (non-locked) files — Windows' sharing restriction
+    // only affects the direct-copy step, which is precisely what the
+    // rename-aside avoids.
+
+    late Directory workDir;
+
+    setUp(() async {
+      workDir = await Directory.systemTemp.createTemp('replace_test_');
+    });
+
+    tearDown(() async {
+      if (await workDir.exists()) {
+        await workDir.delete(recursive: true);
+      }
+    });
+
+    test('replaces an existing image file with the fresh payload', () async {
+      final dst = File(p.join(workDir.path, 'helper.exe'));
+      await dst.writeAsString('OLD-IMAGE');
+      final src = File(p.join(workDir.path, 'fresh.exe'));
+      await src.writeAsString('NEW-IMAGE');
+
+      await StagedApply.replaceRunningImageForTest(
+        src,
+        dst,
+        attempts: 2,
+        backoff: const Duration(milliseconds: 10),
+      );
+
+      expect(await dst.readAsString(), 'NEW-IMAGE');
+      // The file is unlocked here (no process mapped from it), so the
+      // best-effort aside delete succeeds and leaves nothing behind.
+      expect(File('${dst.path}.old').existsSync(), isFalse);
+    });
+
+    test('leaves the original in place when the fresh copy fails', () async {
+      // Source does not exist -> _copyWithRetry throws on the first
+      // attempt. The rename-aside must restore the original so the
+      // install dir keeps a usable helper at its canonical name.
+      final dst = File(p.join(workDir.path, 'helper.exe'));
+      await dst.writeAsString('OLD-IMAGE');
+      final missingSrc = File(p.join(workDir.path, 'does-not-exist.exe'));
+
+      await expectLater(
+        StagedApply.replaceRunningImageForTest(
+          missingSrc,
+          dst,
+          attempts: 2,
+          backoff: const Duration(milliseconds: 10),
+        ),
+        throwsA(isA<StagedApplyException>()),
+      );
+
+      // Original restored byte-for-byte.
+      expect(await dst.readAsString(), 'OLD-IMAGE');
+      // And no dangling aside left behind by the failed run.
+      expect(File('${dst.path}.old').existsSync(), isFalse);
+    });
+  });
+
   group('_relaunch helper-env override (regression for recursion bug)', () {
     late Directory relayWorkDir;
 

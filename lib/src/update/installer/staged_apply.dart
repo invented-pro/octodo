@@ -224,16 +224,32 @@ class StagedApply {
         'Staged extract is empty: ${paths.extractDir.path}',
       );
     }
+    final runningExe = Platform.resolvedExecutable;
     for (final src in files) {
       final rel = p.relative(src.path, from: paths.extractDir.path);
       final dst = File(p.join(paths.installDir.path, rel));
       await dst.parent.create(recursive: true);
-      await _copyWithRetry(
-        src,
-        dst,
-        attempts: attempts,
-        backoff: backoff,
-      );
+      if (_isRunningImage(dst, runningExe)) {
+        // The standalone helper exe is locked by Windows while it
+        // runs (the loader maps it without FILE_SHARE_WRITE), so a
+        // plain File.copy fails with ERROR_SHARING_VIOLATION on every
+        // retry and would abort the whole apply before [_relaunch].
+        // Route it through a rename-aside instead — see
+        // [_replaceRunningImage].
+        await _replaceRunningImage(
+          src,
+          dst,
+          attempts: attempts,
+          backoff: backoff,
+        );
+      } else {
+        await _copyWithRetry(
+          src,
+          dst,
+          attempts: attempts,
+          backoff: backoff,
+        );
+      }
     }
   }
 
@@ -259,6 +275,113 @@ class StagedApply {
       }
     }
   }
+
+  /// True when [dst] refers to the file this process is executing
+  /// from — i.e. the standalone helper's own image. A plain
+  /// [File.copy] over it fails because Windows holds the running exe
+  /// write-locked; the copy loop routes such a file through
+  /// [_replaceRunningImage] instead. [FileSystemEntity.identicalSync]
+  /// resolves symlinks, casing, and 8.3 short-name aliases so the
+  /// match is robust against the install dir's on-disk form. A
+  /// missing [dst] (a brand-new payload file) throws and we return
+  /// false, letting the normal copy path handle it.
+  static bool _isRunningImage(File dst, String runningExe) {
+    try {
+      return FileSystemEntity.identicalSync(dst.path, runningExe);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Replace the currently-executing image at [dst] with [src].
+  ///
+  /// A direct copy is impossible: Windows maps the running exe
+  /// without FILE_SHARE_WRITE, so [File.copy] returns
+  /// ERROR_SHARING_VIOLATION on every retry. Instead we rename the
+  /// locked image aside (a same-volume rename updates only the
+  /// directory entry, which NTFS permits even on a mapped file), drop
+  /// the fresh payload into the freed name, then best-effort delete
+  /// the aside.
+  ///
+  /// This is the only way to update the helper exe while it is the
+  /// one performing the update. Without it, the copy loop throws at
+  /// `octodo_helper.exe` and [_relaunch] never runs — so the freshly
+  /// installed app is never auto-started, exactly the regression this
+  /// method exists to prevent.
+  ///
+  /// Restore-on-failure: if the fresh copy fails we move the aside
+  /// back to [dst]'s name so the install dir is not left without a
+  /// helper exe at its canonical path.
+  static Future<void> _replaceRunningImage(
+    File src,
+    File dst, {
+    required int attempts,
+    required Duration backoff,
+  }) async {
+    final aside = File('${dst.path}.old');
+    // Sweep a stale aside left by a previous run. By the time we get
+    // here that run's helper has exited, so the image section is gone
+    // and the delete succeeds; if it is somehow still locked we let
+    // the rename below surface the error rather than masking it.
+    if (await aside.exists()) {
+      try {
+        await aside.delete();
+      } catch (_) {
+        // Non-fatal; the rename will fail with a clear error if the
+        // aside is genuinely unreachable.
+      }
+    }
+    try {
+      await dst.rename(aside.path);
+    } catch (e) {
+      throw StagedApplyException(
+        'Could not set aside running image ${dst.path} '
+        'for replacement: $e',
+        e,
+      );
+    }
+    try {
+      await _copyWithRetry(src, dst, attempts: attempts, backoff: backoff);
+    } catch (e) {
+      // Put the original back so the install dir still has the file
+      // at its canonical name; the failed payload copy propagates to
+      // the caller via the rethrow. Drop any partial destination
+      // first — a rename won't replace an existing file, so without
+      // this an I/O error mid-copy (disk full, etc.) would leave a
+      // truncated helper at the canonical name while the good
+      // original sat unused at .old.
+      try {
+        if (await dst.exists()) await dst.delete();
+      } catch (_) {}
+      try {
+        await aside.rename(dst.path);
+      } catch (_) {}
+      rethrow;
+    }
+    // Best-effort cleanup of the old image. This commonly fails
+    // because we are still running from it; the stale-aside sweep at
+    // the top of the next update run clears it once this process has
+    // exited.
+    try {
+      await aside.delete();
+    } catch (_) {
+      // Expected while the image is mapped; leave for the next run.
+    }
+  }
+
+  /// Test-only hook: drives [_replaceRunningImage] with regular
+  /// (non-locked) files so the rename-aside + copy + cleanup logic
+  /// can be exercised deterministically. The locked-file behaviour
+  /// itself is identical — Windows' sharing restriction only affects
+  /// the direct-copy step, which we never perform here.
+  @visibleForTesting
+  static Future<void> replaceRunningImageForTest(
+    File src,
+    File dst, {
+    int attempts = 6,
+    Duration backoff = const Duration(milliseconds: 500),
+  }) =>
+      _replaceRunningImage(src, dst, attempts: attempts, backoff: backoff);
 
   /// Test-only hook: drives [_relaunch] with a custom exe path.
   /// Production callers leave [exePathForTest] null and the helper
