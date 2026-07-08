@@ -889,7 +889,6 @@ class _AboutLinkRow extends StatelessWidget {
                         color: palette.accentBlue,
                         fontSize: 12,
                         fontFamily: 'monospace',
-                        decoration: TextDecoration.underline,
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
