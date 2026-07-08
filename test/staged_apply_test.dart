@@ -47,6 +47,34 @@ Future<File> _writeEscapeZip({
   return f;
 }
 
+/// Resolves the real `dart` executable for `dart compile exe`.
+///
+/// Under `flutter test`, [Platform.resolvedExecutable] is the
+/// `flutter_tester` host binary, not the Dart CLI — invoking it with
+/// `compile exe` args hangs (flutter_tester waits on stdin and the
+/// test's `setUpAll` never completes). Prefer a real `dart` on the
+/// resolved path; otherwise walk up from flutter_tester to find the
+/// Dart SDK bundled inside the Flutter SDK
+/// (`<flutterRoot>/bin/cache/dart-sdk/bin/dart(.exe)`); last resort
+/// is a bare `dart` from PATH.
+Future<String> _resolveDartExecutable() async {
+  final resolved = Platform.resolvedExecutable;
+  final exeName = Platform.isWindows ? 'dart.exe' : 'dart';
+  if (p.basename(resolved).toLowerCase() == exeName) {
+    return resolved;
+  }
+  var dir = File(resolved).parent;
+  for (var i = 0; i < 10 && dir.path != dir.parent.path; i++) {
+    final candidate = File(p.join(dir.path, 'bin', 'cache', 'dart-sdk',
+        'bin', exeName));
+    if (await candidate.exists()) {
+      return candidate.path;
+    }
+    dir = dir.parent;
+  }
+  return 'dart';
+}
+
 void main() {
   group('resolveTargetPath (zip-slip defence)', () {
     const root = '/staging';
@@ -195,7 +223,7 @@ void main() {
       if (!exe.existsSync() ||
           exe.statSync().modified.isBefore(src.statSync().modified)) {
         final result = await Process.run(
-          Platform.resolvedExecutable,
+          await _resolveDartExecutable(),
           ['compile', 'exe', src.path, '-o', exe.path],
         );
         if (result.exitCode != 0) {
