@@ -12,6 +12,7 @@
 .swiftpm/
 .opencode/
 migrate_working_dir/
+installer/
 
 # IntelliJ related
 *.iml

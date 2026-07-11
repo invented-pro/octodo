@@ -62,6 +62,7 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
   flutter_launcher_icons: "^0.14.4"
+  msix: ^3.18.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -87,3 +88,21 @@ flutter_launcher_icons:
   # macos:
   #   generate: true
   #   image_path: "assets/logo.png"
+
+# dart run msix:create
+msix_config:
+  display_name: Octodo
+  publisher_display_name: 蜀兜 私有云
+  publisher: CN=357801BC-6202-4ACE-885F-C75C6DFD5778
+  identity_name: 43D421A8.Octodo
+  family_name: 43D421A8.Octodo_mr0as8erd2vmy
+  logo_path: assets/logo.png
+  capabilities: internetClient,runFullTrust # for flutter_pty to function correctly
+  # languages: zh-cn, en-us
+  languages: en-us
+  description: |
+    Octodo is a desktop terminal “complex” — a single window that hosts multiple workspaces, each with its own shell sessions, split panes, and tabs.
+  output_path: installer/
+  output_name: Octodo
+  desktop_shortcut: true
+  store: true
