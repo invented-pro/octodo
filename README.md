@@ -39,6 +39,18 @@ panes, and tabs.
 
 ## Usage
 
+Octodo is available from the Microsoft Store or as a portable zip.
+The in-app updater adapts automatically: Store builds update through
+the Store; portable builds self-apply the latest GitHub release.
+
+### Microsoft Store
+
+Install from the
+[Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ).
+Updates are delivered automatically through the Store.
+
+### Portable
+
 1. Download the latest `octodo-windows.zip` from
    [Releases](https://github.com/invented-pro/octodo/releases/latest).
 2. Before unzipping, right-click the zip → **Properties** → tick

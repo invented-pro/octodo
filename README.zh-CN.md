@@ -38,6 +38,16 @@
 
 ## 使用方法
 
+Octodo 可从 Microsoft Store 或便携版 zip 获取。应用内更新会自动
+适配：商店版通过商店更新；便携版自动应用最新的 GitHub 发布。
+
+### Microsoft Store
+
+从 [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ)
+安装。更新由商店自动交付。
+
+### 便携版
+
 1. 从 [Releases](https://github.com/invented-pro/octodo/releases/latest)
    下载最新的 `octodo-windows.zip`。
 2. 解压前，右键 zip 文件 → **属性** → 勾选 **解除锁定** → **确定**。
