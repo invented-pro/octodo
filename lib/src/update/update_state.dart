@@ -27,6 +27,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'distribution.dart';
 import 'release_resolver.dart';
 
 enum UpdateState {
@@ -115,6 +116,14 @@ class UpdateStateModel extends ChangeNotifier {
   final String _currentVersion;
   DateTime? _lastCheck;
 
+  /// The running app's distribution. Set once at construction
+  /// and read-only thereafter; the UI branches on this so the
+  /// Store build can route to the Store instead of the
+  /// self-applied GitHub-zip flow. Defaults to [InstallDistribution
+  /// .portable] so callers that don't care (tests, legacy paths)
+  /// keep the original behavior.
+  final InstallDistribution distribution;
+
   /// Persistent "you're up to date" flag — true once any probe
   /// (initial, periodic, or manual) has confirmed the running
   /// version matches or exceeds the published release. Cleared
@@ -124,7 +133,10 @@ class UpdateStateModel extends ChangeNotifier {
   /// this flag alone.
   bool _isUpToDate = false;
 
-  UpdateStateModel({required String currentVersion})
+  UpdateStateModel({
+    required String currentVersion,
+    this.distribution = InstallDistribution.portable,
+  })
       // ignore: prefer_initializing_formals
       : _currentVersion = currentVersion;
 

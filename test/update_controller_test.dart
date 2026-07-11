@@ -28,6 +28,7 @@ import 'package:octodo/src/settings/setting.dart';
 import 'package:octodo/src/settings/settings_catalog.dart';
 import 'package:octodo/src/settings/settings_runtime.dart';
 import 'package:octodo/src/settings/settings_store.dart';
+import 'package:octodo/src/update/distribution.dart';
 import 'package:octodo/src/update/r2_update_feed.dart';
 import 'package:octodo/src/update/update_controller.dart';
 import 'package:octodo/src/update/update_feed.dart';
@@ -1105,6 +1106,111 @@ void main() {
       expect(fallbackZipCalls, _kMaxAttemptsPerSource);
       expect(model.state, UpdateState.error);
       c.dispose();
+    });
+  });
+
+  group('store distribution', () {
+    // The Store build can't self-apply (its install dir is
+    // ACL-locked), so the apply path must short-circuit even if
+    // the UI mistakenly calls it. Detection (the probe) is
+    // distribution-agnostic and still surfaces updateAvailable.
+
+    test('probe still surfaces updateAvailable on a store build',
+        () async {
+      final mock = MockClient((req) async {
+        return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+      });
+      final storeModel = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.store,
+      );
+      final controller = UpdateController(
+        model: storeModel,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        distribution: InstallDistribution.store,
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+      );
+      await controller.start();
+      await _waitFor(() => storeModel.state == UpdateState.updateAvailable);
+
+      expect(storeModel.state, UpdateState.updateAvailable);
+      expect(storeModel.detected?.version, '9.9.9');
+      expect(storeModel.distribution, InstallDistribution.store);
+      controller.dispose();
+    });
+
+    test('downloadLatest is a no-op on a store build', () async {
+      final mock = MockClient((req) async {
+        return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+      });
+      final storeModel = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.store,
+      );
+      final controller = UpdateController(
+        model: storeModel,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        distribution: InstallDistribution.store,
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+      );
+      await controller.start();
+      await _waitFor(() => storeModel.state == UpdateState.updateAvailable);
+
+      // Calling downloadLatest must NOT transition to downloading
+      // — the Store UI opens the Store URL instead.
+      await controller.downloadLatest();
+      // Give any stray async work a chance to run, then assert no
+      // transition happened.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(storeModel.state, UpdateState.updateAvailable);
+      expect(storeModel.progress, isNull);
+      expect(storeModel.downloaded, isNull);
+      controller.dispose();
+    });
+
+    test('applyDownloaded is a no-op on a store build', () async {
+      final mock = MockClient((req) async {
+        return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+      });
+      final storeModel = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.store,
+      );
+      final controller = UpdateController(
+        model: storeModel,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        distribution: InstallDistribution.store,
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+      );
+      await controller.start();
+      await _waitFor(() => storeModel.state == UpdateState.updateAvailable);
+
+      // Seed a fake downloaded payload so applyDownloaded would
+      // otherwise have something to apply; the guard must still
+      // refuse.
+      storeModel.setDownloaded(DownloadedPayload(
+        version: '9.9.9',
+        zipPath: File(p.join(tmp.path, 'fake.zip')),
+        sizeBytes: 1,
+        digestVerified: true,
+      ));
+      await controller.applyDownloaded();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      // Stayed in downloaded; never moved to installing, and the
+      // process didn't exit (we're still here).
+      expect(storeModel.state, UpdateState.downloaded);
+      controller.dispose();
     });
   });
 }

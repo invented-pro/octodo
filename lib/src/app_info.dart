@@ -29,6 +29,13 @@ const String kAppAuthorUrl = 'https://sudo8.com';
 /// brand glyph (not a generic icon) sits next to the app name.
 const String kAppLogoAsset = 'assets/logo.png';
 
+/// Microsoft Store listing for Octodo. The in-app updater opens
+/// this in the user's browser when the running build is the
+/// MSIX/Store distribution (updates are delivered by the Store,
+/// not self-applied). Kept here so the update UI and any future
+/// diagnostics reference one source of truth.
+const String kAppStoreUrl = 'https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ';
+
 /// Windows AppUserModelID — the "package namespace" Win32 uses to
 /// group taskbar icons, route toast notifications, and populate
 /// jump lists. Passed to `SetCurrentProcessExplicitAppUserModelID`

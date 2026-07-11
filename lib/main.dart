@@ -17,6 +17,7 @@ import 'src/terminal/shell_profiles.dart';
 import 'src/terminal/terminal_workspace.dart';
 import 'src/update/installer/apply_main.dart';
 import 'src/update/installer/crash_sentinel.dart';
+import 'src/update/distribution.dart';
 import 'src/update/update_controller.dart';
 import 'src/update/update_state.dart';
 import 'src/theme/app_theme.dart';
@@ -32,6 +33,13 @@ import 'ui/update/update_pill.dart';
 /// Initialized in `main()` *before* `runApp`, so the value is
 /// non-null and stable by the time any widget reads it.
 late final String kAppVersion;
+
+/// The running app's distribution (portable vs. Store). Resolved
+/// once in `main()` via the Win32 package-identity probe + path
+/// heuristic (see `resolveInstallDistribution`). Drives whether
+/// the in-app updater self-applies the GitHub zip (portable) or
+/// routes to the Microsoft Store (store).
+late final InstallDistribution kAppDistribution;
 
 final Logger _log = moduleLogger('main');
 
@@ -136,6 +144,11 @@ Future<void> main() async {
     _log.severe('PackageInfo.fromPlatform failed: $e');
     kAppVersion = '0.0.0';
   }
+  // Resolve the distribution (portable vs. Store) before the UI
+  // comes up so both the model and controller are constructed
+  // with the right value on the first build. The Win32 probe is
+  // a cheap in-process call; the path heuristic is the backstop.
+  kAppDistribution = resolveInstallDistribution();
   runApp(const OctodoApp());
 }
 
@@ -352,11 +365,15 @@ class _AppShellState extends State<AppShell>
     // placeholder until the future resolves; see [build].
     _bootstrapAsync();
 
-    _updateModel = UpdateStateModel(currentVersion: kAppVersion);
+    _updateModel = UpdateStateModel(
+      currentVersion: kAppVersion,
+      distribution: kAppDistribution,
+    );
     _updateController = UpdateController(
       model: _updateModel,
       settings: SettingsRuntime.instance.catalog.update,
       userAgentVersion: kAppVersion,
+      distribution: kAppDistribution,
     );
     _updateController.start();
 

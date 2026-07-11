@@ -19,6 +19,7 @@ import '../log.dart';
 import '../settings/settings_catalog.dart';
 import '../settings/settings_runtime.dart';
 import 'digest.dart';
+import 'distribution.dart';
 import 'r2_update_feed.dart';
 import 'release_resolver.dart';
 import 'semver.dart';
@@ -61,6 +62,15 @@ class UpdateController {
   final UpdateStateModel model;
   final UpdateSettingsSection settings;
   final String userAgentVersion;
+
+  /// The running app's distribution. The Store build cannot be
+  /// self-updated (its install dir lives under the ACL-locked
+  /// `WindowsApps`), so [downloadLatest] / [applyDownloaded]
+  /// short-circuit when this is [InstallDistribution.store]; the
+  /// UI is expected to route the user to the Store instead.
+  /// Defaults to portable so existing call sites/tests keep
+  /// working.
+  final InstallDistribution distribution;
 
   /// Optional factory for the primary [UpdateFeedSource] (GitHub by
   /// default). Production callers leave this null and get the default
@@ -146,6 +156,7 @@ class UpdateController {
     required this.model,
     required this.settings,
     required this.userAgentVersion,
+    this.distribution = InstallDistribution.portable,
     this.primaryFeedFactory,
     this.fallbackFeedFactory,
     this.skipListFileFactory,
@@ -378,6 +389,15 @@ class UpdateController {
   /// whole chain, so clicking "Cancel" aborts whichever attempt is
   /// currently in flight and prevents the next retry from starting.
   Future<void> downloadLatest() async {
+    if (distribution == InstallDistribution.store) {
+      // Store builds can't self-apply: the install dir is
+      // ACL-locked and `octodo_helper.exe` isn't present. The UI
+      // must route to the Store instead; reaching this method on
+      // a Store build is a programming error.
+      _log.warning('downloadLatest() called on a Store distribution; '
+          'the UI should open the Store URL instead.');
+      return;
+    }
     final release = model.detected;
     if (release == null) return;
 
@@ -723,6 +743,11 @@ class UpdateController {
   ///      mode (pre-empts file-lock collisions while we're alive).
   ///   4. exit(0) — the helper then extracts + copies + relaunches.
   Future<void> applyDownloaded() async {
+    if (distribution == InstallDistribution.store) {
+      _log.warning('applyDownloaded() called on a Store distribution; '
+          'ignored — Store builds update via the Store.');
+      return;
+    }
     final d = model.downloaded;
     if (d == null) return;
     model.setInstalling();

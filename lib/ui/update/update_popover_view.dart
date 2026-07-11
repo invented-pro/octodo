@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../src/app_info.dart';
 import '../../src/theme/palette_context.dart';
+import '../../src/update/distribution.dart';
 import '../../src/update/release_resolver.dart';
 import '../../src/update/update_controller.dart';
 import '../../src/update/update_state.dart';
@@ -217,6 +218,7 @@ class _AvailableBody extends StatelessWidget {
   Widget build(BuildContext context) {
     final release = model.detected;
     final palette = context.palette;
+    final isStore = model.distribution == InstallDistribution.store;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -234,9 +236,12 @@ class _AvailableBody extends StatelessWidget {
               if (release != null) _Metadata(release: release),
               const SizedBox(height: 14),
               Text(
-                'The download is fetched from GitHub. The SHA-256 of '
-                'the zip is checked against the sidecar before the '
-                'running app is replaced.',
+                isStore
+                    ? 'Updates for the Store version are delivered '
+                        'by Microsoft Store.'
+                    : 'The download is fetched from GitHub. The SHA-256 of '
+                        'the zip is checked against the sidecar before the '
+                        'running app is replaced.',
                 style: TextStyle(
                     color: palette.textSecondary, fontSize: 11),
               ),
@@ -245,32 +250,63 @@ class _AvailableBody extends StatelessWidget {
         ),
         _NotesLink(url: release?.htmlUrl),
         _Footer(
-          left: _SecondaryButton(
-            label: 'Skip this version',
-            onPressed: () {
-              if (release != null) {
-                controller.skipVersion(release.version);
-              } else {
-                model.reset();
-              }
-              Navigator.of(context).pop();
-            },
-          ),
+          left: isStore
+              ? const SizedBox.shrink()
+              : _SecondaryButton(
+                  label: 'Skip this version',
+                  onPressed: () {
+                    if (release != null) {
+                      controller.skipVersion(release.version);
+                    } else {
+                      model.reset();
+                    }
+                    Navigator.of(context).pop();
+                  },
+                ),
           right: [
             _SecondaryButton(
               label: 'Later',
               onPressed: () => Navigator.of(context).pop(),
             ),
-            _PrimaryButton(
-              label: _downloadLabel(release),
-              // Don't pop — the controller's call to
-              // `model.setDownloading(...)` flips the state to
-              // [UpdateState.downloading], and the AnimatedBuilder
-              // wrapping the dialog body swaps [AvailableBody] for
-              // [DownloadingBody] in-place. Popping here leaves
-              // the user with no surface to observe the progress.
-              onPressed: () => controller.downloadLatest(),
-            ),
+            if (isStore)
+              _PrimaryButton(
+                label: 'Update',
+                // Await the launch so a failure surfaces a snackbar
+                // (matches _NotesLink / _AboutLinkRow). Pop only on
+                // success; on failure keep the dialog open so the
+                // user can retry or read the Store URL.
+                onPressed: () async {
+                  final ok = await launchUrl(
+                    Uri.parse(kAppStoreUrl),
+                    mode: LaunchMode.externalApplication,
+                  );
+                  if (!ok) {
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Text(
+                            'Could not open the Microsoft Store.'),
+                        backgroundColor: palette.accentPink,
+                        duration: const Duration(seconds: 3),
+                      ),
+                    );
+                    return;
+                  }
+                  if (!context.mounted) return;
+                  Navigator.of(context).pop();
+                },
+              )
+            else
+              _PrimaryButton(
+                label: _downloadLabel(release),
+                // Don't pop — the controller's call to
+                // `model.setDownloading(...)` flips the state to
+                // [UpdateState.downloading], and the AnimatedBuilder
+                // wrapping the dialog body swaps [AvailableBody] for
+                // [DownloadingBody] in-place. Popping here leaves
+                // the user with no surface to observe the progress.
+                onPressed: () => controller.downloadLatest(),
+              ),
           ],
         ),
       ],
