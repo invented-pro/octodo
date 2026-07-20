@@ -47,6 +47,7 @@ class TerminalSettings {
     required this.scrollbackLines,
     required this.copyOnSelect,
     required this.bellMode,
+    required this.linkClickModifier,
     required this.terminalForeground,
     required this.terminalSelection,
     required this.terminalAnsiColors,
@@ -60,6 +61,7 @@ class TerminalSettings {
   final int scrollbackLines;
   final bool copyOnSelect;
   final BellMode bellMode;
+  final LinkClickModifier linkClickModifier;
 
   /// Default foreground color the alacritty renderer applies to cells
   /// with no explicit SGR foreground. Sourced from the active palette's
@@ -88,6 +90,7 @@ class TerminalSettings {
     int? scrollbackLines,
     bool? copyOnSelect,
     BellMode? bellMode,
+    LinkClickModifier? linkClickModifier,
     Color? terminalForeground,
     Color? terminalSelection,
     List<Color>? terminalAnsiColors,
@@ -100,6 +103,7 @@ class TerminalSettings {
     scrollbackLines: scrollbackLines ?? this.scrollbackLines,
     copyOnSelect: copyOnSelect ?? this.copyOnSelect,
     bellMode: bellMode ?? this.bellMode,
+    linkClickModifier: linkClickModifier ?? this.linkClickModifier,
     terminalForeground: terminalForeground ?? this.terminalForeground,
     terminalSelection: terminalSelection ?? this.terminalSelection,
     terminalAnsiColors: terminalAnsiColors ?? this.terminalAnsiColors,
@@ -117,6 +121,7 @@ class TerminalSettings {
           other.scrollbackLines == scrollbackLines &&
           other.copyOnSelect == copyOnSelect &&
           other.bellMode == bellMode &&
+          other.linkClickModifier == linkClickModifier &&
           other.terminalForeground == terminalForeground &&
           other.terminalSelection == terminalSelection &&
           _listEq(other.terminalAnsiColors, terminalAnsiColors));
@@ -131,6 +136,7 @@ class TerminalSettings {
     scrollbackLines,
     copyOnSelect,
     bellMode,
+    linkClickModifier,
     terminalForeground,
     terminalSelection,
     Object.hashAll(terminalAnsiColors),
@@ -199,6 +205,7 @@ const TerminalSettings _defaultTerminalSettings = TerminalSettings(
   scrollbackLines: 10000,
   copyOnSelect: false,
   bellMode: BellMode.visual,
+  linkClickModifier: LinkClickModifier.ctrl,
   terminalForeground: Color(0xFFD8D8D8),
   terminalSelection: Color(0xFF3A6EA5),
   terminalAnsiColors: _defaultAnsiColors,
@@ -320,6 +327,7 @@ class TerminalViewState extends State<TerminalView> {
   StreamSubscription<String>? _clipSub;
   StreamSubscription<void>? _clipLoadSub;
   StreamSubscription<void>? _bellSub;
+  StreamSubscription<String>? _notifySub;
 
   // PTY output is coalesced into [_outputBuffer] and flushed once per
   // [_flushInterval] so a `cat` of a large file or a verbose build log
@@ -471,6 +479,13 @@ class TerminalViewState extends State<TerminalView> {
   // and the SystemSound playback (audible). `none` zeroes both.
   BellMode _bellMode = BellMode.visual;
 
+  // Cached link-click modifier — re-read on every primary-click via
+  // the package's `onTapDown` callback. `ctrl` is handled by the
+  // package itself (it calls `widget.onLinkActivate` on Ctrl/Cmd +
+  // left-click over a hyperlink cell); the other options are
+  // implemented locally in [_onTapDown].
+  LinkClickModifier _linkClickModifier = LinkClickModifier.ctrl;
+
   // The last selection text we saw committed to the engine's primary
   // buffer. Used to detect "selection ended AND new text was captured"
   // without having to diff against the entire selection history.
@@ -498,6 +513,7 @@ class TerminalViewState extends State<TerminalView> {
     _fontSize = _defaultFontSize;
     _copyOnSelect = _settings!.copyOnSelect;
     _bellMode = _settings!.bellMode;
+    _linkClickModifier = _settings!.linkClickModifier;
     if (_log.isLoggable(Level.FINE)) {
       _log.fine(
         'initState: creating engine (program="${widget.surface.program}", cwd=${widget.workingDirectory})',
@@ -533,6 +549,12 @@ class TerminalViewState extends State<TerminalView> {
         SystemSound.play(SystemSoundType.alert);
       }
     });
+    // OSC 9 (iTerm2) / OSC 777 (urxvt) desktop notifications. The
+    // engine surfaces both as a single `notify` event whose payload
+    // is either the body (OSC 9) or "title\0body" (OSC 777); we
+    // decompose and surface as a SnackBar. Without this listener,
+    // every `printf '\e]9;build done\a'` was silently dropped.
+    _notifySub = _engine.notify.listen(_onNotify);
     // copyOnSelect: listen to the controller so we can copy to the system
     // clipboard whenever a drag-selection ends with new text. The
     // controller's primary buffer is the engine's captured selection text;
@@ -677,9 +699,15 @@ class TerminalViewState extends State<TerminalView> {
         duration: bellDurationMs,
         animation: 'linear',
       ),
-      // Disable the engine's own OSC 52 copy/paste so the host (Flutter's
-      // Clipboard) owns clipboard I/O end-to-end via _clipSub / _clipLoadSub.
-      terminal: const fa.TerminalBehaviorConfig(osc52: fa.Osc52Mode.disabled),
+      // OSC 52 passthrough — let TUIs (opencode, tmux, neovim, zsh)
+      // copy / paste via the standard escape sequence. The engine
+      // raises clipboardStore / clipboardLoad events; our _clipSub /
+      // _clipLoadSub bridge those to Flutter's system Clipboard, so
+      // the host still owns the actual I/O end-to-end. Setting this
+      // to `disabled` breaks the bridge — the engine silently drops
+      // the OSC 52 bytes and the host listeners never fire, which is
+      // why opencode's "copied to clipboard" toast used to lie.
+      terminal: const fa.TerminalBehaviorConfig(osc52: fa.Osc52Mode.copyPaste),
     );
   }
 
@@ -727,6 +755,7 @@ class TerminalViewState extends State<TerminalView> {
     // or selection-end uses the latest snapshot.
     _copyOnSelect = s.copyOnSelect;
     _bellMode = s.bellMode;
+    _linkClickModifier = s.linkClickModifier;
 
     // Sync font size + baseline (zoom-reset target) so subsequent
     // builds pass the right `textStyle.size` to fa.TerminalView.
@@ -1024,6 +1053,63 @@ class TerminalViewState extends State<TerminalView> {
     }
   }
 
+  /// Secondary link-open path for non-Ctrl link modifiers.
+  ///
+  /// The package's built-in handler fires on Ctrl/Cmd + left-click and
+  /// calls `widget.onLinkActivate` (which we wire to [_onLinkActivate]
+  /// unconditionally — so Ctrl+click always works as a fallback). When
+  /// the user picks Alt / Shift / None we additionally intercept here,
+  /// look up the hyperlink at the tapped cell, and open it ourselves.
+  ///
+  /// Caveat: the package's selection path runs after `onTapDown`, so a
+  /// single-cell empty selection may briefly anchor at the click site
+  /// for the Alt/Shift/None cases. Visually invisible — selection only
+  /// paints when non-empty — and the trade-off for letting the user
+  /// pick a modifier that doesn't collide with shell bindings.
+  void _onTapDown(TapDownDetails details, fa.CellOffset cell) {
+    if (_linkClickModifier == LinkClickModifier.ctrl) return;
+    final hw = HardwareKeyboard.instance;
+    final modifierSatisfied = switch (_linkClickModifier) {
+      LinkClickModifier.ctrl => false, // unreachable — package handles
+      LinkClickModifier.alt => hw.isAltPressed,
+      LinkClickModifier.shift => hw.isShiftPressed,
+      LinkClickModifier.none => true,
+    };
+    if (!modifierSatisfied) return;
+    final uri = _engine.hyperlinkAt(cell.row, cell.column);
+    if (uri != null) _onLinkActivate(uri);
+  }
+
+  /// OSC 9 / OSC 777 desktop notification handler.
+  ///
+  /// The engine collapses both protocols into a single string payload:
+  /// OSC 9 (iTerm2: `ESC ] 9 ; <body> ST`) sends just the body, while
+  /// OSC 777 (urxvt: `ESC ] 777 ; notify ; <title> ; <body> ST`) sends
+  /// `"title\0body"`. We split on the NUL, default the title when
+  /// absent, and surface via [ScaffoldMessenger] SnackBar — adding a
+  /// Windows native toast plugin would be a separate feature.
+  void _onNotify(String payload) {
+    if (!mounted) return;
+    String title;
+    String body;
+    final zeroIdx = payload.indexOf('\x00');
+    if (zeroIdx >= 0) {
+      title = payload.substring(0, zeroIdx);
+      body = payload.substring(zeroIdx + 1);
+    } else {
+      title = '';
+      body = payload;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(title.isEmpty ? body : '$title: $body'),
+        duration: const Duration(seconds: 4),
+      ),
+    );
+  }
+
   // ── Clipboard / readline shortcuts ────────────────────────────────
 
   void _sendCtrlU() => _engine.write(Uint8List.fromList([0x15]));
@@ -1300,6 +1386,7 @@ class TerminalViewState extends State<TerminalView> {
                 onViewportResize: _onViewportResize,
                 onSecondaryTapUp: _onSecondaryTapUp,
                 onLinkActivate: _onLinkActivate,
+                onTapDown: _onTapDown,
               ),
             ),
             SignalBuilder(
@@ -1425,6 +1512,7 @@ class TerminalViewState extends State<TerminalView> {
     _clipSub?.cancel();
     _clipLoadSub?.cancel();
     _bellSub?.cancel();
+    _notifySub?.cancel();
     _controller.removeListener(_onControllerChanged);
     _engine.title.removeListener(_syncTitle);
     _engine.workingDir.removeListener(_syncPwd);

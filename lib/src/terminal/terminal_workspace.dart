@@ -260,6 +260,8 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       scrollbackLines: runtime.store.get<int>(t.scrollbackLines),
       copyOnSelect: runtime.store.get<bool>(t.copyOnSelect),
       bellMode: runtime.store.get<BellMode>(t.bellMode),
+      linkClickModifier:
+          runtime.store.get<LinkClickModifier>(t.linkClickModifier),
       terminalForeground: palette.terminalForeground,
       terminalSelection: palette.terminalSelection,
       terminalAnsiColors: palette.terminalAnsiColors,
@@ -318,6 +320,11 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     _settingsSubs.add(
       runtime.store.watch<BellMode>(t.bellMode).listen((v) {
         applyAndMaybeNotify((s) => s.copyWith(bellMode: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<LinkClickModifier>(t.linkClickModifier).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(linkClickModifier: v));
       }),
     );
 

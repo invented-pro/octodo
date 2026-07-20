@@ -11,6 +11,19 @@ enum CursorStyle { block, underline, bar }
 
 enum BellMode { none, visual, sound }
 
+/// Modifier required to open an OSC 8 hyperlink with the mouse.
+///
+/// The flutter_alacritty package's default is Ctrl (or Cmd on macOS),
+/// mirrored here as [ctrl]. The other options let users pick a chord
+/// that doesn't collide with shell bindings — tmux prefixes with
+/// Ctrl+click in some configs, vim maps Ctrl+click to "jump to
+/// definition", and readline apps often bind it themselves.
+///
+/// [none] means a plain left-click on a link opens it directly; this
+/// still leaves Ctrl+click working (the package's built-in path) as a
+/// fallback so users don't lose the chord they may be used to.
+enum LinkClickModifier { ctrl, alt, shift, none }
+
 String _enumName(Enum e) => e.name;
 
 class SettingsCatalog {
@@ -92,6 +105,18 @@ class TerminalSettingsSection {
     icon: Icons.notifications_active,
   );
 
+  final linkClickModifier = EnumSetting<LinkClickModifier>(
+    'terminal.linkClickModifier',
+    defaultValue: LinkClickModifier.ctrl,
+    values: LinkClickModifier.values,
+    label: _enumName,
+    title: 'Open links with',
+    subtitle:
+        'Modifier key to open OSC 8 hyperlinks emitted by TUIs '
+        '(opencode, gh, lazygit, etc.). Ctrl+click is the package default.',
+    icon: Icons.link,
+  );
+
   Iterable<Setting<dynamic>> get all sync* {
     yield fontFamily;
     yield fontSize;
@@ -100,6 +125,7 @@ class TerminalSettingsSection {
     yield scrollbackLines;
     yield copyOnSelect;
     yield bellMode;
+    yield linkClickModifier;
   }
 }
 
