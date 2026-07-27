@@ -123,10 +123,23 @@ class TerminalWorkspace extends StatefulWidget {
   final void Function(String name)? onNameChanged;
   final void Function(bool active)? onActiveChanged;
 
-  /// Called when the last surface in the last container is closed —
-  /// the workspace becomes empty.  The parent (e.g. AppShell) is
-  /// expected to remove the workspace.  If null, the workspace is
-  /// left in an empty state.
+  /// Called when the user attempts to close the last surface in the
+  /// last container — the action that would empty the workspace.
+  /// The parent (e.g. AppShell) must show a workspace-close
+  /// confirmation dialog and return the user's answer. The terminal
+  /// tree is NOT torn down until this returns `true`; if the user
+  /// cancels, the workspace is left intact. Required.
+  ///
+  /// Separated from [onEmpty] so the prompt can run BEFORE any
+  /// state mutation: the previous design (tear down first, prompt
+  /// after) left the workspace in a rootless state if the user
+  /// cancelled, with no UI affordance to recover.
+  final Future<bool> Function() confirmCloseWorkspace;
+
+  /// Called AFTER the user has confirmed closing an empty workspace
+  /// (i.e. after [confirmCloseWorkspace] returned `true` and the
+  /// terminal tree has been disposed). The parent is expected to
+  /// remove the workspace entry — no further user prompt. Required.
   final VoidCallback? onEmpty;
 
   /// Whether this workspace is the one currently displayed by the
@@ -148,6 +161,7 @@ class TerminalWorkspace extends StatefulWidget {
     this.onClose,
     this.onNameChanged,
     this.onActiveChanged,
+    required this.confirmCloseWorkspace,
     this.onEmpty,
     this.isFocused = true,
   });
@@ -652,12 +666,14 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     if (_rootPane is PaneContainer) {
       // Single-pane workspace: the container holds only this surface.
       if ((_rootPane as PaneContainer).surfaces.length == 1) {
-        // Close the workspace.
-        _rootPane!.dispose();
-        _rootPane = null;
-        _focusedContainer = null;
-        setState(() {});
-        widget.onEmpty?.call();
+        // Closing the last terminal would empty the workspace. Ask
+        // the parent to confirm BEFORE mutating any state — if the
+        // user cancels, the workspace stays exactly as it was, with
+        // the terminal still alive. Without this gate, the previous
+        // behavior tore down the pane tree first, then prompted,
+        // and a cancelled prompt left the workspace in a rootless
+        // state with no way to spawn a new terminal.
+        _requestCloseEmptyWorkspace();
         return;
       }
       // Multiple surfaces in the single container: just remove this one.
@@ -689,6 +705,32 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       focusCurrentPane();
     });
+  }
+
+  /// Ask the parent to confirm closing the workspace whose last
+  /// terminal is being closed, then — if the user agrees — dispose
+  /// the (still-alive) tree and notify the parent via [onEmpty] so
+  /// it can drop the workspace entry. If the user cancels, the
+  /// state is untouched and the terminal keeps running.
+  ///
+  /// Note: a workspace with a multi-pane split tree always has at
+  /// least two terminal surfaces (one per leaf), so a "last
+  /// surface" case can only arise when the root is a single
+  /// [PaneContainer] with one tab. We don't need to recheck that
+  /// here — the caller already detected it.
+  Future<void> _requestCloseEmptyWorkspace() async {
+    final confirmed = await widget.confirmCloseWorkspace();
+    if (!confirmed || !mounted) return;
+    // Tree shape cannot have changed between the click and the
+    // dialog dismissal (no other code path mutates the root), but
+    // guard anyway so a disposed widget doesn't dereference null.
+    final root = _rootPane;
+    if (root is! PaneContainer || root.surfaces.length != 1) return;
+    root.dispose();
+    _rootPane = null;
+    _focusedContainer = null;
+    setState(() {});
+    widget.onEmpty?.call();
   }
 
   /// Pure helper: close [surface] in [owner] inside a multi-pane

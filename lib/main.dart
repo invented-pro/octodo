@@ -822,7 +822,6 @@ class _AppShellState extends State<AppShell>
       context: context,
       barrierDismissible: true,
       builder: (ctx) => AlertDialog(
-        backgroundColor: palette.dialogSurface,
         title: const Text('Close workspace?'),
         content: Text(
           isLast
@@ -858,7 +857,10 @@ class _AppShellState extends State<AppShell>
   /// Close the workspace at [index], but only after the user
   /// confirms via [_confirmClose]. Both the drawer's close button
   /// and the `Ctrl+Shift+W` keyboard shortcut flow through here so
-  /// neither can bypass the prompt.
+  /// Public workspace-close entry point. Shows the confirmation
+  /// dialog (drawer ×, `Ctrl+Shift+W`, and the last-terminal close
+  /// in a single-pane workspace all flow through here) and removes
+  /// the entry on confirm.
   ///
   /// Re-validates [index] after the dialog returns — the workspace
   /// list could have shifted while the dialog was up (e.g. another
@@ -866,23 +868,46 @@ class _AppShellState extends State<AppShell>
   /// captured in [build].
   Future<void> _closeWorkspace(int index) async {
     if (index < 0 || index >= _workspaces.length) return;
+    final confirmed = await _confirmWorkspaceClose(index);
+    if (!confirmed || !mounted) return;
+    _removeWorkspaceEntry(index);
+  }
+
+  /// Show the workspace-close confirmation for the workspace at
+  /// [index] and return the user's answer. Extracted from
+  /// [_closeWorkspace] so [TerminalWorkspace.confirmCloseWorkspace]
+  /// can ask the same question (with the same name/isLast
+  /// computation) when its last terminal is being closed — without
+  /// duplicating the dialog code or the dialog/context plumbing.
+  ///
+  /// Returns `false` on any error so the caller can short-circuit
+  /// the teardown.
+  Future<bool> _confirmWorkspaceClose(int index) async {
+    if (index < 0 || index >= _workspaces.length) return false;
     final ctx = _shellContext;
-    if (ctx == null || !mounted) return;
+    if (ctx == null || !mounted) return false;
     final ws = _workspaces[index];
     final isLast = _workspaces.length == 1;
-
-    bool confirmed;
     try {
-      confirmed = await _confirmClose(ctx, ws.name, isLast: isLast);
+      return await _confirmClose(ctx, ws.name, isLast: isLast);
     } catch (e, st) {
       _log.severe('Close confirmation dialog failed: $e\n$st');
-      return;
+      return false;
     }
-    if (!confirmed || !mounted) return;
+  }
 
-    // Re-validate in case the list shifted while the dialog was open.
+  /// Remove the workspace at [index] and rebuild. Caller is
+  /// responsible for confirming the user wants to close (either
+  /// via [_confirmWorkspaceClose] or because the caller already
+  /// confirmed some other way — e.g. the last-terminal close path
+  /// has already shown the dialog before invoking this).
+  ///
+  /// If [index] is out of range, returns silently. If the workspace
+  /// being removed is the only one, a fresh empty workspace is
+  /// created in its place so the app never ends up with zero
+  /// workspaces.
+  void _removeWorkspaceEntry(int index) {
     if (index < 0 || index >= _workspaces.length) return;
-
     if (_workspaces.length <= 1) {
       _workspaces.removeAt(index);
       _newWorkspace();
@@ -1061,7 +1086,6 @@ class _AppShellState extends State<AppShell>
       context: ctx,
       barrierDismissible: true,
       builder: (dctx) => AlertDialog(
-        backgroundColor: palette.dialogSurface,
         title: Text('Exit $kAppName?'),
         content: const Text(
           'All workspaces and shell sessions will be terminated.',
@@ -1197,7 +1221,16 @@ class _AppShellState extends State<AppShell>
                       name: _workspaces[i].name,
                       color: _workspaces[i].color,
                       availableShells: _shells ?? const <ShellProfile>[],
-                      onEmpty: () => _closeWorkspace(_currentIndex),
+                      // Last-terminal close in this workspace asks
+                      // the user first, then — only on confirm —
+                      // tears down the tree and removes the entry
+                      // directly (no second prompt). The drawer ×
+                      // and Ctrl+Shift+W paths still go through
+                      // [_closeWorkspace] which calls the same
+                      // confirm helper.
+                      confirmCloseWorkspace: () =>
+                          _confirmWorkspaceClose(_currentIndex),
+                      onEmpty: () => _removeWorkspaceEntry(_currentIndex),
                     ),
                 ],
               ),
