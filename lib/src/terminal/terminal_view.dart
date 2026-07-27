@@ -48,6 +48,7 @@ class TerminalSettings {
     required this.copyOnSelect,
     required this.bellMode,
     required this.linkClickModifier,
+    required this.notifyOnOsc9,
     required this.terminalForeground,
     required this.terminalSelection,
     required this.terminalAnsiColors,
@@ -62,6 +63,12 @@ class TerminalSettings {
   final bool copyOnSelect;
   final BellMode bellMode;
   final LinkClickModifier linkClickModifier;
+
+  /// Whether OSC 9 / OSC 777 desktop notifications emitted by the
+  /// terminal should be surfaced as a snackbar. See
+  /// `settings_catalog.notifyOnOsc9` for the rationale (off by
+  /// default because the iTerm2 state form is noisy).
+  final bool notifyOnOsc9;
 
   /// Default foreground color the alacritty renderer applies to cells
   /// with no explicit SGR foreground. Sourced from the active palette's
@@ -91,6 +98,7 @@ class TerminalSettings {
     bool? copyOnSelect,
     BellMode? bellMode,
     LinkClickModifier? linkClickModifier,
+    bool? notifyOnOsc9,
     Color? terminalForeground,
     Color? terminalSelection,
     List<Color>? terminalAnsiColors,
@@ -104,6 +112,7 @@ class TerminalSettings {
     copyOnSelect: copyOnSelect ?? this.copyOnSelect,
     bellMode: bellMode ?? this.bellMode,
     linkClickModifier: linkClickModifier ?? this.linkClickModifier,
+    notifyOnOsc9: notifyOnOsc9 ?? this.notifyOnOsc9,
     terminalForeground: terminalForeground ?? this.terminalForeground,
     terminalSelection: terminalSelection ?? this.terminalSelection,
     terminalAnsiColors: terminalAnsiColors ?? this.terminalAnsiColors,
@@ -122,6 +131,7 @@ class TerminalSettings {
           other.copyOnSelect == copyOnSelect &&
           other.bellMode == bellMode &&
           other.linkClickModifier == linkClickModifier &&
+          other.notifyOnOsc9 == notifyOnOsc9 &&
           other.terminalForeground == terminalForeground &&
           other.terminalSelection == terminalSelection &&
           _listEq(other.terminalAnsiColors, terminalAnsiColors));
@@ -137,6 +147,7 @@ class TerminalSettings {
     copyOnSelect,
     bellMode,
     linkClickModifier,
+    notifyOnOsc9,
     terminalForeground,
     terminalSelection,
     Object.hashAll(terminalAnsiColors),
@@ -206,6 +217,7 @@ const TerminalSettings _defaultTerminalSettings = TerminalSettings(
   copyOnSelect: false,
   bellMode: BellMode.visual,
   linkClickModifier: LinkClickModifier.ctrl,
+  notifyOnOsc9: false,
   terminalForeground: Color(0xFFD8D8D8),
   terminalSelection: Color(0xFF3A6EA5),
   terminalAnsiColors: _defaultAnsiColors,
@@ -486,6 +498,13 @@ class TerminalViewState extends State<TerminalView> {
   // implemented locally in [_onTapDown].
   LinkClickModifier _linkClickModifier = LinkClickModifier.ctrl;
 
+  // Cached OSC 9/777 notification toggle — read by [_onNotify] on
+  // every event so a user can flip the setting at runtime without
+  // restarting the terminal. Default off; some shells/frameworks
+  // emit a high rate of iTerm2 state-form payloads that produce
+  // snackbar spam.
+  bool _notifyOnOsc9 = false;
+
   // The last selection text we saw committed to the engine's primary
   // buffer. Used to detect "selection ended AND new text was captured"
   // without having to diff against the entire selection history.
@@ -514,6 +533,7 @@ class TerminalViewState extends State<TerminalView> {
     _copyOnSelect = _settings!.copyOnSelect;
     _bellMode = _settings!.bellMode;
     _linkClickModifier = _settings!.linkClickModifier;
+    _notifyOnOsc9 = _settings!.notifyOnOsc9;
     if (_log.isLoggable(Level.FINE)) {
       _log.fine(
         'initState: creating engine (program="${widget.surface.program}", cwd=${widget.workingDirectory})',
@@ -756,6 +776,7 @@ class TerminalViewState extends State<TerminalView> {
     _copyOnSelect = s.copyOnSelect;
     _bellMode = s.bellMode;
     _linkClickModifier = s.linkClickModifier;
+    _notifyOnOsc9 = s.notifyOnOsc9;
 
     // Sync font size + baseline (zoom-reset target) so subsequent
     // builds pass the right `textStyle.size` to fa.TerminalView.
@@ -1088,8 +1109,25 @@ class TerminalViewState extends State<TerminalView> {
   /// `"title\0body"`. We split on the NUL, default the title when
   /// absent, and surface via [ScaffoldMessenger] SnackBar — adding a
   /// Windows native toast plugin would be a separate feature.
+  ///
+  /// Gated by the `terminal.notifyOnOsc9` setting (default off) —
+  /// some shells and frameworks (PSReadLine on Linux, starship,
+  /// oh-my-zsh hooks, custom `PROMPT_COMMAND` / `preexec` scripts)
+  /// emit iTerm2-style state notifications on every prompt cycle
+  /// (`OSC 9 ; 4 ; <state> ST`, e.g. `4:1:6`). Those payloads are
+  /// not user-facing text, and showing them as snackbars produces
+  /// a noisy flood. flutter_alacritty surfaces the OSC 9 plain-text
+  /// form and the OSC 9 state form as the same `notify` event, so
+  /// we cannot tell them apart from the body — the setting is the
+  /// only safe control surface.
   void _onNotify(String payload) {
     if (!mounted) return;
+    if (!_notifyOnOsc9) {
+      if (_log.isLoggable(Level.FINE)) {
+        _log.fine('OSC 9/777 notification suppressed (setting off): "$payload"');
+      }
+      return;
+    }
     String title;
     String body;
     final zeroIdx = payload.indexOf('\x00');

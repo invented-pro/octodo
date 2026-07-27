@@ -262,6 +262,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       bellMode: runtime.store.get<BellMode>(t.bellMode),
       linkClickModifier:
           runtime.store.get<LinkClickModifier>(t.linkClickModifier),
+      notifyOnOsc9: runtime.store.get<bool>(t.notifyOnOsc9),
       terminalForeground: palette.terminalForeground,
       terminalSelection: palette.terminalSelection,
       terminalAnsiColors: palette.terminalAnsiColors,
@@ -325,6 +326,11 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     _settingsSubs.add(
       runtime.store.watch<LinkClickModifier>(t.linkClickModifier).listen((v) {
         applyAndMaybeNotify((s) => s.copyWith(linkClickModifier: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<bool>(t.notifyOnOsc9).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(notifyOnOsc9: v));
       }),
     );
 

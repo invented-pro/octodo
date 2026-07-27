@@ -117,6 +117,24 @@ class TerminalSettingsSection {
     icon: Icons.link,
   );
 
+  /// Show OSC 9 (iTerm2) / OSC 777 (urxvt) desktop notifications as
+  /// snackbars. Some shells and shell frameworks (PSReadLine on
+  /// Linux, starship, oh-my-zsh hooks) emit iTerm2-style "state"
+  /// notifications on every prompt — payloads like `4:1:6` that
+  /// aren't user-facing text and produce a flood of snackbars.
+  /// Default is `false` because the noise outweighs the signal for
+  /// most users; opt in if a particular tool relies on this channel.
+  final notifyOnOsc9 = BoolSetting(
+    'terminal.notifyOnOsc9',
+    defaultValue: false,
+    title: 'Desktop notifications from terminal',
+    subtitle:
+        'Show snackbars when a shell or tool emits an OSC 9 / OSC 777 '
+        'desktop notification (e.g. `printf \'\\e]9;build done\\a\'`). '
+        'Off by default because the iTerm2 state form is noisy.',
+    icon: Icons.notifications,
+  );
+
   Iterable<Setting<dynamic>> get all sync* {
     yield fontFamily;
     yield fontSize;
@@ -126,6 +144,7 @@ class TerminalSettingsSection {
     yield copyOnSelect;
     yield bellMode;
     yield linkClickModifier;
+    yield notifyOnOsc9;
   }
 }
 
