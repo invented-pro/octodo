@@ -94,6 +94,7 @@ const _pwshBlue = Color(0xFF0078D4); // Microsoft blue
 const _cmdAmber = Color(0xFFE8A838); // CMD amber
 const _wslGreen = Color(0xFF22C55E); // Linux green (Tux)
 const _bashOrange = Color(0xFFF05033); // Git orange-red
+const _nuTeal = Color(0xFF3FB28F); // Nushell prompt green
 
 // ── WSL distro icon resolution ───────────────────────────────────────
 
@@ -170,15 +171,16 @@ typedef WslDistroLister = List<String> Function(String wslPath);
 
 /// Detect available shells on this Windows host.
 ///
-/// Includes Command Prompt, Windows PowerShell, PowerShell 7, Git Bash, and
-/// one profile per installed WSL distro — when their executables are found.
-/// CMD and Windows PowerShell ship with virtually every desktop Windows
-/// install; the others are added only when detected at standard locations
-/// (PowerShell 7 also via PATH, WSL distros via `wsl.exe --list --quiet`).
+/// Includes Command Prompt, Windows PowerShell, PowerShell 7, Git Bash,
+/// Nushell, and one profile per installed WSL distro — when their
+/// executables are found. CMD and Windows PowerShell ship with virtually
+/// every desktop Windows install; the others are added only when detected
+/// at standard locations (PowerShell 7 and Nushell also via PATH, WSL
+/// distros via `wsl.exe --list --quiet`).
 ///
 /// Called once at app startup. The returned list is ordered by preference
 /// (PowerShell 7, Windows PowerShell, CMD, then each WSL distro, then Git
-/// Bash).
+/// Bash, then Nushell).
 ///
 /// This function is synchronous on purpose: the work is a handful of
 /// `File.existsSync` calls plus one `wsl.exe --list --quiet` (a fast
@@ -383,12 +385,108 @@ List<ShellProfile> detectShellsFrom({
     ));
   }
 
+  // ── Nushell (nu.exe) ───────────────────────────────────────────
+  //
+  // Nushell does not ship with Windows; it's an optional install via
+  // the official Nu MSI (`winget install Nushell.Nushell`), Scoop,
+  // `cargo install nu`, or a hand-placed binary. We mirror Windows
+  // Terminal's profile-generator strategy for PowerShell and probe
+  // each install method's well-known landing zone:
+  //
+  //   1. Per-user winget / AppX layout under
+  //      `%LocalAppData%\Programs\<app>\bin\` — the canonical path
+  //      `winget install Nushell.Nushell` produces (modern winget /
+  //      MSIX default puts the binary in the user's local Programs
+  //      directory rather than `%ProgramFiles%`).
+  //   2. Per-machine `%ProgramFiles%` — newer winget manifests and
+  //      the MSI installer put `nu.exe` directly under
+  //      `Program Files\nu\bin\nu.exe` (and its `Programs\nu\bin\`
+  //      sibling on some manifests).
+  //   3. Legacy Nu MSI under both `%ProgramFiles%` and
+  //      `%ProgramFiles(x86)%` — historically `%ProgramFiles%\Nushell\nu.exe`
+  //      (the x86 fallback here matters only for very old installs;
+  //      Nushell dropped 32-bit builds around 0.83, so the modern
+  //      `nu\bin\nu.exe` paths under x86 are intentionally absent).
+  //   4. Scoop shims: the scoop-installed nushell always exposes
+  //      `%USERPROFILE%\scoop\shims\nu.exe`.
+  //   5. `cargo install nu` puts `nu.exe` in `%USERPROFILE%\.cargo\bin\`,
+  //      a directory many users have on PATH themselves.
+  //   6. PATH — a last-resort probe for hand-installed / portable copies.
+  //
+  // The detection order matters: the winget per-user path is checked
+  // first because it's the most common modern install and the user's
+  // Nushell lives there. Each candidate is tried in turn; the first
+  // that exists wins, so we never emit duplicate entries even when
+  // multiple paths point at the same binary.
+  final localAppData = environment['LOCALAPPDATA'] ?? '';
+  final programFiles = environment['ProgramFiles'] ?? r'C:\Program Files';
+  final programFilesX86 =
+      environment['ProgramFiles(x86)'] ?? r'C:\Program Files (x86)';
+  final nuPaths = <String>[
+    if (localAppData.isNotEmpty)
+      '$localAppData\\Programs\\nu\\bin\\nu.exe',
+    if (userProfile.isNotEmpty)
+      '$userProfile\\.cargo\\bin\\nu.exe',
+    if (userProfile.isNotEmpty)
+      '$userProfile\\scoop\\shims\\nu.exe',
+    '$programFiles\\Programs\\nu\\bin\\nu.exe',
+    '$programFiles\\nu\\bin\\nu.exe',
+    '$programFiles\\Nushell\\nu.exe',
+    '$programFilesX86\\Nushell\\nu.exe',
+  ];
+  String? nu;
+  for (final candidate in nuPaths) {
+    if (fileExists(candidate)) {
+      nu = candidate;
+      break;
+    }
+  }
+  // PATH fallback covers `nu` on PATH via any installer we don't
+  // enumerate (e.g. a portable copy dropped into `C:\Tools\`).
+  // Unlike Git Bash we don't have to worry about a name collision
+  // with a system binary — `nu.exe` is unique to Nushell.
+  nu ??= _findOnPathIn('nu.exe', environment['PATH'] ?? '', fileExists);
+  if (nu != null) {
+    profiles.add(ShellProfile(
+      label: 'Nushell',
+      program: nu,
+      // Nushell has no `-NoLogo` analog — its startup banner is
+      // controlled by `config.show_banner` in the user's `config.nu`
+      // (out of scope for us to mutate). The valid startup flags are
+      // `-i` (interactive — default), `-l` (login shell — would
+      // disable login-time hooks users rely on), `-c <cmd>` (one-shot),
+      // `--no-config-file`, `--no-history`, `--no-std-lib`. None of
+      // them are appropriate defaults for a plain interactive tab.
+      // Pass no args so `nu` reads its config and history files the
+      // way the user already has them set up.
+      args: const [],
+      icon: Icons.terminal,
+      iconAsset: 'assets/icons/nushell.svg',
+      color: _nuTeal,
+      shortName: 'nu',
+      // Conservative default: false. Nushell's stable OSC 7 emission
+      // depends on prompt layout — the default `> ` prompt has no
+      // working-directory component, and users who customise their
+      // prompt must opt into OSC 7 (e.g. by emitting the form
+      // `\e]7;file://HOST/PATH\e\\` from a `before_prompt` hook). When
+      // we mistakenly report `true` for shells that don't emit OSC 7,
+      // the [showCwdInTitle] docstring warns the chip can render a
+      // garbled `nu C:/Users/...` string on every prompt redraw (the
+      // same class of bug PowerShell 7 / WindowsPowerShell / CMD
+      // avoid by defaulting to false). PowerShell-family / CMD / bash
+      // with PROMPT_COMMAND already cover the "cwd in chip" use
+      // case for most setups.
+      showCwdInTitle: false,
+    ));
+  }
+
   return profiles;
 }
 
 /// Search for [exeName] on a `PATH`-style string, testing each candidate with
-/// [fileExists]. Used by [detectShellsFrom] for the pwsh.exe PATH lookup; the
-/// probe is injected so the helper stays hermetic in tests.
+/// [fileExists]. Used by [detectShellsFrom] for the `pwsh.exe` and `nu.exe`
+/// PATH fallbacks; the probe is injected so the helper stays hermetic in
+/// tests.
 String? _findOnPathIn(String exeName, String pathVar, PathProbe fileExists) {
   if (pathVar.isEmpty) return null;
   for (final dir in pathVar.split(';')) {

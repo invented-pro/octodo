@@ -27,10 +27,18 @@ const _winPsPath =
 const _cmdPath = r'C:\Windows\System32\cmd.exe';
 const _wslPath = r'C:\Windows\System32\wsl.exe';
 const _gitBashPath = r'C:\Program Files\Git\bin\bash.exe';
+const _nuWingetPath =
+    r'C:\Users\tester\AppData\Local\Programs\nu\bin\nu.exe';
+const _nuCargoPath = r'C:\Users\tester\.cargo\bin\nu.exe';
+const _nuScoopPath = r'C:\Users\tester\scoop\shims\nu.exe';
+const _nuProgramFilesPath = r'C:\Program Files\nu\bin\nu.exe';
+const _nuLegacyPath = r'C:\Program Files\Nushell\nu.exe';
 
 const _baseEnv = <String, String>{
   'SystemRoot': r'C:\Windows',
   'USERPROFILE': r'C:\Users\tester', // test placeholder, never a real user
+  'LOCALAPPDATA': r'C:\Users\tester\AppData\Local',
+  'ProgramFiles': r'C:\Program Files',
   'PATH': '',
 };
 
@@ -68,10 +76,10 @@ void main() {
   });
 
   group('detectShellsFrom', () {
-    test('full host: pwsh → powershell → cmd → each distro → bash, in order', () {
+    test('full host: pwsh → powershell → cmd → each distro → bash → nu, in order', () {
       final profiles = detectShellsFrom(
         fileExists: _existsFor(const {
-          _pwshPath, _winPsPath, _cmdPath, _wslPath, _gitBashPath,
+          _pwshPath, _winPsPath, _cmdPath, _wslPath, _gitBashPath, _nuWingetPath,
         }),
         environment: _baseEnv,
         listWslDistros: (_) => const ['Ubuntu', 'Debian'],
@@ -80,7 +88,7 @@ void main() {
       // Family order must hold; distro shortNames are lowercased distro names.
       expect(
         profiles.map((p) => p.shortName).toList(),
-        ['pwsh', 'powershell', 'cmd', 'ubuntu', 'debian', 'bash'],
+        ['pwsh', 'powershell', 'cmd', 'ubuntu', 'debian', 'bash', 'nu'],
       );
       // Programs/args wired correctly per family.
       expect(profiles.firstWhere((p) => p.shortName == 'pwsh').program,
@@ -91,10 +99,18 @@ void main() {
       final bash = profiles.firstWhere((p) => p.shortName == 'bash');
       expect(bash.program, _gitBashPath);
       expect(bash.args, ['--login', '-i']);
+      final nu = profiles.firstWhere((p) => p.shortName == 'nu');
+      expect(nu.program, _nuWingetPath);
+      // Nushell has no `-NoLogo` analog; we deliberately launch with
+      // no args so the user's `config.nu` and history files drive
+      // the session. (Earlier drafts passed `--no-logo`, which Nu
+      // rejects with "Unknown flag '--no-logo'" and exits 1.)
+      expect(nu.args, isEmpty);
 
       // iconAsset wiring: PowerShell 7 + Windows PowerShell share one
       // SVG; CMD keeps the Material fallback (no asset); Git Bash gets
-      // the Git branch-mark; each WSL distro gets its own per-distro SVG.
+      // the Git branch-mark; each WSL distro gets its own per-distro SVG;
+      // Nushell gets its dedicated SVG.
       expect(profiles.firstWhere((p) => p.shortName == 'pwsh').iconAsset,
           'assets/icons/powershell.svg');
       expect(profiles.firstWhere((p) => p.shortName == 'powershell')
@@ -107,6 +123,12 @@ void main() {
           'assets/icons/ubuntu.svg');
       expect(profiles.firstWhere((p) => p.shortName == 'debian').iconAsset,
           'assets/icons/debian.svg');
+      expect(nu.iconAsset, 'assets/icons/nushell.svg');
+      // Conservative — see the comment at the profile construction
+      // site. PowerShell 7 / WindowsPowerShell / CMD all default to
+      // false for the same reason (OSC 7 form is not stable across
+      // all default prompt layouts).
+      expect(nu.showCwdInTitle, isFalse);
     });
 
     test('every WSL distro becomes its own profile with -d <distro> --cd ~', () {
@@ -135,8 +157,14 @@ void main() {
 
     test('shortNames stay unique across distros and the static shells', () {
       final profiles = detectShellsFrom(
-        fileExists: _existsFor(
-            const {_pwshPath, _winPsPath, _cmdPath, _wslPath, _gitBashPath}),
+        fileExists: _existsFor(const {
+          _pwshPath,
+          _winPsPath,
+          _cmdPath,
+          _wslPath,
+          _gitBashPath,
+          _nuWingetPath,
+        }),
         environment: _baseEnv,
         listWslDistros: (_) => const ['Ubuntu', 'Debian'],
       );
@@ -237,6 +265,146 @@ void main() {
       );
       final bash = profiles.where((p) => p.shortName == 'bash').single;
       expect(bash.program, _gitBashPath);
+    });
+
+    test('Nushell via winget per-user Programs layout (the modern install)', () {
+      // `winget install Nushell.Nushell` drops nu.exe at
+      // %LOCALAPPDATA%\Programs\nu\bin\nu.exe on a per-user install.
+      // No PATH entry is created, so this is the only probe that
+      // must succeed for the dropdown to surface Nushell on a
+      // freshly-installed box.
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {_cmdPath, _nuWingetPath}),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      final nu = profiles.where((p) => p.shortName == 'nu').single;
+      expect(nu.program, _nuWingetPath);
+      expect(nu.label, 'Nushell');
+      // Nushell has no `-NoLogo` analog; we deliberately launch with
+      // no args so the user's `config.nu` and history files drive
+      // the session. (Earlier drafts passed `--no-logo`, which Nu
+      // rejects with "Unknown flag '--no-logo'" and exits 1.)
+      expect(nu.args, isEmpty);
+    });
+
+    test('Nushell args must never include --no-logo (regression for early-exit bug)', () {
+      // `nu --no-logo` errors out with "Unknown flag '--no-logo'"
+      // and exits with code 1, which makes the spawned shell
+      // immediately die in the PTY (16 bytes of error output, then
+      // exit). Pin the contract here: a Nushell launch from octodo
+      // MUST NOT add `--no-logo` (or any other unknown flag) to the
+      // args.
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {_cmdPath, _nuWingetPath}),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      final nu = profiles.where((p) => p.shortName == 'nu').single;
+      expect(nu.args, isNot(contains('--no-logo')),
+          reason:
+              "nu rejects --no-logo as an unknown flag; the profile must "
+              "launch bare so the user's config.nu drives startup.");
+      expect(nu.args, isNot(contains('-NoLogo')),
+          reason:
+              "Nushell uses single-dash long options; do not borrow the "
+              "PowerShell-style -NoLogo flag.");
+    });
+
+    test('Nushell via cargo install is detected at .cargo\\bin', () {
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {_cmdPath, _nuCargoPath}),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      final nu = profiles.where((p) => p.shortName == 'nu').single;
+      expect(nu.program, _nuCargoPath);
+    });
+
+    test('Nushell via scoop shim is detected at scoop\\shims', () {
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {_cmdPath, _nuScoopPath}),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      final nu = profiles.where((p) => p.shortName == 'nu').single;
+      expect(nu.program, _nuScoopPath);
+    });
+
+    test('Nushell via per-machine Programs\\nu\\bin layout is detected', () {
+      // Older winget manifests and the MSI installer put nu.exe
+      // directly under Program Files in `nu\bin\nu.exe`.
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {_cmdPath, _nuProgramFilesPath}),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      final nu = profiles.where((p) => p.shortName == 'nu').single;
+      expect(nu.program, _nuProgramFilesPath);
+    });
+
+    test('Nushell via legacy Nu MSI layout is detected at Program Files\\Nushell', () {
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {_cmdPath, _nuLegacyPath}),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      final nu = profiles.where((p) => p.shortName == 'nu').single;
+      expect(nu.program, _nuLegacyPath);
+    });
+
+    test('Nushell on PATH is detected when no well-known path matches', () {
+      // Mimic a portable copy dropped into C:\Tools\nu\bin\nu.exe
+      // (a directory present on PATH, but not in our enumerate list).
+      const onPathDir = r'C:\Tools\nu\bin';
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {
+          _cmdPath,
+          r'C:\Tools\nu\bin\nu.exe',
+        }),
+        environment: const {
+          'SystemRoot': r'C:\Windows',
+          'USERPROFILE': r'C:\Users\tester',
+          'LOCALAPPDATA': r'C:\Users\tester\AppData\Local',
+          'ProgramFiles': r'C:\Program Files',
+          'PATH': onPathDir,
+        },
+        listWslDistros: (_) => const [],
+      );
+      final nu = profiles.where((p) => p.shortName == 'nu').single;
+      expect(nu.program, r'C:\Tools\nu\bin\nu.exe');
+    });
+
+    test('preferring the winget path avoids double-detecting nu.exe on PATH', () {
+      // Both well-known and PATH candidates resolve; only one
+      // profile must be emitted.
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {
+          _cmdPath,
+          _nuWingetPath,
+          r'C:\Tools\nu\bin\nu.exe',
+        }),
+        environment: const {
+          'SystemRoot': r'C:\Windows',
+          'USERPROFILE': r'C:\Users\tester',
+          'LOCALAPPDATA': r'C:\Users\tester\AppData\Local',
+          'ProgramFiles': r'C:\Program Files',
+          'PATH': r'C:\Tools\nu\bin',
+        },
+        listWslDistros: (_) => const [],
+      );
+      expect(profiles.where((p) => p.shortName == 'nu').length, 1);
+      expect(profiles.firstWhere((p) => p.shortName == 'nu').program,
+          _nuWingetPath);
+    });
+
+    test('no Nushell profile when nu.exe is absent everywhere', () {
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {_cmdPath}),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      expect(profiles.where((p) => p.shortName == 'nu'), isEmpty);
     });
 
     test('respects SystemRoot from the environment', () {

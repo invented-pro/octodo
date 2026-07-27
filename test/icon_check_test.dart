@@ -25,6 +25,7 @@ void main() {
     'oracle',
     'nixos',
     'wsl-fallback',
+    'nushell',
   ]) {
     testWidgets('$name.svg loads without throwing', (tester) async {
       await tester.pumpWidget(
