@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert' show utf8;
 import 'dart:typed_data' show BytesBuilder;
 
+import 'package:flutter/gestures.dart' show kPrimaryButton, PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_alacritty/flutter_alacritty.dart' as fa;
@@ -389,6 +390,32 @@ class TerminalViewState extends State<TerminalView> {
   static const _lineHeight = 1.2;
   @visibleForTesting
   static const safeFontFamilyFallback = 'Cascadia Code';
+
+  /// Bitmask of every DECSET mode that asks the terminal to capture
+  /// mouse input on behalf of the child application. Mirrors
+  /// `input/term_mode.dart::kModeMouseAny` from flutter_alacritty, which
+  /// is kept package-internal — we duplicate the literal here. If
+  /// alacritty's `TermMode` bit assignments change in the Rust engine,
+  /// change both sides together.
+  ///
+  ///   kModeMouseClick   = 1 << 3  = 0x0008   (DECSET 1000 — left-click reports)
+  ///   kModeMouseMotion  = 1 << 6  = 0x0040   (DECSET 1002 — click+drag reports)
+  ///   kModeMouseDrag    = 1 << 13 = 0x2000   (DECSET 1003 — any motion reports)
+  ///                                            ─────────────────
+  ///                                            sum      = 0x2048 (= 8264)
+  @visibleForTesting
+  static const int terminalAnyMouseModeFlag = 0x2048;
+
+  /// Pixel distance the pointer must travel from the down position
+  /// before [_TerminalDragSelector] treats it as a drag. Below this
+  /// threshold the inner `fa.TerminalView` owns the gesture
+  /// (single-click focus, link activation, double/triple-click
+  /// word/line selection). Alacritty itself uses a similar
+  /// gesture-recognizer threshold; 4px is wide enough to never trigger
+  /// on a stationary click but tight enough not to fight deliberate
+  /// drags.
+  @visibleForTesting
+  static const double terminalDragSelectThresholdPx = 4.0;
 
   /// Module-level cache: does [family] have a usable Latin 'W'
   /// advance? Keyed by the raw family string. The result is a
@@ -1362,69 +1389,85 @@ class TerminalViewState extends State<TerminalView> {
             // column wouldn't be clipped), then wraps the tree in a Padding.
             // Cascadia Code is roughly `fontSize * 0.6` wide per glyph at
             // the default lineHeight, so half-letter ≈ `fontSize * 0.3`.
+            //
+            // The outer `_TerminalDragSelector` wraps the view to restore
+            // Windows-Terminal-style "plain left-drag always selects" for
+            // child apps that have enabled VT mouse reporting (opencode,
+            // lazygit, vim-style TUIs). See the class doc on
+            // `_TerminalDragSelector` for the full rationale and the
+            // trade-off around stray mouse reports during the drag.
             Positioned.fill(
-              child: fa.TerminalView(
-                _engine,
+              child: _TerminalDragSelector(
+                engine: _engine,
                 controller: _controller,
-                focusNode: _focus,
-                autofocus: true,
-                padding: EdgeInsets.symmetric(horizontal: _fontSize * 0.3),
-                // Pass the actual font size/family to fa.TerminalView so its
-                // internal cell metrics match ours. Without this, fa.TerminalView
-                // uses `TerminalStyle.defaults()` (size: 14) regardless of our
-                // settings, which causes LayoutBuilder to compute a wrong grid
-                // size and triggers a cascading `_engine.resize` + `_pty.resize`
-                // on every settings change → some shells clear their screen on
-                // TIOCSWINSZ (cmd.exe, WSL bash with certain configs), wiping
-                // the visible content.
-                textStyle: fa.TerminalStyle(
-                  // Mirror `_buildConfig`: primary is the user's
-                  // pick when it has Latin 'W' advance, otherwise
-                  // pinned to safeFontFamilyFallback (Cascadia
-                  // Code). The non-Latin pick goes into the
-                  // fallback list for the script it actually
-                  // covers. See `hasLatinAdvance` for the
-                  // detection logic and the crash class this
-                  // avoids in `CellMetrics.measure`.
-                  family: effectiveLatinPrimary(fontFamilyPick),
-                  fallback: <String>[
-                    if (fontFamilyPick.isNotEmpty &&
-                        fontFamilyPick != safeFontFamilyFallback &&
-                        fontFamilyPick != effectiveLatinPrimary(fontFamilyPick))
-                      fontFamilyPick,
-                    _cjkFontFamily,
-                    'Microsoft YaHei UI',
-                    'SimSun',
-                    'Consolas',
-                    'monospace',
-                  ],
-                  size: _fontSize,
-                  lineHeight: _lineHeight,
+                fontFamily: effectiveLatinPrimary(fontFamilyPick),
+                fontSize: _fontSize,
+                lineHeight: _lineHeight,
+                cellPadding: _fontSize * 0.3,
+                child: fa.TerminalView(
+                  _engine,
+                  controller: _controller,
+                  focusNode: _focus,
+                  autofocus: true,
+                  padding: EdgeInsets.symmetric(horizontal: _fontSize * 0.3),
+                  // Pass the actual font size/family to fa.TerminalView so its
+                  // internal cell metrics match ours. Without this, fa.TerminalView
+                  // uses `TerminalStyle.defaults()` (size: 14) regardless of our
+                  // settings, which causes LayoutBuilder to compute a wrong grid
+                  // size and triggers a cascading `_engine.resize` + `_pty.resize`
+                  // on every settings change → some shells clear their screen on
+                  // TIOCSWINSZ (cmd.exe, WSL bash with certain configs), wiping
+                  // the visible content.
+                  textStyle: fa.TerminalStyle(
+                    // Mirror `_buildConfig`: primary is the user's
+                    // pick when it has Latin 'W' advance, otherwise
+                    // pinned to safeFontFamilyFallback (Cascadia
+                    // Code). The non-Latin pick goes into the
+                    // fallback list for the script it actually
+                    // covers. See `hasLatinAdvance` for the
+                    // detection logic and the crash class this
+                    // avoids in `CellMetrics.measure`.
+                    family: effectiveLatinPrimary(fontFamilyPick),
+                    fallback: <String>[
+                      if (fontFamilyPick.isNotEmpty &&
+                          fontFamilyPick != safeFontFamilyFallback &&
+                          fontFamilyPick !=
+                              effectiveLatinPrimary(fontFamilyPick))
+                        fontFamilyPick,
+                      _cjkFontFamily,
+                      'Microsoft YaHei UI',
+                      'SimSun',
+                      'Consolas',
+                      'monospace',
+                    ],
+                    size: _fontSize,
+                    lineHeight: _lineHeight,
+                  ),
+                  // Font zoom — let alacritty own it. We pass `defaultTerminalShortcuts`
+                  // plus our shift variants so users who hold Shift while pressing
+                  // `=` / `-` / `0` (yielding `+` / `_` / `)` on US layouts) get
+                  // zoom too. Alacritty's stock `defaultTerminalShortcuts` only
+                  // ships the unshifted forms (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`), so
+                  // without this merge a `Ctrl+Shift+=` press would fall through
+                  // to `encodeKey` and write `+` into the PTY.
+                  shortcuts: _alacrittyShortcutsWithShiftVariants,
+                  // Custom action handlers for intents whose behavior isn't
+                  // covered by `defaultTerminalActions` (see
+                  // [_alacrittyActions]). The `defaultTerminalActions`
+                  // merge happens inside fa.TerminalView's build, with
+                  // our overrides layered on top — the ScrollPageIntent
+                  // bundled handler keeps its 1-page behavior, and our
+                  // _ScrollFastIntent handler takes over for 5-page
+                  // scrolling.
+                  actions: _alacrittyActions,
+                  // Visual bell: fa.TerminalView paints its own overlay when
+                  // bellDuration > zero (driven by settings.bellMode == visual).
+                  bellDuration: _bellDurationForView,
+                  onViewportResize: _onViewportResize,
+                  onSecondaryTapUp: _onSecondaryTapUp,
+                  onLinkActivate: _onLinkActivate,
+                  onTapDown: _onTapDown,
                 ),
-                // Font zoom — let alacritty own it. We pass `defaultTerminalShortcuts`
-                // plus our shift variants so users who hold Shift while pressing
-                // `=` / `-` / `0` (yielding `+` / `_` / `)` on US layouts) get
-                // zoom too. Alacritty's stock `defaultTerminalShortcuts` only
-                // ships the unshifted forms (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`), so
-                // without this merge a `Ctrl+Shift+=` press would fall through
-                // to `encodeKey` and write `+` into the PTY.
-                shortcuts: _alacrittyShortcutsWithShiftVariants,
-                // Custom action handlers for intents whose behavior isn't
-                // covered by `defaultTerminalActions` (see
-                // [_alacrittyActions]). The `defaultTerminalActions`
-                // merge happens inside fa.TerminalView's build, with
-                // our overrides layered on top — the ScrollPageIntent
-                // bundled handler keeps its 1-page behavior, and our
-                // _ScrollFastIntent handler takes over for 5-page
-                // scrolling.
-                actions: _alacrittyActions,
-                // Visual bell: fa.TerminalView paints its own overlay when
-                // bellDuration > zero (driven by settings.bellMode == visual).
-                bellDuration: _bellDurationForView,
-                onViewportResize: _onViewportResize,
-                onSecondaryTapUp: _onSecondaryTapUp,
-                onLinkActivate: _onLinkActivate,
-                onTapDown: _onTapDown,
               ),
             ),
             SignalBuilder(
@@ -1562,6 +1605,312 @@ class TerminalViewState extends State<TerminalView> {
     // here or you'll dispose a node that the workspace may still hold
     // (and Flutter will assert on the double-free).
     super.dispose();
+  }
+}
+
+/// Wraps `fa.TerminalView` with a host-side drag-select overlay that
+/// restores Windows-Terminal-style "plain left-drag always selects"
+/// behavior when the child application has enabled VT mouse reporting
+/// (DECSET 1000 / 1002 / 1003). Without this overlay, drag-selecting
+/// in `opencode`, `lazygit`, `vim`-style TUIs, or any other app that
+/// has captured the mouse silently fails — `fa.TerminalView` converts
+/// every pointer event into a CSI mouse report and sends it through
+/// the PTY. The user releases the mouse and nothing is on the
+/// clipboard; they have to remember to Shift-drag (the only override
+/// flutter_alacritty ships out of the box).
+///
+/// We match Windows Terminal's policy, not alacritty's:
+///   * Plain left-drag → always starts a local selection.
+///   * Shift+left-drag → also selects (flutter_alacritty handles this;
+///     we leave it to the inner).
+///   * The child's mouse-reporting bit is honored for everything else
+///     (right-click menu actions, single-click focus, double/triple-
+///     click word/line selection, scroll reports on the alt-screen) —
+///     we don't change those.
+///
+/// Working within a package that owns the pointer pipeline means we
+/// can't suppress the inner `fa.TerminalView`'s Listener mid-gesture.
+/// While our synthetic selection is active, the inner still fires and
+/// continues forwarding stray mouse-move reports to the PTY. That's
+/// the acceptable cost — the TUI sees a noisy click+dragstream during
+/// the selection, but most TUI click handlers are idempotent and the
+/// user's intent (copy text) wins on release.
+class _TerminalDragSelector extends StatefulWidget {
+  const _TerminalDragSelector({
+    required this.engine,
+    required this.controller,
+    required this.fontFamily,
+    required this.fontSize,
+    required this.lineHeight,
+    required this.cellPadding,
+    required this.child,
+  });
+
+  final fa.TerminalEngine engine;
+  final fa.TerminalController controller;
+  final String fontFamily;
+  final double fontSize;
+  final double lineHeight;
+
+  /// Horizontal padding the wrapped `fa.TerminalView` applies via its
+  /// own `widget.padding` (which octodo passes as
+  /// `EdgeInsets.symmetric(horizontal: _fontSize * 0.3)`). Our outer
+  /// `Listener` sits OUTSIDE that `Padding` in the render tree, so the
+  /// `localPosition` we receive is measured from the outer-box origin
+  /// — pre-padding. We must subtract this before dividing by cell
+  /// width, or every column we compute is shifted ~half a cell to the
+  /// right of the cell the inner widget would report for the same
+  /// physical pixel.
+  final double cellPadding;
+
+  final Widget child;
+
+  @override
+  State<_TerminalDragSelector> createState() => _TerminalDragSelectorState();
+}
+
+class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
+  Offset? _downAt;
+  bool _dragging = false;
+  double _cellWidth = 0;
+  double _cellHeight = 0;
+
+  @override
+  void didUpdateWidget(covariant _TerminalDragSelector oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Cache invalidation: when the host rebuilds us with a new font
+    // size/family/line-height (settings change), the cached metrics are
+    // stale. The inner `fa.TerminalView` re-measures its own CellMetrics
+    // on the same change, and if we don't follow, our `_pixelToCell`
+    // math drifts proportionally to the size delta — every column we
+    // report is increasingly wrong as the user zooms or switches fonts.
+    //
+    // Note: in-package zoom (Ctrl+= / Ctrl+- inside fa.TerminalView) does
+    // NOT rebuild us — `_fontSize` stays at the pre-zoom value — so this
+    // path can't fix that case. That's a known limitation; fixing it
+    // would require either exposing the live font-size back out of the
+    // package or moving the host to own zoom entirely.
+    if (oldWidget.fontSize != widget.fontSize ||
+        oldWidget.lineHeight != widget.lineHeight ||
+        oldWidget.fontFamily != widget.fontFamily) {
+      _cellWidth = 0;
+      _cellHeight = 0;
+    }
+  }
+
+  /// Lazily measure the cell dimensions used to convert hit-test pixels
+  /// to grid (row, col). Mirrors flutter_alacritty's
+  /// `render/cell_metrics.dart::CellMetrics.measure` (which is
+  /// package-internal — `render/cell_metrics.dart` isn't exported from
+  /// the public API, so we duplicate the seven-line TextPainter dance
+  /// locally). `sample = 20` matches the package's default — wide enough
+  /// to average out kerning noise, cheap enough to do once per terminal.
+  void _ensureMetrics() {
+    if (_cellWidth > 0) return;
+    // Match the inner widget's TextStyle construction EXACTLY:
+    // `config/terminal_config.dart::TerminalStyle.textStyle` does
+    // `TextStyle(height: font.lineHeight)` — the multiplier (1.2),
+    // NOT the absolute pixel height. An earlier version of this code
+    // passed `lineHeight / fontSize`, which produced ~0.086 and made
+    // every cell measure 1.0 pixels tall — every drag landed on the
+    // bottom row and `selectionText` returned the same string each
+    // time, so `copyOnSelect` saw `primary == _lastPrimary` and skipped
+    // every clipboard write after the first.
+    final style = TextStyle(
+      fontFamily: widget.fontFamily,
+      fontSize: widget.fontSize,
+      height: widget.lineHeight,
+    );
+    const sample = 20;
+    final tp = TextPainter(
+      text: TextSpan(text: 'W' * sample, style: style),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    _cellWidth = tp.width / sample;
+    _cellHeight = tp.height;
+  }
+
+  /// Convert a Listener-local pixel position into (row, col,
+  /// rightHalf) hit-test coordinates, mirroring the inner
+  /// `fa.TerminalView`'s `_cellAt` in
+  /// `flutter_alacritty/lib/ui/terminal_view.dart`.
+  ///
+  /// Coordinate-space caveat (review-driven): our outer `Listener`
+  /// sits OUTSIDE the inner `fa.TerminalView`'s `Padding` widget in
+  /// the render tree. Flutter's `RenderPadding` translates its
+  /// child's coordinate space for both paint and hit-test, so the
+  /// `localPosition` we receive in our `onPointerDown/Move/Up` is
+  /// measured from the OUTER box's top-left, NOT from where cells
+  /// actually start painting. The inner `_cellAt` doesn't need to
+  /// subtract anything because its `e.localPosition` is already in
+  /// the post-padding (inner) coordinate space.
+  ///
+  /// We must therefore subtract `widget.cellPadding` (= `_fontSize *
+  /// 0.3`) before dividing by cell width, otherwise we report cell
+  /// `floor(outer.dx / cellWidth)` when the real cell is
+  /// `floor((outer.dx - cellPadding) / cellWidth)` — about half a
+  /// cell off at default settings.
+  ///
+  /// Other adjustments mirror the package's hit-test exactly:
+  ///   * subtract `_grid.scrollFraction` vertically — sub-cell scroll
+  ///     shifts content down by `scrollFraction * cellHeight`, so
+  ///     hit-testing must undo that to land on the row the user sees.
+  ///   * clamp to the live grid size so off-grid drags don't bleed.
+  ///   * early-return `(0, 0, false)` when grid isn't yet sized
+  ///     (engine feed before first resize) — `clamp(0, -1)` would
+  ///     throw an `ArgumentError` and silently disable the Listener chain.
+  (int, int, bool) _pixelToCell(Offset local) {
+    final cols = widget.engine.grid.columns;
+    final rows = widget.engine.grid.rows;
+    if (cols <= 0 || rows <= 0 || _cellWidth <= 0 || _cellHeight <= 0) {
+      return (0, 0, false);
+    }
+    final x = local.dx - widget.cellPadding;
+    final scrollFraction = widget.engine.grid.scrollFraction;
+    final yRows = (local.dy / _cellHeight) - scrollFraction;
+    final col = (x / _cellWidth).floor().clamp(0, cols - 1);
+    final row = yRows.floor().clamp(0, rows - 1);
+    final rightHalf = (x / _cellWidth) - col > 0.5;
+    return (row, col, rightHalf);
+  }
+
+  void _onPointerDown(PointerDownEvent e) {
+    if (e.kind != PointerDeviceKind.mouse) return;
+    if ((e.buttons & kPrimaryButton) == 0) return;
+    // We don't start a selection here on purpose: we don't yet know
+    // whether the gesture will become a click (inner handles) or a
+    // drag (we take over). We only record the press position so a
+    // subsequent move can compute distance-from-down and the origin
+    // cell for the eventual selection start.
+    _ensureMetrics();
+    _downAt = e.localPosition;
+  }
+
+  void _onPointerMove(PointerMoveEvent e) {
+    if (e.kind != PointerDeviceKind.mouse) return;
+    final downAt = _downAt;
+    if (downAt == null) return;
+    if ((e.buttons & kPrimaryButton) == 0) return;
+
+    final delta = (e.localPosition - downAt).distance;
+    if (delta < TerminalViewState.terminalDragSelectThresholdPx) return;
+
+    // Skip intervention if the inner `fa.TerminalView` is already happy:
+    //   * no VT mouse reporting — plain drag is already a local
+    //     selection, our overlay would just duplicate the engine
+    //     work on the same cell.
+    //   * Shift held — the inner's `localSelect` predicate includes
+    //     Shift, so the inner already handles this case; overriding
+    //     would fight the engine's click-count state.
+    final modeFlags = widget.engine.grid.modeFlags;
+    final mouseEnabled = (modeFlags &
+            TerminalViewState.terminalAnyMouseModeFlag) !=
+        0;
+    if (!mouseEnabled) {
+      return;
+    }
+    if (HardwareKeyboard.instance.isShiftPressed) return;
+
+    // If this drag is already ours (we've called selectionStart and
+    // are mid-selection), the only work is updating the cell to the
+    // current cursor. We deliberately don't use
+    // `controller.selectionActive` to gate this — our own call to
+    // selectionStart flips that flag true, and the prior
+    // `if (selectionActive) return;` short-circuited every move past
+    // the first, painting the selection at the down cell but never
+    // extending it. Tracking ownership with the local `_dragging`
+    // flag alone keeps consecutive moves flowing to selectionUpdate.
+    if (_dragging) {
+      final cur = _pixelToCell(e.localPosition);
+      widget.controller.selectionUpdate(cur.$1, cur.$2, cur.$3);
+      return;
+    }
+
+    // First qualifying move of this drag. Clear any pinned prior
+    // selection before starting ours: `controller.selectionActive`
+    // stays true across drags (neither capturePrimary nor selectionStart
+    // resets it; only clearSelection does). Without this, the Rust
+    // side appends/range-merges instead of replacing, and the user
+    // sees a stale highlight composited with the new drag.
+    if (widget.controller.selectionActive) {
+      widget.controller.clearSelection();
+    }
+
+    // Start a fresh selection: anchor at the down cell, then immediately
+    // extend to the current cell so the user sees a one-character
+    // selection on the first qualifying move (rather than a single
+    // pixel highlighting the down cell until the next move).
+    final start = _pixelToCell(downAt);
+    widget.controller.selectionStart(
+      start.$1,
+      start.$2,
+      start.$3,
+      0,
+    );
+    _dragging = true;
+    final cur = _pixelToCell(e.localPosition);
+    widget.controller.selectionUpdate(cur.$1, cur.$2, cur.$3);
+  }
+
+  void _onPointerUp(PointerUpEvent e) {
+    if (e.kind != PointerDeviceKind.mouse) return;
+    if (_downAt == null) return;
+    if (_dragging) {
+      _dragging = false;
+      // Mirror what the inner `fa.TerminalView` does on a real local
+      // selection end (its `_onPointerUp` calls `capturePrimary()`
+      // when `_selecting` is true). That commits the captured text
+      // to the controller's primary buffer, fires `notifyListeners`,
+      // and — because octodo's `TerminalView._onControllerChanged`
+      // listens for that — writes the selection to the system
+      // clipboard when `copyOnSelect` is on.
+      widget.controller.capturePrimary();
+      // Clear the engine selection immediately after capture. Without
+      // this, the visual highlight persists after release AND
+      // `_engine.selectionText()` keeps returning the captured text —
+      // which routes octodo's right-click handler
+      // (`_onSecondaryTapUp`, alacritty's "copy if selection, else
+      // paste" convention) into the COPY branch on every subsequent
+      // right-click, breaking right-click paste.
+      //
+      // In mouse-reporting-OFF mode the user can left-click to clear
+      // the lingering selection before right-clicking; in
+      // mouse-reporting-ON mode (the only path this overlay runs in)
+      // left-click goes to the TUI as a VT mouse report and doesn't
+      // touch our local selection, so the user has no way out. Clearing
+      // here is the targeted fix. The captured text is already in
+      // `_controller.primary` and the system clipboard (when
+      // `copyOnSelect` is on), so the visible highlight has done its
+      // job. Ctrl+Shift+V paste keeps working because it reads the
+      // clipboard, not the engine selection.
+      widget.controller.clearSelection();
+    }
+    _downAt = null;
+  }
+
+  void _onPointerCancel(PointerCancelEvent e) {
+    // Window blur, OS-level gesture cancellation, or the platform
+    // taking the pointer away (e.g. another app demands capture).
+    // Drop our drag state without firing `capturePrimary` — the
+    // selection is incomplete and the user can re-select from
+    // scratch. Also clear the engine so we don't leave a dangling
+    // highlight pinned to mid-drag cells.
+    if (_dragging) {
+      _dragging = false;
+      widget.controller.clearSelection();
+    }
+    _downAt = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      onPointerDown: _onPointerDown,
+      onPointerMove: _onPointerMove,
+      onPointerUp: _onPointerUp,
+      onPointerCancel: _onPointerCancel,
+      child: widget.child,
+    );
   }
 }
 
