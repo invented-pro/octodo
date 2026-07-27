@@ -40,14 +40,7 @@ class UpdatePopoverView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.palette;
     return Dialog(
-      backgroundColor: palette.dialogSurface,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: palette.outline, width: 1),
-      ),
       child: SizedBox(
         width: 380,
         child: AnimatedBuilder(

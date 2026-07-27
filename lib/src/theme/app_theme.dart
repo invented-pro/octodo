@@ -125,6 +125,27 @@ ThemeData buildAppTheme({required ThemePalette palette}) {
         side: BorderSide(color: palette.outline, width: 1),
       ),
     ),
+    // Unified dialog chrome — applied to every `Dialog` and
+    // `AlertDialog` in the app (close-workspace, quit, reset,
+    // settings, update popover). The accent-tinted shadow gives
+    // every overlay a soft blue halo so it pops off the chrome
+    // without needing a per-call site `boxShadow`; matching the
+    // existing insertion-line drag indicator at
+    // `lib/main.dart:1990` so the brand accent reads consistently
+    // across every "in front" surface. Elevation 12 is one tier
+    // above the drag feedback (`elevation: 3`-equivalent at
+    // `pane_tree.dart:1745`) so dialogs unambiguously read as
+    // closer to the viewer than a drag.
+    dialogTheme: DialogThemeData(
+      backgroundColor: palette.dialogSurface,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: palette.outline, width: 1),
+      ),
+      elevation: 12,
+      shadowColor: palette.accentBlue.withValues(alpha: 0.5),
+    ),
     splashFactory: NoSplash.splashFactory,
     hoverColor: hoverOverlay,
     highlightColor: palette.accentBlue.withValues(alpha: 0.15),

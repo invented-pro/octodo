@@ -84,12 +84,6 @@ class _SettingsDialogState extends State<SettingsDialog> {
     return FontFamilyCacheScope(
       notifier: _fontCache,
       child: Dialog(
-        backgroundColor: palette.dialogSurface,
-        surfaceTintColor: Colors.transparent,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: BorderSide(color: palette.outline, width: 1),
-        ),
         child: SizedBox(
           width: 900,
           height: 640,
@@ -439,7 +433,6 @@ class _Detail extends StatelessWidget {
                 final confirm = await showDialog<bool>(
                   context: context,
                   builder: (ctx) => AlertDialog(
-                    backgroundColor: palette.dialogSurface,
                     title: const Text('Reset all settings?'),
                     content: const Text(
                       'This clears every value in the settings file. Defaults will be used.',
