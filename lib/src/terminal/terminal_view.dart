@@ -19,6 +19,7 @@ import 'package:flutter_alacritty/flutter_alacritty.dart'
 import 'package:signals/signals_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../settings/settings_catalog.dart';
+import '../settings/settings_runtime.dart';
 import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart' show Surface;
@@ -342,6 +343,17 @@ class TerminalViewState extends State<TerminalView> {
   StreamSubscription<void>? _bellSub;
   StreamSubscription<String>? _notifySub;
 
+  /// Subscriptions to the backdrop settings. The effective background
+  /// alpha (frost level while frosted, opacity otherwise) is a
+  /// paint-level concern — it tells the alacritty grid to leave its
+  /// default-background cells transparent below 1.0 — so unlike the
+  /// engine settings we *do* rebuild the widget to hand the new value
+  /// to `fa.TerminalView`.
+  StreamSubscription<double>? _opacitySub;
+  StreamSubscription<bool>? _frostedSub;
+  StreamSubscription<double>? _frostLevelSub;
+  double _bgAlpha = 1.0;
+
   // PTY output is coalesced into [_outputBuffer] and flushed once per
   // [_flushInterval] so a `cat` of a large file or a verbose build log
   // doesn't flood the UI isolate with one FFI call per ConPTY read.
@@ -561,6 +573,34 @@ class TerminalViewState extends State<TerminalView> {
     _bellMode = _settings!.bellMode;
     _linkClickModifier = _settings!.linkClickModifier;
     _notifyOnOsc9 = _settings!.notifyOnOsc9;
+    // Background alpha is a General (appearance) concern, not part of
+    // TerminalSettings, so read it straight from the store and subscribe
+    // for live slider/toggle changes. The effective value is the frost
+    // level while frosted acrylic is on, the plain opacity otherwise.
+    final runtime = SettingsRuntime.instance;
+    double effectiveAlpha() {
+      final frosted =
+          runtime.store.get<bool>(runtime.catalog.general.frostedBackground);
+      return frosted
+          ? runtime.store.get<double>(runtime.catalog.general.frostLevel)
+          : runtime.store.get<double>(runtime.catalog.general.backgroundOpacity);
+    }
+
+    void onAlphaChanged(_) {
+      final a = effectiveAlpha();
+      if (mounted && a != _bgAlpha) setState(() => _bgAlpha = a);
+    }
+
+    _bgAlpha = effectiveAlpha();
+    _opacitySub = runtime.store
+        .watch<double>(runtime.catalog.general.backgroundOpacity)
+        .listen(onAlphaChanged);
+    _frostedSub = runtime.store
+        .watch<bool>(runtime.catalog.general.frostedBackground)
+        .listen(onAlphaChanged);
+    _frostLevelSub = runtime.store
+        .watch<double>(runtime.catalog.general.frostLevel)
+        .listen(onAlphaChanged);
     if (_log.isLoggable(Level.FINE)) {
       _log.fine(
         'initState: creating engine (program="${widget.surface.program}", cwd=${widget.workingDirectory})',
@@ -1443,6 +1483,12 @@ class TerminalViewState extends State<TerminalView> {
                     size: _fontSize,
                     lineHeight: _lineHeight,
                   ),
+                  // Background opacity: scales the alpha of the
+                  // terminal grid's background quads (see the
+                  // flutter_alacritty TerminalPainter) so the desktop
+                  // shows through while glyphs stay opaque. Defaults
+                  // to 1.0 (opaque).
+                  backgroundOpacity: _bgAlpha,
                   // Font zoom — let alacritty own it. We pass `defaultTerminalShortcuts`
                   // plus our shift variants so users who hold Shift while pressing
                   // `=` / `-` / `0` (yielding `+` / `_` / `)` on US layouts) get
@@ -1594,6 +1640,9 @@ class TerminalViewState extends State<TerminalView> {
     _clipLoadSub?.cancel();
     _bellSub?.cancel();
     _notifySub?.cancel();
+    _opacitySub?.cancel();
+    _frostedSub?.cancel();
+    _frostLevelSub?.cancel();
     _controller.removeListener(_onControllerChanged);
     _engine.title.removeListener(_syncTitle);
     _engine.workingDir.removeListener(_syncPwd);

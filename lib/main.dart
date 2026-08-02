@@ -23,6 +23,7 @@ import 'src/update/update_state.dart';
 import 'src/theme/app_theme.dart';
 import 'src/theme/palette_context.dart';
 import 'src/theme/palettes.dart';
+import 'src/window/window_effects.dart';
 import 'ui/settings/settings_dialog.dart';
 import 'ui/update/update_pill.dart';
 
@@ -53,12 +54,26 @@ final Logger _log = moduleLogger('main');
 /// Always tracks the active palette's `surface0` — the previous
 /// `terminal.backgroundColor` user override has been removed (it
 /// defeated the "theme change retints the terminal" goal, since an
-/// explicit override always won over the palette).
+/// explicit override always won over the palette). When
+/// `appearance.backgroundOpacity` is below 1.0 (or frosted acrylic is
+/// on) this returns [Colors.transparent] so the native window lets the
+/// desktop through; `_OctodoAppState` then layers the acrylic blur on
+/// top when frosted.
 Color get kTerminalBackground {
-  final store = SettingsRuntime.instance.store;
-  final catalog = SettingsRuntime.instance.catalog;
-  return AppPalettes.byId(store.get(catalog.general.themeName)).surface0;
+  final runtime = SettingsRuntime.instance;
+  final store = runtime.store;
+  final catalog = runtime.catalog;
+  final palette = AppPalettes.byId(store.get(catalog.general.themeName));
+  final opacity = store.get<double>(catalog.general.backgroundOpacity);
+  final frosted = store.get<bool>(catalog.general.frostedBackground);
+  return _windowBackground(palette, opacity, frosted);
 }
+
+/// Native window background for [palette]: opaque `surface0` only when
+/// fully opaque AND not frosted; transparent otherwise (so the desktop
+/// is reachable behind the terminal grid / acrylic backdrop).
+Color _windowBackground(ThemePalette palette, double opacity, bool frosted) =>
+    (opacity >= 1.0 && !frosted) ? palette.surface0 : Colors.transparent;
 
 Future<void> main() async {
   // Helper-mode entry: octodo.exe was spawned with
@@ -190,38 +205,101 @@ class _OctodoAppState extends State<OctodoApp> {
   /// to repaint the window frame itself.
   StreamSubscription<String>? _themeSub;
 
+  /// Subscribes to the three backdrop settings (opacity / frosted /
+  /// frost level). Any change rebuilds the MaterialApp (so the
+  /// scaffold + chrome retint) and re-applies the native window
+  /// backdrop — acrylic blur when frosted, else the transparent /
+  /// opaque mode from `window_manager`.
+  StreamSubscription<double>? _opacitySub;
+  StreamSubscription<bool>? _frostedSub;
+  StreamSubscription<double>? _frostLevelSub;
+
   @override
   void initState() {
     super.initState();
     final catalog = SettingsRuntime.instance.catalog;
+    void onChanged(_) {
+      if (!mounted) return;
+      setState(() {});
+      _applyBackdrop();
+    }
+
     _themeSub = SettingsRuntime.instance.store
         .watch<String>(catalog.general.themeName)
-        .listen((_) {
-          if (mounted) setState(() {});
-        });
+        .listen(onChanged);
+    _opacitySub = SettingsRuntime.instance.store
+        .watch<double>(catalog.general.backgroundOpacity)
+        .listen(onChanged);
+    _frostedSub = SettingsRuntime.instance.store
+        .watch<bool>(catalog.general.frostedBackground)
+        .listen(onChanged);
+    _frostLevelSub = SettingsRuntime.instance.store
+        .watch<double>(catalog.general.frostLevel)
+        .listen(onChanged);
+    // Apply the saved backdrop (acrylic vs. plain) once the first frame
+    // is up — the initial WindowOptions background in main() only sets a
+    // flat color, and acrylic needs the window title (set via
+    // windowManager.setTitle) to be in place for `FindWindowW`.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _applyBackdrop());
+  }
+
+  /// Push the right native window backdrop for the live settings.
+  /// Frosted → acrylic blur of the desktop (tinted `surface0` at the
+  /// effective alpha). Otherwise → opaque `surface0` at full opacity,
+  /// transparent below it (`window_manager` maps `Colors.transparent`
+  /// to `ACCENT_ENABLE_TRANSPARENTGRADIENT`).
+  void _applyBackdrop() {
+    final runtime = SettingsRuntime.instance;
+    final store = runtime.store;
+    final catalog = runtime.catalog;
+    final palette = AppPalettes.byId(store.get(catalog.general.themeName));
+    final opacity = store.get<double>(catalog.general.backgroundOpacity);
+    final frosted = store.get<bool>(catalog.general.frostedBackground);
+    final frostLevel = store.get<double>(catalog.general.frostLevel);
+    final alpha = frosted ? frostLevel : opacity;
+    if (frosted) {
+      enableAcrylic(title: kAppName, tint: palette.surface0, alpha: alpha);
+    } else {
+      windowManager.setBackgroundColor(
+          _windowBackground(palette, opacity, frosted));
+    }
   }
 
   @override
   void dispose() {
     _themeSub?.cancel();
+    _opacitySub?.cancel();
+    _frostedSub?.cancel();
+    _frostLevelSub?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final runtime = SettingsRuntime.instance;
     final palette = AppPalettes.byId(
-      SettingsRuntime.instance.store.get(
-        SettingsRuntime.instance.catalog.general.themeName,
-      ),
+      runtime.store.get(runtime.catalog.general.themeName),
     );
+    final opacity =
+        runtime.store.get<double>(runtime.catalog.general.backgroundOpacity);
+    final frosted =
+        runtime.store.get<bool>(runtime.catalog.general.frostedBackground);
+    final frostLevel =
+        runtime.store.get<double>(runtime.catalog.general.frostLevel);
+    // Effective background alpha: frost level wins while frosted, the
+    // plain opacity slider otherwise. Drives the scaffold, chrome
+    // (via BackgroundAlphaExtension) and the grid's transparent mode.
+    final alpha = frosted ? frostLevel : opacity;
     // The same palette is provided to both `theme` and `darkTheme`;
     // Material picks which one to use based on `themeMode`, which
     // we derive from the palette's brightness.
     return MaterialApp(
       title: kAppName,
       debugShowCheckedModeBanner: false,
-      theme: buildAppTheme(palette: palette),
-      darkTheme: buildAppTheme(palette: palette),
+      theme: buildAppTheme(
+          palette: palette, backgroundOpacity: alpha, frosted: frosted),
+      darkTheme: buildAppTheme(
+          palette: palette, backgroundOpacity: alpha, frosted: frosted),
       themeMode: palette.brightness == Brightness.dark
           ? ThemeMode.dark
           : ThemeMode.light,
@@ -1296,11 +1374,17 @@ class _WorkspaceDrawer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    // Match the terminal background opacity so the whole window reads
+    // as one glassy surface. The effective alpha is published on the
+    // theme via [BackgroundAlphaExtension] (frost level when frosted,
+    // opacity otherwise) — see buildAppTheme.
+    final chromeAlpha =
+        Theme.of(context).extension<BackgroundAlphaExtension>()?.value ?? 1.0;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeInOut,
       width: collapsed ? _collapsedWidth : _expandedWidth,
-      color: palette.drawerSurface,
+      color: palette.drawerSurface.withValues(alpha: chromeAlpha),
       child: Column(
         children: [
           // Full-width toggle button (collapsed → chevron_right,

@@ -162,6 +162,49 @@ class GeneralSettingsSection {
     icon: Icons.palette,
   );
 
+  /// Opacity of the terminal / window background, 0.0 (fully
+  /// transparent) → 1.0 (fully opaque). Applied as an alpha
+  /// multiplier on the active palette's `surface0` — the same
+  /// value drives the alacritty renderer background, the Material
+  /// scaffold, and the native window background, so all three
+  /// agree (see [kTerminalBackground], [buildAppTheme] and
+  /// `TerminalSettings.backgroundColor`). Mirrors Alacritty's
+  /// `window.opacity`.
+  final backgroundOpacity = DoubleSetting(
+    'appearance.backgroundOpacity',
+    defaultValue: 0.9,
+    min: 0.0,
+    max: 1.0,
+    title: 'Background opacity',
+    subtitle: 'Transparency of the terminal background. Lower to see through.',
+    icon: Icons.opacity,
+  );
+
+  /// Native Windows acrylic (frosted-glass) blur of the desktop behind
+  /// the whole window. When on, the window backdrop is blurred instead
+  /// of sharp; [frostLevel] controls the tint strength. Implemented via
+  /// `SetWindowCompositionAttribute` (ACCENT_ENABLE_ACRYLICBLURBEHIND),
+  /// so Windows 10 1809+ / Windows 11 only — no-op elsewhere.
+  final frostedBackground = BoolSetting(
+    'appearance.frostedBackground',
+    defaultValue: false,
+    title: 'Frosted background',
+    subtitle: 'Blur the desktop behind the window (native acrylic).',
+    icon: Icons.blur_on,
+  );
+
+  /// Tint strength of the acrylic blur (0 = clear blur, 1 = opaque
+  /// tint). Only takes effect while [frostedBackground] is on.
+  final frostLevel = DoubleSetting(
+    'appearance.frostLevel',
+    defaultValue: 0.05,
+    min: 0.0,
+    max: 1.0,
+    title: 'Frost level',
+    subtitle: 'Tint strength of the acrylic blur (frosted background on).',
+    icon: Icons.blur_linear,
+  );
+
   final drawerDefaultCollapsed = BoolSetting(
     'appearance.drawerDefaultCollapsed',
     defaultValue: true,
@@ -186,6 +229,9 @@ class GeneralSettingsSection {
 
   Iterable<Setting<dynamic>> get all sync* {
     yield themeName;
+    yield backgroundOpacity;
+    yield frostedBackground;
+    yield frostLevel;
     yield drawerDefaultCollapsed;
     yield confirmOnExit;
   }

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path/path.dart' as p;
 import '../shortcuts/app_shortcuts.dart';
+import '../theme/app_theme.dart';
 import '../theme/palette_context.dart';
 import '../theme/palettes.dart';
 import 'terminal_view.dart';
@@ -1461,7 +1462,12 @@ class ContainerTabBarState extends State<_ContainerTabBar> {
 
     return Container(
       height: 30,
-      color: palette.surface2,
+      // Match the terminal background transparency (frost level when
+      // frosted, opacity otherwise) carried on the theme via
+      // [BackgroundAlphaExtension] so the tab bar goes glassy alongside
+      // the rest of the chrome.
+      color: palette.surface2.withValues(
+          alpha: Theme.of(context).extension<BackgroundAlphaExtension>()?.value ?? 1.0),
       child: Row(
         children: [
           Expanded(

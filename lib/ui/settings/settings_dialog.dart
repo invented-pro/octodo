@@ -492,6 +492,12 @@ class _Detail extends StatelessWidget {
     } else if (setting is IntSetting) {
       return IntInputTrailing(setting: setting, store: store);
     } else if (setting is DoubleSetting) {
+      // Background opacity & frost level read better as a live slider
+      // than a numeric stepper — dragging retints the app immediately.
+      if (setting.key == 'appearance.backgroundOpacity' ||
+          setting.key == 'appearance.frostLevel') {
+        return DoubleSliderTrailing(setting: setting, store: store);
+      }
       return DoubleInputTrailing(setting: setting, store: store);
     } else if (setting is StringSetting) {
       // Special-case the terminal font: a free-text field lets the

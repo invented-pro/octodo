@@ -16,6 +16,20 @@ import 'palettes.dart';
 /// the terminal background — the alacritty renderer reads it from
 /// the same palette via `TerminalSettings.backgroundColor`).
 ///
+/// [backgroundOpacity] (0.0–1.0) multiplies the alpha of the scaffold
+/// background so the desktop can show through when the user lowers
+/// the "Background opacity" slider. 1.0 (the default) leaves
+/// `palette.surface0` fully opaque.
+///
+/// [frosted] switches the scaffold to fully transparent — the native
+/// acrylic backdrop (see `window_effects.dart`) then supplies the blur
+/// + tint uniformly, so the Flutter layers (grid default backgrounds,
+/// drawer, tab bar) composite over frosted desktop without double
+/// tinting. [backgroundOpacity] still carries the effective alpha
+/// (frost level when frosted, opacity otherwise) and is published via
+/// [BackgroundAlphaExtension] so chrome widgets can track it without
+/// reading the settings store directly.
+///
 /// Hover state is intentionally aggressive: every focusable Material
 /// widget ([TextButton], [FilledButton], [IconButton], …) gets the
 /// palette's `hoverOverlay` tint instead of the M3 default `onSurface
@@ -24,14 +38,32 @@ import 'palettes.dart';
 /// [`SplashFactory`] is set to `NoSplash` so hover changes feel
 /// instant — splash animation delays the visible feedback and, on a
 /// dark theme, looks like a flicker rather than a hover.
-ThemeData buildAppTheme({required ThemePalette palette}) {
+ThemeData buildAppTheme({
+  required ThemePalette palette,
+  double backgroundOpacity = 1.0,
+  bool frosted = false,
+}) {
   final isDark = palette.brightness == Brightness.dark;
   final base = isDark ? ThemeData.dark(useMaterial3: true) : ThemeData.light(useMaterial3: true);
   final hoverOverlay = palette.hoverOverlay;
   final focusOverlay = palette.focusOverlay;
+  final alpha = backgroundOpacity.clamp(0.0, 1.0);
   return base.copyWith(
-    scaffoldBackgroundColor: palette.surface0,
-    extensions: [ThemePaletteExtension(palette)],
+    // The scaffold is the single uniform terminal background layer.
+    //  • Frosted: made fully transparent so the native acrylic backdrop
+    //    (blur + tint) shows through without double tinting.
+    //  • Plain: paints `surface0` at `backgroundOpacity` alpha so the
+    //    desktop (reached through the transparent-gradient native window)
+    //    shows through uniformly — including pane gutters / borders /
+    //    partial cells, which the alacritty grid no longer fills (its
+    //    default-background cells are left transparent in transparent
+    //    mode). The drawer / tab bar paint their own surfaces on top.
+    scaffoldBackgroundColor:
+        frosted ? Colors.transparent : palette.surface0.withValues(alpha: alpha),
+    extensions: [
+      ThemePaletteExtension(palette),
+      BackgroundAlphaExtension(alpha),
+    ],
     colorScheme: isDark
         ? ColorScheme.dark(
             primary: palette.accentBlue,
@@ -150,6 +182,29 @@ ThemeData buildAppTheme({required ThemePalette palette}) {
     hoverColor: hoverOverlay,
     highlightColor: palette.accentBlue.withValues(alpha: 0.15),
   );
+}
+
+/// Carries the effective background alpha (the frost level when
+/// [buildAppTheme] was called with `frosted: true`, the opacity
+/// otherwise) on the [ThemeData] so chrome widgets (drawer, tab bar)
+/// can render at the same translucency as the terminal background
+/// without each having to read the settings store. Installed by
+/// [buildAppTheme]; read via `Theme.of(context).extension<BackgroundAlphaExtension>()`.
+class BackgroundAlphaExtension extends ThemeExtension<BackgroundAlphaExtension> {
+  const BackgroundAlphaExtension(this.value);
+  final double value;
+
+  @override
+  BackgroundAlphaExtension copyWith({double? value}) =>
+      BackgroundAlphaExtension(value ?? this.value);
+
+  @override
+  BackgroundAlphaExtension lerp(
+      ThemeExtension<BackgroundAlphaExtension>? other, double t) {
+    if (other is! BackgroundAlphaExtension) return this;
+    return BackgroundAlphaExtension(
+        value + (other.value - value) * t);
+  }
 }
 
 // ── Legacy AppColors shim ───────────────────────────────────────────

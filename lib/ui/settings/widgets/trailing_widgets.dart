@@ -565,6 +565,108 @@ class _DoubleInputTrailingState extends State<DoubleInputTrailing> {
   }
 }
 
+// ── Double slider ───────────────────────────────────────────────────
+
+/// Slider for a bounded [DoubleSetting]. Reads/writes the store live
+/// (every drag tick commits), so opacity-style settings retint the
+/// app as the user drags. A compact percentage label follows the
+/// thumb so the exact value is always legible.
+class DoubleSliderTrailing extends StatefulWidget {
+  final DoubleSetting setting;
+  final SettingsStore store;
+
+  /// Number of discrete stops the slider snaps to. Defaults to 100
+  /// so a 0.0–1.0 range resolves to 1% increments.
+  final int divisions;
+
+  const DoubleSliderTrailing({
+    super.key,
+    required this.setting,
+    required this.store,
+    this.divisions = 100,
+  });
+
+  @override
+  State<DoubleSliderTrailing> createState() => _DoubleSliderTrailingState();
+}
+
+class _DoubleSliderTrailingState extends State<DoubleSliderTrailing> {
+  late double _value;
+  late final StreamSubscription<double> _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _value = widget.store.get(widget.setting);
+    _sub = widget.store.watch(widget.setting).listen((v) {
+      if (mounted && v != _value) setState(() => _value = v);
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub.cancel();
+    super.dispose();
+  }
+
+  String _format(double v) {
+    final pct = (v * 100).round().clamp(0, 100);
+    return '$pct%';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final min = widget.setting.min ?? 0.0;
+    final max = widget.setting.max ?? 1.0;
+    return Semantics(
+      label: widget.setting.title,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 130,
+            child: SliderTheme(
+              data: SliderThemeData(
+                trackHeight: 3,
+                thumbShape:
+                    const RoundSliderThumbShape(enabledThumbRadius: 7),
+                overlayShape:
+                    const RoundSliderOverlayShape(overlayRadius: 14),
+                activeTrackColor: palette.accentBlue,
+                inactiveTrackColor: palette.outline,
+                thumbColor: palette.accentBlue,
+              ),
+              child: Slider(
+                value: _value.clamp(min, max),
+                min: min,
+                max: max,
+                divisions: widget.divisions,
+                onChanged: (v) {
+                  setState(() => _value = v);
+                  widget.store.set(widget.setting, v);
+                },
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 38,
+            child: Text(
+              _format(_value),
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: palette.textSecondary,
+                fontSize: 11,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ── String text field ───────────────────────────────────────────────
 
 class StringTextFieldTrailing extends StatefulWidget {
