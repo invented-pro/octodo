@@ -752,11 +752,9 @@ class UpdateController {
     if (d == null) return;
     model.setInstalling();
 
-    await _spawnHelper(version: d.version, pid: pid);
+    final spawned = await _spawnHelper(version: d.version, pid: pid);
+    if (!spawned) return;
 
-    // Visible "Restarting to apply update…" affordance. The
-    // exit() below is unconditional — Flutter will tear down
-    // the next event-loop turn.
     await Future<void>.delayed(_kHelperStartupDelay);
 
     exit(0);
@@ -773,7 +771,7 @@ class UpdateController {
     return f.existsSync() ? f : null;
   }
 
-  Future<void> _spawnHelper({
+  Future<bool> _spawnHelper({
     required String version,
     required int pid,
   }) async {
@@ -792,7 +790,7 @@ class UpdateController {
             'Expected $_kHelperExeName next to octodo.exe at $installDir.',
         onDismiss: () => model.reset(),
       ));
-      return;
+      return false;
     }
     try {
       await Process.start(
@@ -805,6 +803,7 @@ class UpdateController {
         },
         mode: ProcessStartMode.detached,
       );
+      return true;
     } catch (e) {
       model.setError(UpdateErrorPayload(
         message: 'Could not start the update helper.',
@@ -816,6 +815,7 @@ class UpdateController {
         onRetry: applyDownloaded,
         onDismiss: () => model.reset(),
       ));
+      return false;
     }
   }
 

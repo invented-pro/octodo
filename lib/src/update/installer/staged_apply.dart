@@ -243,15 +243,64 @@ class StagedApply {
           backoff: backoff,
         );
       } else {
-        await _copyWithRetry(
-          src,
-          dst,
-          attempts: attempts,
-          backoff: backoff,
-        );
+        await _installFile(src, dst, attempts: attempts, backoff: backoff);
       }
     }
   }
+
+  /// Copy [src] to [dst], falling back to a rename-aside when a
+  /// plain copy is denied.
+  ///
+  /// [_copyWithRetry] recovers from *transient* locks (antivirus
+  /// briefly scanning a just-written file, the original process's
+  /// handles not fully released yet). It cannot beat a *held* lock:
+  /// if the user re-launched `octodo.exe` while the helper is still
+  /// copying, the loader maps the exe and its plugin DLLs with
+  /// `FILE_SHARE_READ | FILE_SHARE_DELETE` and no `WRITE`, so
+  /// `File.copy` (which needs `GENERIC_WRITE`) fails on every retry
+  /// for the lifetime of that process.
+  ///
+  /// The fallback is [_replaceRunningImage]: rename the locked
+  /// destination aside — NTFS permits this because the loader grants
+  /// `FILE_SHARE_DELETE` — and drop the fresh payload into the freed
+  /// name. Restore-on-failure is built in, so the install dir keeps a
+  /// valid file at [dst]'s name even if the fresh copy also fails.
+  /// This is the same mechanism already used for the helper's own
+  /// image, generalised to any file the user's relaunch re-locked
+  /// mid-apply. Without it, a single locked file aborts the apply
+  /// partway, leaving the install dir half-updated (new `data/`, old
+  /// `octodo.exe`) and skipping [_relaunch] — the exact regression
+  /// where the app "won't restart" yet "still prompts to update".
+  static Future<void> _installFile(
+    File src,
+    File dst, {
+    required int attempts,
+    required Duration backoff,
+  }) async {
+    try {
+      await _copyWithRetry(src, dst, attempts: attempts, backoff: backoff);
+    } on StagedApplyException {
+      await _replaceRunningImage(
+        src,
+        dst,
+        attempts: attempts,
+        backoff: backoff,
+      );
+    }
+  }
+
+  /// Test-only hook: drives [_installFile] with regular (non-locked)
+  /// files so the fast-path / fallback decision can be exercised
+  /// deterministically. Windows' sharing restriction only affects
+  /// the direct-copy step, which the rename-aside fallback avoids.
+  @visibleForTesting
+  static Future<void> installFileForTest(
+    File src,
+    File dst, {
+    int attempts = 6,
+    Duration backoff = const Duration(milliseconds: 500),
+  }) =>
+      _installFile(src, dst, attempts: attempts, backoff: backoff);
 
   static Future<void> _copyWithRetry(
     File src,

@@ -278,6 +278,69 @@ void main() {
     });
   });
 
+  group('_installFile (copy with rename-aside fallback)', () {
+    // Regression for the "won't restart / still prompts" bug: when
+    // the user re-launches octodo.exe mid-apply, the loader locks the
+    // exe + DLLs against WRITE, so a plain File.copy throws and used
+    // to abort the apply partway. _installFile falls back to the
+    // rename-aside path so the file is still swapped. These tests
+    // exercise the decision with regular (non-locked) files — the
+    // locked behaviour itself is identical to _replaceRunningImage.
+
+    late Directory workDir;
+
+    setUp(() async {
+      workDir = await Directory.systemTemp.createTemp('install_file_test_');
+    });
+
+    tearDown(() async {
+      if (await workDir.exists()) {
+        await workDir.delete(recursive: true);
+      }
+    });
+
+    test('plain-copies when the destination is unlocked (fast path)',
+        () async {
+      final dst = File(p.join(workDir.path, 'plain.dll'));
+      await dst.writeAsString('OLD');
+      final src = File(p.join(workDir.path, 'fresh.bin'));
+      await src.writeAsString('NEW');
+
+      await StagedApply.installFileForTest(
+        src,
+        dst,
+        attempts: 2,
+        backoff: const Duration(milliseconds: 10),
+      );
+
+      expect(await dst.readAsString(), 'NEW');
+    });
+
+    test('falls back to rename-aside and restores dst on copy failure',
+        () async {
+      // A missing src makes _copyWithRetry throw StagedApplyException,
+      // so _installFile delegates to _replaceRunningImage — which also
+      // fails (same missing src) and restores the original. Proves the
+      // fallback is taken and dst is never left missing or truncated.
+      final dst = File(p.join(workDir.path, 'locked.dll'));
+      await dst.writeAsString('OLD-DLL');
+      final missingSrc = File(p.join(workDir.path, 'does-not-exist.bin'));
+
+      await expectLater(
+        StagedApply.installFileForTest(
+          missingSrc,
+          dst,
+          attempts: 2,
+          backoff: const Duration(milliseconds: 10),
+        ),
+        throwsA(isA<StagedApplyException>()),
+      );
+
+      expect(await dst.readAsString(), 'OLD-DLL');
+      expect(File('${dst.path}.old').existsSync(), isFalse);
+    });
+  });
+
   group('_relaunch helper-env override (regression for recursion bug)', () {
     late Directory relayWorkDir;
 

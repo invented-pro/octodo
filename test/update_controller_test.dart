@@ -1212,6 +1212,60 @@ void main() {
       expect(storeModel.state, UpdateState.downloaded);
       controller.dispose();
     });
+
+    test('applyDownloaded surfaces an error instead of exiting when '
+        'the helper exe is missing', () async {
+      // Regression for the silent-exit bug: when the helper exe
+      // can't be resolved, applyDownloaded must keep the GUI alive
+      // and show an error rather than calling exit(0) and tearing
+      // the window down with no feedback. Under `flutter test` the
+      // host is flutter_tester, beside which no octodo_helper.exe
+      // exists, so _spawnHelper returns false and the exit(0) gate
+      // holds. Guard the assumption up front so that if the env
+      // ever changes we fail HERE — before applyDownloaded could
+      // reach exit(0) and kill the test runner.
+      final helperNextToRunner = File(p.join(
+          p.dirname(Platform.resolvedExecutable), 'octodo_helper.exe'));
+      expect(helperNextToRunner.existsSync(), isFalse,
+          reason: 'test relies on no helper beside the flutter_tester '
+              'host; if that changes, fail here rather than risk '
+              'exit(0) tearing down the runner');
+
+      final mock = MockClient((req) async =>
+          http.Response(_releaseBody(tagName: 'v9.9.9'), 200));
+      final portableModel = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+      );
+      final controller = UpdateController(
+        model: portableModel,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+      );
+      await controller.start();
+      await _waitFor(
+          () => portableModel.state == UpdateState.updateAvailable);
+
+      portableModel.setDownloaded(DownloadedPayload(
+        version: '9.9.9',
+        zipPath: File(p.join(tmp.path, 'fake.zip')),
+        sizeBytes: 1,
+        digestVerified: true,
+      ));
+
+      await controller.applyDownloaded();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      // Reaching the assertions at all proves the process didn't
+      // exit(0). The model moved to error with the reinstall prompt.
+      expect(portableModel.state, UpdateState.error);
+      expect(portableModel.error?.message, contains('helper is missing'));
+      controller.dispose();
+    });
   });
 }
 
