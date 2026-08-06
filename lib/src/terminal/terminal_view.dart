@@ -426,6 +426,14 @@ class TerminalViewState extends State<TerminalView> {
   @visibleForTesting
   static const int bracketedPasteModeFlag = 1 << 4;
 
+  /// Test seam for the file-private [_pasteBytes], so tests can pin the
+  /// bracketed-wrap contract and the non-bracketed raw-passthrough contract
+  /// (ConPTY handles line endings; we deliberately do NOT normalize). Not for
+  /// production use.
+  @visibleForTesting
+  static Uint8List pasteBytesForTest(String text, {required int modeFlags}) =>
+      _pasteBytes(text, modeFlags: modeFlags);
+
   /// Pixel distance the pointer must travel from the down position
   /// before [_TerminalDragSelector] treats it as a drag. Below this
   /// threshold the inner `fa.TerminalView` owns the gesture
@@ -1971,14 +1979,32 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
   }
 }
 
-/// Encode [text] for PTY paste. Wraps the payload in ESC[200~ … ESC[201~
-/// when bracketed paste is active and strips ESC/Ctrl+C to keep the
-/// bracketed sequence intact. Mirrors flutter_alacritty's
-/// `input/paste.dart::pasteBytes` (kept local so we don't depend on an
-/// implementation import).
+/// Encode [text] for PTY paste.
+///
+/// In bracketed-paste mode (DECSET 2004) the payload is wrapped in
+/// ESC[200~ … ESC[201~ with ESC/Ctrl+C stripped to keep the bracket intact,
+/// and line endings collapsed to LF. The Windows clipboard holds CRLF, and
+/// sending `\r\n` inside the bracket makes bash/readline insert two line
+/// breaks per line (one for CR, one for LF), producing a blank line between
+/// each pasted command; apps that opt into bracketed paste
+/// (bash/zsh/fish/vim) expect LF as the separator in pasted data. (Upstream
+/// alacritty sends raw here too, but its Linux/macOS clipboards are already
+/// LF; octodo runs on Windows where the clipboard is CRLF.)
+///
+/// In non-bracketed mode the bytes are sent RAW — line endings are NOT
+/// normalized. ConPTY (the flutter_pty backend) already handles `\r\n` and
+/// `\n`, and collapsing them to a bare `\r` (the classic Unix-PTY rule) is
+/// actively wrong here: ConPTY plus the WSL Linux PTY's ICRNL double-process
+/// a lone CR and insert an extra blank line per pasted command (verified
+/// empirically). flutter_alacritty's `input/paste.dart::pasteBytes` sends
+/// raw for the same reason and leaves normalization to callers whose
+/// PTY-side reader actually expects CR. Kept local so we don't depend on an
+/// implementation import.
 Uint8List _pasteBytes(String text, {required int modeFlags}) {
   if (modeFlags & TerminalViewState.bracketedPasteModeFlag != 0) {
-    final safe = text.replaceAll(RegExp(r'[\x1b\x03]'), '');
+    final safe = text
+        .replaceAll(RegExp(r'\r\n|\r'), '\n')
+        .replaceAll(RegExp(r'[\x1b\x03]'), '');
     return Uint8List.fromList([
       ...'\x1b[200~'.codeUnits,
       ...utf8.encode(safe),
