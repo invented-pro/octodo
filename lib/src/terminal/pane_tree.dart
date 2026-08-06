@@ -39,8 +39,9 @@ class Surface extends ChangeNotifier {
   /// with [args] in `cmd.exe /c …` — see `TerminalView._start`.
   String program = '';
 
-  /// Arguments for [program], excluding `-NoProfile` (which the spawn layer
-  /// appends itself for the PowerShell families). Mirrors `ShellProfile.args`.
+  /// Arguments for [program]. Mirrors `ShellProfile.args`. The spawn layer
+  /// does NOT add `-NoProfile` (so the user's `$PROFILE` loads — see
+  /// `TerminalViewState._buildPtyLaunchArgs` and issue #1).
   List<String> args = const [];
 
   /// The FocusNode the [TerminalView] uses for keyboard input. Owned

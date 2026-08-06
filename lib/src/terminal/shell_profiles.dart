@@ -24,8 +24,9 @@ class ShellProfile {
 
   /// Arguments handed to [program] at spawn, e.g. `['-NoLogo']` for pwsh,
   /// `['--login', '-i']` for Git Bash, or `['-d', 'Ubuntu']` for a WSL
-  /// distro. Excludes `-NoProfile`, which the spawn layer appends itself
-  /// for the PowerShell families.
+  /// distro. The spawn layer does NOT add `-NoProfile`: the user's
+  /// `$PROFILE` (oh-my-posh, starship, modules) must load. See
+  /// `TerminalViewState._buildPtyLaunchArgs` and issue #1.
   final List<String> args;
 
   /// Material icon representing this shell type. Used as the fallback

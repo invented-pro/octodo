@@ -930,69 +930,84 @@ class TerminalViewState extends State<TerminalView> {
 
   /// Re-quote [s] so it survives `cmd.exe`'s `/c` parser as a single token.
   ///
-  /// We launch every shell as `cmd.exe /c "<exe>" <args...>` (see [_start]
-  /// for why). flutter_pty's Windows `build_command` joins `program` and each
-  /// arg with a bare space — no quoting — so any token containing a space
-  /// (e.g. `C:\Program Files\…`) must be wrapped here, or cmd/CreateProcessW
-  /// would split it into `C:\Program` + `Files\…` and the shell would fail to
-  /// find its own executable (the historical "C: Program" first-click crash).
+  /// We launch every shell as `cmd.exe /c "<exe>" <args...>` (see
+  /// [_buildPtyLaunchArgs] for why). flutter_pty's Windows `build_command`
+  /// joins `program` and each arg with a bare space — no quoting — so any
+  /// token containing a space (e.g. `C:\Program Files\…`) must be wrapped
+  /// here, or cmd/CreateProcessW would split it into `C:\Program` +
+  /// `Files\…` and the shell would fail to find its own executable (the
+  /// historical "C: Program" first-click crash).
   ///
   /// Backslashes are left alone — paths like `C:\Program Files\pwsh\pwsh.exe`
   /// round-trip cleanly because no backslash immediately precedes a quote in
   /// our token set (we only emit exec paths and readline-style flag args,
   /// never arbitrary user input). This is intentionally simpler than
   /// CommandLineToArgvW's full CRLF/backslash-pairing rules.
-  String _quoteForCmd(String s) {
+  static String _quoteForCmd(String s) {
     if (!s.contains(RegExp(r'[\s"]'))) return s;
     return '"${s.replaceAll('"', r'\"')}"';
   }
 
+  /// Build the `(program, args)` pair to hand to [fa.FlutterPtyBackend].
+  ///
+  /// Workaround for a Windows-only flutter_pty 0.4.2 spawn quirk: the
+  /// native `build_command` (flutter_pty/src/flutter_pty_win.c) emits
+  /// `<executable> <executable> <args...>` because the Dart binding sets
+  /// `argv[0] = executable` AND `build_command` also iterates `arguments`
+  /// starting at index 0. CreateProcessW with a NULL lpApplicationName
+  /// takes the first token as the child's argv[0] and passes the rest as
+  /// argv[1..n]. cmd.exe and Windows PowerShell tolerate the stray extra
+  /// positional; pwsh, wsl.exe, and bash do not:
+  ///   pwsh → `Processing -File '<own path>' failed: no .ps1 extension`
+  ///   wsl  → `runs the path as a Linux command` → "command not found"
+  ///   bash → `<own path>: cannot execute binary file`
+  ///
+  /// We therefore launch every shell wrapped in `cmd.exe /c "<real> <args>"`.
+  /// The doubled token becomes a harmless extra `cmd.exe` before `/c`
+  /// (cmd ignores positionals before `/c`), and the real invocation rides
+  /// untouched in the /c payload. Verified:
+  /// `cmd.exe cmd.exe /c "<exe> <args>"` launches pwsh / bash / wsl
+  /// correctly.
+  ///
+  /// We deliberately do NOT pass `-NoProfile` to PowerShell: that flag
+  /// suppresses the user's `$PROFILE` (Microsoft.PowerShell_profile.ps1),
+  /// which is where prompt customizers — oh-my-posh, oh-my-pwsh, starship,
+  /// imported modules — load. Suppressing it was issue #1: the user's
+  /// oh-my-pwsh prompt never appeared. Windows Terminal loads `$PROFILE`
+  /// by default; we match that. A profile containing errors will now
+  /// surface its error text on startup, which is the correct behavior.
+  static (String, List<String>) _buildPtyLaunchArgs(
+    String program,
+    List<String> args,
+  ) {
+    if (program.isEmpty) {
+      // No profile — let flutter_alacritty fall back to $SHELL/cmd.
+      return ('', const <String>[]);
+    }
+    return (
+      'cmd.exe',
+      <String>[
+        '/c',
+        _quoteForCmd(program),
+        ...args.map(_quoteForCmd),
+      ],
+    );
+  }
+
+  /// Test seam for [_buildPtyLaunchArgs], so tests can pin that PowerShell
+  /// launches load `$PROFILE` (no `-NoProfile`) while non-PowerShell shells
+  /// are unaffected. Not for production use.
+  @visibleForTesting
+  static (String, List<String>) ptyLaunchArgsForTest(
+    String program,
+    List<String> args,
+  ) =>
+      _buildPtyLaunchArgs(program, args);
+
   /// Spawn the configured shell via [fa.FlutterPtyBackend].
   void _start() {
-    // Workaround for a Windows-only flutter_pty 0.4.2 spawn quirk: the
-    // native `build_command` (flutter_pty/src/flutter_pty_win.c) emits
-    // `<executable> <executable> <args...>` because the Dart binding sets
-    // `argv[0] = executable` AND `build_command` also iterates `arguments`
-    // starting at index 0. CreateProcessW with a NULL lpApplicationName
-    // takes the first token as the child's argv[0] and passes the rest as
-    // argv[1..n]. cmd.exe and Windows PowerShell tolerate the stray extra
-    // positional; pwsh, wsl.exe, and bash do not:
-    //   pwsh → "Processing -File '<own path>' failed: no .ps1 extension"
-    //   wsl  → runs the path as a Linux command → "command not found"
-    //   bash → "<own path>: cannot execute binary file"
-    //
-    // We therefore launch every shell wrapped in `cmd.exe /c "<real>
-    // <args>"`. The doubled token becomes a harmless extra `cmd.exe`
-    // before `/c` (cmd ignores positionals before `/c`), and the real
-    // invocation rides untouched in the /c payload. Verified:
-    // `cmd.exe cmd.exe /c "<exe>" <args>` launches pwsh / bash / wsl
-    // correctly.
-    final String ptyProgram;
-    final List<String> ptyArgs;
-    if (widget.surface.program.isEmpty) {
-      // No profile — let flutter_alacritty fall back to $SHELL/cmd.
-      ptyProgram = '';
-      ptyArgs = const [];
-    } else {
-      final realProgram = widget.surface.program;
-      // Only PowerShell understands `-NoProfile`; passing it to wsl.exe,
-      // git-bash, or cmd.exe either makes them fail (wsl tries to find a
-      // Linux binary called "NoProfile") or is silently ignored. Force it
-      // for *Shell pwsh/Windows PowerShell only.
-      final isPowerShell =
-          realProgram.toLowerCase().contains('pwsh') ||
-          realProgram.toLowerCase().contains('powershell');
-      final realArgs = <String>[
-        ...widget.surface.args,
-        if (isPowerShell) '-NoProfile',
-      ];
-      ptyProgram = 'cmd.exe';
-      ptyArgs = <String>[
-        '/c',
-        _quoteForCmd(realProgram),
-        ...realArgs.map(_quoteForCmd),
-      ];
-    }
+    final (ptyProgram, ptyArgs) =
+        _buildPtyLaunchArgs(widget.surface.program, widget.surface.args);
 
     _log.fine(
       '_start: ptyProgram=$ptyProgram ptyArgs=$ptyArgs (program="${widget.surface.program}") cwd=${widget.workingDirectory}',
