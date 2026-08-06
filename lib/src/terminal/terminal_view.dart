@@ -418,6 +418,14 @@ class TerminalViewState extends State<TerminalView> {
   @visibleForTesting
   static const int terminalAnyMouseModeFlag = 0x2048;
 
+  /// Bracketed-paste mode bit read from `grid.modeFlags`. Mirrors
+  /// `kModeBracketedPaste = 1 << 4` (DECSET 2004) in flutter_alacritty's
+  /// package-internal `input/term_mode.dart`, which in turn mirrors the Rust
+  /// `TermMode`. Pinned as a `@visibleForTesting` literal so a regression
+  /// test can guard the exact bit — see test/paste_bytes_test.dart.
+  @visibleForTesting
+  static const int bracketedPasteModeFlag = 1 << 4;
+
   /// Pixel distance the pointer must travel from the down position
   /// before [_TerminalDragSelector] treats it as a drag. Below this
   /// threshold the inner `fa.TerminalView` owns the gesture
@@ -1969,10 +1977,7 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
 /// `input/paste.dart::pasteBytes` (kept local so we don't depend on an
 /// implementation import).
 Uint8List _pasteBytes(String text, {required int modeFlags}) {
-  // Bracketed-paste mode bit = 0x20000000 (BRACKETED_PASTE in
-  // alacritty's TermModeFlags).
-  const bracketedPasteFlag = 0x20000000;
-  if (modeFlags & bracketedPasteFlag != 0) {
+  if (modeFlags & TerminalViewState.bracketedPasteModeFlag != 0) {
     final safe = text.replaceAll(RegExp(r'[\x1b\x03]'), '');
     return Uint8List.fromList([
       ...'\x1b[200~'.codeUnits,
