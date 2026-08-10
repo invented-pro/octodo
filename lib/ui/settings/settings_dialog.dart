@@ -334,6 +334,7 @@ class _Detail extends StatelessWidget {
             _rowFor(catalog.terminal.fontFamily, showJsonPaths, store),
             _rowFor(catalog.terminal.fontSize, showJsonPaths, store),
             _rowFor(catalog.terminal.cursorStyle, showJsonPaths, store),
+            _rowFor(catalog.terminal.cursorColor, showJsonPaths, store),
             _rowFor(catalog.terminal.cursorBlink, showJsonPaths, store),
             _rowFor(catalog.terminal.scrollbackLines, showJsonPaths, store),
             _rowFor(catalog.terminal.copyOnSelect, showJsonPaths, store),

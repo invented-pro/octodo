@@ -11,6 +11,13 @@ enum CursorStyle { block, underline, bar }
 
 enum BellMode { none, visual, sound }
 
+/// Sentinel for `terminal.cursorColor` meaning "Auto" — the cursor uses
+/// inverse video (the cell's foreground), which is theme-safe on both light
+/// and dark palettes. Stored as fully-transparent black; the color picker
+/// (opacity disabled) can't produce it, so it round-trips as a distinct
+/// "unset" marker separate from any real color the user picks.
+const Color kAutoCursorColor = Color(0x00000000);
+
 /// Modifier required to open an OSC 8 hyperlink with the mouse.
 ///
 /// The flutter_alacritty package's default is Ctrl (or Cmd on macOS),
@@ -68,6 +75,18 @@ class TerminalSettingsSection {
     label: _enumName,
     title: 'Cursor style',
     icon: Icons.mouse,
+  );
+
+  /// Terminal cursor tint. Defaults to [kAutoCursorColor] ("Auto"), which
+  /// keeps the classic inverse-video cursor; picking a real color overrides
+  /// it for apps that use the terminal cursor (cmd/status lines, shells).
+  /// A program-set OSC 12 color always wins over this.
+  final cursorColor = ColorSetting(
+    'terminal.cursorColor',
+    defaultValue: kAutoCursorColor,
+    title: 'Cursor color',
+    subtitle: 'Terminal cursor tint. "Auto" inverts the cell color.',
+    icon: Icons.colorize,
   );
 
   final cursorBlink = BoolSetting(
@@ -139,6 +158,7 @@ class TerminalSettingsSection {
     yield fontFamily;
     yield fontSize;
     yield cursorStyle;
+    yield cursorColor;
     yield cursorBlink;
     yield scrollbackLines;
     yield copyOnSelect;

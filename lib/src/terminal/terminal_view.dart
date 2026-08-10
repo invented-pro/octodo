@@ -45,6 +45,7 @@ class TerminalSettings {
     required this.fontSize,
     required this.backgroundColor,
     required this.cursorStyle,
+    required this.cursorColor,
     required this.cursorBlink,
     required this.scrollbackLines,
     required this.copyOnSelect,
@@ -60,6 +61,7 @@ class TerminalSettings {
   final double fontSize;
   final Color backgroundColor;
   final CursorStyle cursorStyle;
+  final Color cursorColor;
   final bool cursorBlink;
   final int scrollbackLines;
   final bool copyOnSelect;
@@ -95,6 +97,7 @@ class TerminalSettings {
     double? fontSize,
     Color? backgroundColor,
     CursorStyle? cursorStyle,
+    Color? cursorColor,
     bool? cursorBlink,
     int? scrollbackLines,
     bool? copyOnSelect,
@@ -109,6 +112,7 @@ class TerminalSettings {
     fontSize: fontSize ?? this.fontSize,
     backgroundColor: backgroundColor ?? this.backgroundColor,
     cursorStyle: cursorStyle ?? this.cursorStyle,
+    cursorColor: cursorColor ?? this.cursorColor,
     cursorBlink: cursorBlink ?? this.cursorBlink,
     scrollbackLines: scrollbackLines ?? this.scrollbackLines,
     copyOnSelect: copyOnSelect ?? this.copyOnSelect,
@@ -128,6 +132,7 @@ class TerminalSettings {
           other.fontSize == fontSize &&
           other.backgroundColor == backgroundColor &&
           other.cursorStyle == cursorStyle &&
+          other.cursorColor == cursorColor &&
           other.cursorBlink == cursorBlink &&
           other.scrollbackLines == scrollbackLines &&
           other.copyOnSelect == copyOnSelect &&
@@ -144,6 +149,7 @@ class TerminalSettings {
     fontSize,
     backgroundColor,
     cursorStyle,
+    cursorColor,
     cursorBlink,
     scrollbackLines,
     copyOnSelect,
@@ -214,6 +220,7 @@ const TerminalSettings _defaultTerminalSettings = TerminalSettings(
   fontSize: 14.0,
   backgroundColor: Color(0xFF181818),
   cursorStyle: CursorStyle.block,
+  cursorColor: kAutoCursorColor,
   cursorBlink: true,
   scrollbackLines: 10000,
   copyOnSelect: false,
@@ -819,6 +826,14 @@ class TerminalViewState extends State<TerminalView> {
   Duration get _bellDurationForView =>
       _bellMode == BellMode.none ? Duration.zero : _kVisualBellDuration;
 
+  /// Cursor tint passed to `fa.TerminalView`, packed as `0xRRGGBB`. `null`
+  /// means "Auto" (the sentinel) → the painter keeps the inverse-video
+  /// cursor. A program-set OSC 12 color always wins over this at paint time.
+  int? get _cursorColorForView {
+    final c = (_settings ?? _defaultTerminalSettings).cursorColor;
+    return c == kAutoCursorColor ? null : _toAlacrittyColor(c);
+  }
+
   /// Copy-on-select host-side hook: when the user releases a drag-selection
   /// with non-empty new text in the engine's primary buffer, copy it to
   /// the system clipboard. `_controller.primary` is updated inside
@@ -853,6 +868,14 @@ class TerminalViewState extends State<TerminalView> {
     if (old != null && s == old) return;
 
     _settings = s;
+
+    // Cursor color is a fa.TerminalView widget param (the painter consumes it
+    // directly, not via engine config), so unlike the reconfigure-driven fields
+    // below it needs a build() pass to propagate. Only rebuild when it actually
+    // changed, to keep the no-rebuild design for every other setting.
+    if (old == null || old.cursorColor != s.cursorColor) {
+      setState(() {});
+    }
 
     // Cache values the host-side hooks depend on so the next bell event
     // or selection-end uses the latest snapshot.
@@ -1520,6 +1543,11 @@ class TerminalViewState extends State<TerminalView> {
                   // shows through while glyphs stay opaque. Defaults
                   // to 1.0 (opaque).
                   backgroundOpacity: _bgAlpha,
+                  // Cursor tint (null = Auto/inverse video). A widget param
+                  // (not engine config) because the painter consumes it
+                  // directly; we setState in didChangeDependencies when it
+                  // changes so this arg updates live.
+                  cursorColor: _cursorColorForView,
                   // Font zoom — let alacritty own it. We pass `defaultTerminalShortcuts`
                   // plus our shift variants so users who hold Shift while pressing
                   // `=` / `-` / `0` (yielding `+` / `_` / `)` on US layouts) get

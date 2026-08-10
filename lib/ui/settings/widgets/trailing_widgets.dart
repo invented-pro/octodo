@@ -8,10 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../../src/settings/setting.dart';
 import '../../../src/settings/setting_codec.dart';
+import '../../../src/settings/settings_catalog.dart';
 import '../../../src/settings/settings_store.dart';
 import '../../../src/terminal/font_family_options.dart';
 import '../../../src/theme/palette_context.dart';
 import '../../../src/theme/palettes.dart';
+import '../../common/color_picker_dialog.dart';
 
 // ── Bool toggle ─────────────────────────────────────────────────────
 
@@ -1039,13 +1041,13 @@ class _ColorHexFieldTrailingState extends State<ColorHexFieldTrailing> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: _format(_initialValue));
-    _sub = widget.store.watch(widget.setting).listen((v) {
+    _controller = TextEditingController(text: _label(_initialValue));
+    _sub = widget.store.watch<Color>(widget.setting).listen((v) {
       if (mounted && v != _value) {
         setState(() {
           _value = v;
           _errorText = null;
-          _controller.text = _format(v);
+          _controller.text = _label(v);
         });
       }
     });
@@ -1076,6 +1078,35 @@ class _ColorHexFieldTrailingState extends State<ColorHexFieldTrailing> {
     return '#${a.toRadixString(16).padLeft(2, '0').toUpperCase()}${hex.substring(1)}';
   }
 
+  /// Whether this setting supports the "Auto" sentinel (no fixed tint — the
+  /// terminal uses inverse video). Currently just the cursor color.
+  bool get _autoCapable => widget.setting.defaultValue == kAutoCursorColor;
+  bool get _isAuto => _autoCapable && _value == kAutoCursorColor;
+
+  String _label(Color c) =>
+      (_autoCapable && c == kAutoCursorColor) ? 'Auto' : _format(c);
+
+  Future<void> _pick() async {
+    final seed = _isAuto ? const Color(0xFFFFFFFF) : _value;
+    final picked = await showColorPickerDialog(context, seed);
+    if (picked == null || !mounted) return;
+    setState(() {
+      _value = picked;
+      _errorText = null;
+      _controller.text = _label(picked);
+    });
+    widget.store.set(widget.setting, picked);
+  }
+
+  void _resetAuto() {
+    setState(() {
+      _value = kAutoCursorColor;
+      _errorText = null;
+      _controller.text = 'Auto';
+    });
+    widget.store.set(widget.setting, kAutoCursorColor);
+  }
+
   void _apply(String text) {
     final normalized = text.trim();
     if (!_hexPattern.hasMatch(normalized)) {
@@ -1101,22 +1132,42 @@ class _ColorHexFieldTrailingState extends State<ColorHexFieldTrailing> {
     return Semantics(
       label: widget.setting.title,
       child: SizedBox(
-        width: 140,
+        width: _autoCapable ? 188 : 140,
         child: Row(
           children: [
-            Container(
-              width: 24,
-              height: 24,
-              decoration: BoxDecoration(
-                color: _value,
+            // Swatch — tap to open the HSV wheel picker. Renders an "Auto"
+            // badge when the value is the inverse-video sentinel so the
+            // unset state reads as a deliberate choice, not a blank chip.
+            Tooltip(
+              message: _isAuto ? 'Auto (invert cell color)' : 'Pick color',
+              child: InkWell(
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: palette.accentBlue, width: 1),
+                onTap: _pick,
+                child: Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: _isAuto ? palette.dialogSurface : _value,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: palette.accentBlue, width: 1),
+                  ),
+                  alignment: Alignment.center,
+                  child: _isAuto
+                      ? Text('A',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: palette.textSecondary,
+                          ))
+                      : null,
+                ),
               ),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: TextField(
                 controller: _controller,
+                readOnly: _isAuto,
                 style: TextStyle(
                   color: palette.textPrimary,
                   fontSize: 12,
@@ -1149,6 +1200,22 @@ class _ColorHexFieldTrailingState extends State<ColorHexFieldTrailing> {
                 onEditingComplete: () => _apply(_controller.text),
               ),
             ),
+            if (_autoCapable && !_isAuto) ...[
+              const SizedBox(width: 4),
+              Tooltip(
+                message: 'Reset to Auto',
+                child: IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 28,
+                    minHeight: 28,
+                  ),
+                  iconSize: 16,
+                  icon: Icon(Icons.auto_mode, color: palette.textSecondary),
+                  onPressed: _resetAuto,
+                ),
+              ),
+            ],
           ],
         ),
       ),

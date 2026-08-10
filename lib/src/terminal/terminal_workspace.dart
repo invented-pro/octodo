@@ -270,6 +270,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       fontSize: runtime.store.get<double>(t.fontSize),
       backgroundColor: palette.surface0,
       cursorStyle: runtime.store.get<CursorStyle>(t.cursorStyle),
+      cursorColor: runtime.store.get<Color>(t.cursorColor),
       cursorBlink: runtime.store.get<bool>(t.cursorBlink),
       scrollbackLines: runtime.store.get<int>(t.scrollbackLines),
       copyOnSelect: runtime.store.get<bool>(t.copyOnSelect),
@@ -315,6 +316,11 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     _settingsSubs.add(
       runtime.store.watch<CursorStyle>(t.cursorStyle).listen((v) {
         applyAndMaybeNotify((s) => s.copyWith(cursorStyle: v));
+      }),
+    );
+    _settingsSubs.add(
+      runtime.store.watch<Color>(t.cursorColor).listen((v) {
+        applyAndMaybeNotify((s) => s.copyWith(cursorColor: v));
       }),
     );
     _settingsSubs.add(
