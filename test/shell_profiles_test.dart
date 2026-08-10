@@ -107,12 +107,13 @@ void main() {
       // rejects with "Unknown flag '--no-logo'" and exits 1.)
       expect(nu.args, isEmpty);
 
-      // iconAsset wiring: PowerShell 7 + Windows PowerShell share one
-      // SVG; CMD keeps the Material fallback (no asset); Git Bash gets
-      // the Git branch-mark; each WSL distro gets its own per-distro SVG;
-      // Nushell gets its dedicated SVG.
+      // iconAsset wiring: PowerShell 7 gets the badged variant while
+      // Windows PowerShell 5 keeps the plain shield; CMD keeps the
+      // Material fallback (no asset); Git Bash gets the Git branch-mark;
+      // each WSL distro gets its own per-distro SVG; Nushell gets its
+      // dedicated SVG.
       expect(profiles.firstWhere((p) => p.shortName == 'pwsh').iconAsset,
-          'assets/icons/powershell.svg');
+          'assets/icons/powershell-7.svg');
       expect(profiles.firstWhere((p) => p.shortName == 'powershell')
           .iconAsset,
           'assets/icons/powershell.svg');
@@ -227,6 +228,85 @@ void main() {
       );
       final pwsh = profiles.where((p) => p.shortName == 'pwsh').single;
       expect(pwsh.program, r'C:\Tools\bin\pwsh.exe');
+    });
+
+    test('PowerShell 7 via Microsoft Store App Execution Alias is detected', () {
+      // The Store install drops a reparse-point alias at
+      // `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`. On the host,
+      // `File.existsSync()` returns false for it; the production probe
+      // `_hostPathExists` ORs in `Link.existsSync()` so it's seen. At the
+      // `detectShellsFrom` level the probe is injected, so this test pins
+      // the path-list contract: the WindowsApps alias path is enumerated
+      // explicitly (not just via PATH), and when it's the only pwsh
+      // candidate that exists, a pwsh profile is emitted from it.
+      const storeAlias =
+          r'C:\Users\tester\AppData\Local\Microsoft\WindowsApps\pwsh.exe';
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {storeAlias, _winPsPath, _cmdPath}),
+        environment: const {
+          'SystemRoot': r'C:\Windows',
+          'USERPROFILE': r'C:\Users\tester',
+          'LOCALAPPDATA': r'C:\Users\tester\AppData\Local',
+          'ProgramFiles': r'C:\Program Files',
+          // No PATH entry — proves the alias is caught by the explicit
+          // WindowsApps path in the enumerate list, not by PATH lookup.
+          'PATH': '',
+        },
+        listWslDistros: (_) => const [],
+      );
+      final pwsh = profiles.where((p) => p.shortName == 'pwsh').single;
+      expect(pwsh.program, storeAlias);
+      expect(pwsh.label, 'PowerShell 7');
+    });
+
+    test('PowerShell 7 via per-user MSI is detected when per-machine is absent', () {
+      // winget --scope user / per-user MSI lands at
+      // `%LOCALAPPDATA%\Microsoft\PowerShell\7\pwsh.exe`. When no
+      // per-machine path exists, the per-user entry must surface pwsh.
+      const perUserMsi =
+          r'C:\Users\tester\AppData\Local\Microsoft\PowerShell\7\pwsh.exe';
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {perUserMsi, _cmdPath}),
+        environment: const {
+          'SystemRoot': r'C:\Windows',
+          'USERPROFILE': r'C:\Users\tester',
+          'LOCALAPPDATA': r'C:\Users\tester\AppData\Local',
+          'ProgramFiles': r'C:\Program Files',
+          'PATH': '',
+        },
+        listWslDistros: (_) => const [],
+      );
+      final pwsh = profiles.where((p) => p.shortName == 'pwsh').single;
+      expect(pwsh.program, perUserMsi);
+    });
+
+    test('per-machine pwsh wins over per-user when both exist (no duplicates)', () {
+      // First-match-wins: the Program Files entry is enumerated ahead of
+      // the per-user entry, so when both resolve only one profile is
+      // emitted and it points at the per-machine binary.
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {
+          _pwshPath,
+          r'C:\Users\tester\AppData\Local\Microsoft\PowerShell\7\pwsh.exe',
+          _cmdPath,
+        }),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      final pwshs = profiles.where((p) => p.shortName == 'pwsh').toList();
+      expect(pwshs.length, 1);
+      expect(pwshs.single.program, _pwshPath);
+    });
+
+    test('Windows PowerShell entry is labelled "PowerShell 5" for parity with PS7', () {
+      final profiles = detectShellsFrom(
+        fileExists: _existsFor(const {_winPsPath, _cmdPath}),
+        environment: _baseEnv,
+        listWslDistros: (_) => const [],
+      );
+      final ps5 = profiles.where((p) => p.shortName == 'powershell').single;
+      expect(ps5.label, 'PowerShell 5');
+      expect(ps5.program, _winPsPath);
     });
 
     test('pwsh absent everywhere → no pwsh profile', () {

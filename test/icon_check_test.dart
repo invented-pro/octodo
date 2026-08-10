@@ -13,6 +13,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 void main() {
   for (final name in const [
     'powershell',
+    'powershell-7',
     'git-bash',
     'ubuntu',
     'debian',

@@ -170,6 +170,20 @@ String resolveWslIconAsset(String distro) {
 typedef PathProbe = bool Function(String path);
 typedef WslDistroLister = List<String> Function(String wslPath);
 
+/// True when [path] is a reachable executable on the host — a real file OR
+/// a Windows App Execution Alias / reparse-point shim.
+///
+/// `File(path).existsSync()` alone returns `false` for App Execution
+/// Aliases — the zero-byte reparse points in `%LOCALAPPDATA%\Microsoft\
+/// WindowsApps\` where Microsoft-Store-installed PowerShell 7 (`pwsh.exe`)
+/// and Scoop shims live. `Link.existsSync()` returns `true` for those, so
+/// OR-ing the two lets detection see past the alias. For a normal file
+/// `Link.existsSync()` returns `false`, making the OR harmless on regular
+/// executables. This is the probe used by both [detectShells] and
+/// [detectShellsAsync]; tests inject their own [PathProbe].
+bool _hostPathExists(String path) =>
+    File(path).existsSync() || Link(path).existsSync();
+
 /// Detect available shells on this Windows host.
 ///
 /// Includes Command Prompt, Windows PowerShell, PowerShell 7, Git Bash,
@@ -190,7 +204,7 @@ typedef WslDistroLister = List<String> Function(String wslPath);
 /// an interactive frame. Distros are enumerated synchronously here so the
 /// shell list is complete by the time the workspace builds.
 List<ShellProfile> detectShells() => detectShellsFrom(
-      fileExists: (p) => File(p).existsSync(),
+      fileExists: _hostPathExists,
       environment: Platform.environment,
       listWslDistros: _listWslDistros,
     );
@@ -212,7 +226,7 @@ List<ShellProfile> detectShells() => detectShellsFrom(
 Future<List<ShellProfile>> detectShellsAsync() {
   return Isolate.run<List<ShellProfile>>(
     () => detectShellsFrom(
-      fileExists: (p) => File(p).existsSync(),
+      fileExists: _hostPathExists,
       environment: Platform.environment,
       listWslDistros: _listWslDistros,
     ),
@@ -238,13 +252,55 @@ List<ShellProfile> detectShellsFrom({
   final systemRoot = environment['SystemRoot'] ?? r'C:\Windows';
   final system32 = '$systemRoot\\System32';
 
+  // Environment-derived install roots shared across the shell probes
+  // below (PowerShell 7, Git Bash, Nushell). Declared once here so the
+  // individual blocks don't each re-read the environment.
+  final localAppData = environment['LOCALAPPDATA'] ?? '';
+  final userProfile = environment['USERPROFILE'] ?? '';
+  final programFiles = environment['ProgramFiles'] ?? r'C:\Program Files';
+  final programFilesX86 =
+      environment['ProgramFiles(x86)'] ?? r'C:\Program Files (x86)';
+  final programData = environment['ProgramData'] ?? r'C:\ProgramData';
+
   // ── PowerShell 7+ (pwsh.exe) ───────────────────────────────────
   //
-  // Check well-known install paths and the user's PATH.
-  final pwshPaths = [
-    r'C:\Program Files\PowerShell\7\pwsh.exe',
-    r'C:\Program Files\PowerShell\7-preview\pwsh.exe',
-    r'C:\Program Files\PowerShell\6\pwsh.exe',
+  // PowerShell 7 ships from many sources — MSI (per-machine and
+  // per-user), winget (per-machine and per-user), Microsoft Store (an
+  // App Execution Alias reparse point), Scoop, Chocolatey, and the
+  // `dotnet tool install -g PowerShell` global tool. We enumerate each
+  // method's well-known landing zone before falling back to PATH; the
+  // first probe that hits wins, so we never emit duplicate entries even
+  // when several paths point at the same binary.
+  //
+  // The Microsoft Store alias and the Scoop shim are reparse points
+  // that `File.existsSync()` alone cannot see — they rely on the
+  // `Link.existsSync()` branch of the injected [fileExists] probe (see
+  // [_hostPathExists]).
+  final pwshPaths = <String>[
+    // Per-machine MSI (default), winget --scope machine, Chocolatey.
+    '$programFiles\\PowerShell\\7\\pwsh.exe',
+    '$programFiles\\PowerShell\\7-preview\\pwsh.exe',
+    '$programFiles\\PowerShell\\6\\pwsh.exe',
+    // Per-user MSI / winget --scope user.
+    if (localAppData.isNotEmpty)
+      '$localAppData\\Microsoft\\PowerShell\\7\\pwsh.exe',
+    // winget per-user Programs manifest layout.
+    if (localAppData.isNotEmpty)
+      '$localAppData\\Programs\\PowerShell\\7\\pwsh.exe',
+    // Microsoft Store — App Execution Alias. Needs _hostPathExists.
+    if (localAppData.isNotEmpty)
+      '$localAppData\\Microsoft\\WindowsApps\\pwsh.exe',
+    // Scoop: real binary, then the shim (shim is itself a reparse point).
+    if (userProfile.isNotEmpty)
+      '$userProfile\\scoop\\apps\\pwsh\\current\\pwsh.exe',
+    if (userProfile.isNotEmpty) '$userProfile\\scoop\\shims\\pwsh.exe',
+    // Chocolatey shim.
+    if (programData.isNotEmpty) '$programData\\chocolatey\\bin\\pwsh.exe',
+    // Older Chocolatey package variant.
+    r'C:\tools\powershell-7\pwsh.exe',
+    // .NET global tool (`dotnet tool install -g PowerShell`).
+    if (userProfile.isNotEmpty)
+      '$userProfile\\.dotnet\\tools\\pwsh.exe',
   ];
   String? pwsh;
   for (final p in pwshPaths) {
@@ -253,7 +309,8 @@ List<ShellProfile> detectShellsFrom({
       break;
     }
   }
-  // Also try PATH-based lookup.
+  // PATH fallback covers portable / zip installs dropped into a directory
+  // the user has on PATH but that isn't in our enumerate list above.
   pwsh ??= _findOnPathIn('pwsh.exe', environment['PATH'] ?? '', fileExists);
   if (pwsh != null) {
     profiles.add(ShellProfile(
@@ -261,7 +318,7 @@ List<ShellProfile> detectShellsFrom({
       program: pwsh,
       args: const ['-NoLogo'],
       icon: Icons.bolt,
-      iconAsset: 'assets/icons/powershell.svg',
+      iconAsset: 'assets/icons/powershell-7.svg',
       color: _pwshBlue,
       shortName: 'pwsh',
     ));
@@ -271,11 +328,12 @@ List<ShellProfile> detectShellsFrom({
   final winPsPath = '$system32\\WindowsPowerShell\\v1.0\\powershell.exe';
   if (fileExists(winPsPath)) {
     profiles.add(ShellProfile(
-      label: 'Windows PowerShell',
+      label: 'PowerShell 5',
       program: winPsPath,
       args: const ['-NoLogo'],
       icon: Icons.bolt,
-      // Same SVG as PowerShell 7: Microsoft uses one logo for both.
+      // Plain blue shield: PS7 uses the dark powershell-7.svg variant so
+      // the two are visually distinct in the dropdown / tab chips.
       iconAsset: 'assets/icons/powershell.svg',
       color: _pwshBlue,
       shortName: 'powershell',
@@ -350,7 +408,6 @@ List<ShellProfile> detectShellsFrom({
   // mount layout (`/mnt/c/…` vs MSYS `/c/…`), so `translateCwdForShell`
   // would mis-translate the initial cwd and the tab would be mislabelled.
   // We therefore only trust the well-known Git for Windows / Scoop paths.
-  final userProfile = environment['USERPROFILE'] ?? '';
   final gitBashPaths = [
     r'C:\Program Files\Git\bin\bash.exe',
     r'C:\Program Files (x86)\Git\bin\bash.exe',
@@ -419,10 +476,6 @@ List<ShellProfile> detectShellsFrom({
   // Nushell lives there. Each candidate is tried in turn; the first
   // that exists wins, so we never emit duplicate entries even when
   // multiple paths point at the same binary.
-  final localAppData = environment['LOCALAPPDATA'] ?? '';
-  final programFiles = environment['ProgramFiles'] ?? r'C:\Program Files';
-  final programFilesX86 =
-      environment['ProgramFiles(x86)'] ?? r'C:\Program Files (x86)';
   final nuPaths = <String>[
     if (localAppData.isNotEmpty)
       '$localAppData\\Programs\\nu\\bin\\nu.exe',
