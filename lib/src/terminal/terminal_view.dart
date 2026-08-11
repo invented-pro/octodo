@@ -441,6 +441,13 @@ class TerminalViewState extends State<TerminalView> {
   static Uint8List pasteBytesForTest(String text, {required int modeFlags}) =>
       _pasteBytes(text, modeFlags: modeFlags);
 
+  /// Test seam for [_imagePasteTriggerBytes], so tests can pin the
+  /// image-clipboard fallback emitted when a paste finds no text — see
+  /// test/paste_bytes_test.dart and GitHub issue #2. Not for production use.
+  @visibleForTesting
+  static Uint8List imagePasteTriggerBytesForTest() =>
+      _imagePasteTriggerBytes();
+
   /// Pixel distance the pointer must travel from the down position
   /// before [_TerminalDragSelector] treats it as a drag. Below this
   /// threshold the inner `fa.TerminalView` owns the gesture
@@ -1177,10 +1184,13 @@ class TerminalViewState extends State<TerminalView> {
     } else {
       final data = await Clipboard.getData(Clipboard.kTextPlain);
       final t = data?.text;
-      if (t != null && t.isNotEmpty) {
-        _controller.onTerminalInputStart();
-        _engine.write(_pasteBytes(t, modeFlags: _engine.grid.modeFlags));
-      }
+      final modeFlags = _engine.grid.modeFlags;
+      _controller.onTerminalInputStart();
+      _engine.write(
+        (t != null && t.isNotEmpty)
+            ? _pasteBytes(t, modeFlags: modeFlags)
+            : _imagePasteTriggerBytes(),
+      );
     }
   }
 
@@ -1280,9 +1290,13 @@ class TerminalViewState extends State<TerminalView> {
   void _pasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final t = data?.text;
-    if (t == null || t.isEmpty) return;
+    final modeFlags = _engine.grid.modeFlags;
     _controller.onTerminalInputStart();
-    _engine.write(_pasteBytes(t, modeFlags: _engine.grid.modeFlags));
+    _engine.write(
+      (t != null && t.isNotEmpty)
+          ? _pasteBytes(t, modeFlags: modeFlags)
+          : _imagePasteTriggerBytes(),
+    );
   }
 
   void _copySelectionToClipboard() {
@@ -1341,6 +1355,22 @@ class TerminalViewState extends State<TerminalView> {
   static final Map<ShortcutActivator, Intent>
   _alacrittyShortcutsWithShiftVariants = <ShortcutActivator, Intent>{
     ...defaultTerminalShortcuts,
+    // Bare Ctrl+V and Shift+Insert → PasteIntent. FA's stock
+    // `defaultTerminalShortcuts` only ships Ctrl+Shift+V; without these the
+    // bare forms would fall through to `_onKeyFallback`'s `encodeKey` and
+    // write a raw 0x16 (Ctrl+V control byte) — wrong for text paste and with
+    // no image-clipboard handling. Routing through PasteIntent hits our
+    // image-aware [_pasteFromClipboard] override in [_alacrittyActions]
+    // (text → bracketed paste bytes; image-only clipboard → 0x16 so the
+    // foreground app — opencode/MimoCode — can read the image itself).
+    // These are deliberately NOT bound at the app level (TerminalBindings):
+    // that delegation path through _AppShellState didn't deliver the image
+    // trigger reliably, while this path calls _pasteFromClipboard directly
+    // on this TerminalViewState. See GitHub issue #2.
+    SingleActivator(LogicalKeyboardKey.keyV, control: true):
+        const fa.PasteIntent(),
+    SingleActivator(LogicalKeyboardKey.insert, shift: true):
+        const fa.PasteIntent(),
     // PageUp/PageDown → 1-page scrollback scroll.
     SingleActivator(LogicalKeyboardKey.pageUp): const ScrollPageIntent(
       up: true,
@@ -1387,6 +1417,20 @@ class TerminalViewState extends State<TerminalView> {
         return null;
       },
     ),
+    // Ctrl+Shift+V is NOT bound in the app-level early key handler (see
+    // TerminalBindings in app_shortcuts.dart), so it falls through to fa's
+    // own `defaultTerminalShortcuts` and fires a `PasteIntent`. fa's stock
+    // `defaultPasteAction` reads `text/plain` only and no-ops when the
+    // clipboard holds an image, which silently broke image paste on
+    // Ctrl+Shift+V (GitHub issue #2). Route it through the same image-aware
+    // [_pasteFromClipboard] used by bare Ctrl+V / Shift+Insert / right-click
+    // so every paste entry point behaves identically.
+    fa.PasteIntent: CallbackAction<fa.PasteIntent>(
+      onInvoke: (_) {
+        _pasteFromClipboard();
+        return null;
+      },
+    ),
   };
 
   // ── Public action API ────────────────────────────────────────────
@@ -1425,7 +1469,6 @@ class TerminalViewState extends State<TerminalView> {
       bindings: {
         ...TerminalBindings.build(
           copySelection: _copySelectionToClipboard,
-          paste: _pasteFromClipboard,
         ),
         // Readline-style Ctrl+U/K/L/A/E — write raw control bytes
         // through the PTY so the shell receives them. These are the
@@ -2055,4 +2098,33 @@ Uint8List _pasteBytes(String text, {required int modeFlags}) {
     ]);
   }
   return Uint8List.fromList(utf8.encode(text));
+}
+
+/// Bytes written to the PTY when the user triggers a paste (Ctrl+V /
+/// Shift+Insert / right-click) but the system clipboard holds an image (or
+/// any non-text content) instead of plain text.
+///
+/// Modern TUI apps that accept pasted images — opencode, MimoCode, and other
+/// AI-coding CLIs — do NOT expect the terminal to deliver image bytes. They
+/// bind Ctrl+V to a command that reads the OS clipboard themselves (on
+/// Windows, shelling out to `powershell.exe` for
+/// `[System.Windows.Forms.Clipboard]::GetImage()`; see opencode's
+/// `packages/tui/src/clipboard.ts`). For that keybind to fire, the app must
+/// receive the Ctrl+V *keystroke* — the standard control byte `0x16`, which
+/// opentui's `parseKeypress` decodes as `{name:"v", ctrl:true}` (Ctrl+A..Z ⇒
+/// 0x01..0x1a). Octodo used to swallow Ctrl+V when the clipboard had no text,
+/// so the keystroke never reached the app and image pasting silently failed
+/// (GitHub issue #2).
+///
+/// This is the *primary* mechanism — opencode's `input_paste` binding
+/// ("ctrl+v", described "Paste from clipboard") — and is what makes image
+/// paste work in Windows Terminal 1.25+. (An earlier attempt emitted an empty
+/// bracketed paste to hit opencode's `onPaste` empty-payload fallback, but
+/// that path proved unreliable across opencode/opentui versions.)
+///
+/// NB: in a readline shell `0x16` is quoted-insert — but that's standard
+/// behavior for any terminal that passes Ctrl+V through, and this branch only
+/// runs when the clipboard has no text, so a normal text paste is unaffected.
+Uint8List _imagePasteTriggerBytes() {
+  return Uint8List.fromList([0x16]);
 }

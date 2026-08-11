@@ -203,7 +203,6 @@ void main() {
     test('every binding has a non-null callback', () {
       final bindings = TerminalBindings.build(
         copySelection: () {},
-        paste: () {},
       );
       expect(bindings, isNotEmpty);
       for (final entry in bindings.entries) {
@@ -223,7 +222,6 @@ void main() {
       // shift variants) to `fa.TerminalView`.
       final bindings = TerminalBindings.build(
         copySelection: () {},
-        paste: () {},
       );
 
       // None of the zoom activators should be present.
@@ -315,7 +313,7 @@ void main() {
           focusPaneInDirection: (_) {},
           toggleMaximizePane: () {},
         ),
-        TerminalBindings.build(copySelection: () {}, paste: () {}),
+        TerminalBindings.build(copySelection: () {}),
       ];
       final readlineKeys = <LogicalKeyboardKey>{
         LogicalKeyboardKey.keyA,
@@ -341,7 +339,8 @@ void main() {
         // reopen-last-closed-tab binding per user request).
         LogicalKeyboardKey.keyU,
         // keyV is intentionally NOT in this set — Ctrl/Cmd+V is the
-        // documented paste binding (industry-standard).
+        // industry-standard paste binding (owned by flutter_alacritty's
+        // Shortcuts map, not TerminalBindings — see terminal_view.dart).
         LogicalKeyboardKey.keyW,
         LogicalKeyboardKey.keyX,
         LogicalKeyboardKey.keyY,

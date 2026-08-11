@@ -655,7 +655,6 @@ class _AppShellState extends State<AppShell>
       ),
       ...TerminalBindings.build(
         copySelection: _delegateCopySelection,
-        paste: _delegatePaste,
       ),
     };
   }
@@ -764,9 +763,6 @@ class _AppShellState extends State<AppShell>
   void _delegateCopySelection() => _activeWorkspace?.key.currentState
       ?.getFocusedTerminalViewState()
       ?.copySelectionToClipboardPublic();
-  void _delegatePaste() => _activeWorkspace?.key.currentState
-      ?.getFocusedTerminalViewState()
-      ?.pasteFromClipboardPublic();
 
   // ── Workspace management ──────────────────────────────────────────
 

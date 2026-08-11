@@ -481,33 +481,27 @@ class WorkspaceBindings {
 class TerminalBindings {
   static Map<ShortcutActivator, VoidCallback> build({
     required VoidCallback copySelection,
-    required VoidCallback paste,
   }) {
     final bindings = <ShortcutActivator, VoidCallback>{};
 
-    // Clipboard. We bind:
-    //   - `Ctrl+Shift+C`       → copy selection (matches FA's default
-    //     but we keep our copy for consistency — works in all paths
-    //     including right-click menu / accessibility tools that prefer
-    //     us over FA).
-    //   - `Ctrl+Insert`        → copy selection (alt).
-    //   - `Ctrl+V`             → paste (FA's stock bindings only ship
-    //     `Ctrl+Shift+V` for paste, not bare `Ctrl+V`).
-    //   - `Shift+Insert`       → paste (alt).
+    // Clipboard COPY. We bind:
+    //   - `Ctrl+Shift+C` → copy selection (matches FA's default but we keep
+    //     our own for consistency — works in all paths including right-click
+    //     menu / accessibility tools that prefer us over FA).
+    //   - `Ctrl+Insert`  → copy selection (alt).
     //
-    // `Ctrl+Shift+V` is **deliberately not bound** here. Alacritty's
-    // own `defaultTerminalShortcuts` ships `Ctrl+Shift+V → PasteIntent`,
-    // and our delegation pattern was producing inconsistent results
-    // (the user reported the paste silently failing while `Ctrl+Shift+C`
-    // worked). Letting alacritty's bundled `defaultPasteAction(engine,
-    // controller)` handle it is the right call — alacritty owns the
-    // engine's clipboard-load pathway and we don't want to fight it.
+    // PASTE (Ctrl+V / Ctrl+Shift+V / Shift+Insert) is NOT bound here. It is
+    // owned entirely by flutter_alacritty's `Shortcuts` map — see
+    // `TerminalViewState._alacrittyShortcutsWithShiftVariants` (maps all
+    // three forms to `PasteIntent`) and `_alacrittyActions` (routes
+    // `PasteIntent` to the image-aware `_pasteFromClipboard`). Binding paste
+    // at this app level — delegating through `_AppShellState` — proved
+    // unreliable for the image-clipboard trigger; the PasteIntent path
+    // calls `_pasteFromClipboard` directly on the focused TerminalViewState.
+    // See GitHub issue #2.
     bindings[primary(LogicalKeyboardKey.keyC, shift: true)] = copySelection;
     bindings[const SingleActivator(LogicalKeyboardKey.insert, control: true)] =
         copySelection;
-    bindings[primary(LogicalKeyboardKey.keyV)] = paste;
-    bindings[const SingleActivator(LogicalKeyboardKey.insert, shift: true)] =
-        paste;
 
     // Readline passthrough (Ctrl+U/K/L/A/E) is NOT in this map — the
     // terminal view wires those directly to `_engine.write(...)` with

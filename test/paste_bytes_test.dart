@@ -153,4 +153,21 @@ void main() {
       expect(body, utf8.encode('cmd1\ncmd2\ncmd3'));
     });
   });
+
+  group('imagePasteTriggerBytesForTest', () {
+    // When a paste (Ctrl+V / Shift+Insert / right-click) finds no text in the
+    // clipboard because it holds an image, Octodo forwards a Ctrl+V keystroke
+    // (0x16) to the PTY so TUI apps that read the OS clipboard themselves
+    // (opencode, MimoCode, ...) can react. opencode binds `ctrl+v` →
+    // `prompt.paste` (described "Paste from clipboard"); opentui's
+    // parseKeypress decodes 0x16 as {name:"v", ctrl:true}. See
+    // _imagePasteTriggerBytes and GitHub issue #2.
+
+    test('emits the raw Ctrl+V byte (0x16)', () {
+      expect(
+        TerminalViewState.imagePasteTriggerBytesForTest(),
+        [0x16],
+      );
+    });
+  });
 }
