@@ -39,10 +39,32 @@ class Surface extends ChangeNotifier {
   /// with [args] in `cmd.exe /c …` — see `TerminalView._start`.
   String program = '';
 
-  /// Arguments for [program]. Mirrors `ShellProfile.args`. The spawn layer
-  /// does NOT add `-NoProfile` (so the user's `$PROFILE` loads — see
-  /// `TerminalViewState._buildPtyLaunchArgs` and issue #1).
+  /// Arguments for [program]. Mirrors `ShellProfile.args` but may be
+  /// overridden per-surface (e.g. WSL `--cd <path>` for workspace-scoped
+  /// cwd persistence). The spawn layer does NOT add `-NoProfile` (so the
+  /// user's `$PROFILE` loads — see `TerminalViewState._buildPtyLaunchArgs`
+  /// and issue #1).
   List<String> args = const [];
+
+  /// Windows working directory for the PTY spawn. When non-null this
+  /// overrides the layout-level [PaneLayout.workingDirectory] (which is
+  /// always `userHome`). Set by `_makeSurface` when a workspace-remembered
+  /// cwd is available. null means "use the layout default".
+  String? spawnCwd;
+
+  /// Environment variables to merge on top of `Platform.environment`
+  /// at spawn. Used to inject `PROMPT_COMMAND` for OSC 7 cwd reporting
+  /// in shells that don't emit it by default (Debian WSL, Git Bash).
+  Map<String, String> env = const {};
+
+  /// The user's home directory in the shell-native path format, used by
+  /// [_isAtHome] to decide whether to render `~` in the tab chip.
+  ///   - WSL: `/home/<user>` (from `_queryWslHome`), null if timed out.
+  ///   - Git Bash: `/c/Users/<user>` (translated from `userHome`).
+  ///   - pwsh / cmd: `C:\Users\<user>` (unchanged Windows path).
+  /// When null (WSL `$HOME` query timed out), [_isAtHome] falls back to
+  /// a `/home/<user>` shape heuristic.
+  String? homePath;
 
   /// The FocusNode the [TerminalView] uses for keyboard input. Owned
   /// by the Surface so the workspace can request focus without
@@ -184,36 +206,39 @@ class Surface extends ChangeNotifier {
   /// (e.g. ConPTY sent the raw process name `pwsh.exe` and the
   /// `.exe` filter stripped it), falls back to [fallbackTitle] so
   /// the chip never shows the literal "shell" placeholder.
+  ///
+  /// For shells with `showCwdInTitle == true` (WSL, Git Bash), the
+  /// OSC 0 title is skipped entirely in favour of [fallbackTitle]
+  /// (OSC 7 based). ConPTY intermittently drops the OSC 0 sequence
+  /// emitted by the shell's PS1, which would leave the chip showing
+  /// a stale cwd. OSC 7 (emitted by our injected `PROMPT_COMMAND`)
+  /// is consistently passed through by ConPTY for WSL/Git Bash, so
+  /// [fallbackTitle] is the more reliable source.
   String get chipTitle {
-    if (_title.isNotEmpty) {
+    if (_title.isNotEmpty && !(profile?.showCwdInTitle ?? false)) {
       final shortened = _shortenTitle(_title);
       if (shortened.isNotEmpty) return shortened;
     }
     return fallbackTitle;
   }
 
-  /// True when [cwd] (an OSC-7-reported or initial-cwd path) should be
-  /// shown as `~` in the tab chip. Three cases qualify:
-  ///   1. WSL sentinel path: [initialCwd] is the literal `'~'` marker
-  ///      (the 1 s `_queryWslHome` call in `terminal_workspace.dart`
-  ///      timed out, but the shell still started in `$HOME` thanks to
-  ///      `--cd ~`). Match any path inside `/home/<…>` as the user's
-  ///      `$HOME` so the `~` shortcut still fires on failed queries.
-  ///      A literal `cwd == '~'` (i.e. OSC 7 hasn't fired yet so
-  ///      fallbackTitle reads `cwd = initialCwd`) intentionally does
-  ///      NOT qualify — the chip should fall back to the bare
-  ///      shortName until a real cwd arrives.
-  ///   2. Resolved absolute home or any non-WSL shell: literal
-  ///      `cwd == initialCwd` — the classic "shell never `cd`'d"
-  ///      check.
-  /// Once the user `cd`s outside the matched shape, this returns false
-  /// and the chip falls back to showing the directory basename.
+  /// True when [cwd] should be shown as `~` in the tab chip.
+  ///
+  /// Uses [Surface.homePath] when available (the resolved `$HOME`).
+  /// When `homePath` is null (WSL `$HOME` query timed out), falls back
+  /// to a `/home/<user>` shape heuristic — exactly one path component
+  /// after `/home/` — so `/home/s1` matches but `/home/s1/src/x` does
+  /// not. This prevents every subdirectory under `/home/` from
+  /// incorrectly triggering the `~` shortcut.
+  static final RegExp _wslHomeShapeRe = RegExp(r'^/home/[^/]+$');
+
   bool _isAtHome(String cwd) {
-    final sentinel = profile?.isWsl == true && initialCwd == '~';
-    if (sentinel) {
-      return cwd == '/home' || cwd.startsWith('/home/');
+    final home = homePath;
+    if (home != null) return cwd == home;
+    if (profile?.isWsl == true) {
+      return _wslHomeShapeRe.hasMatch(cwd);
     }
-    return initialCwd != null && cwd == initialCwd;
+    return false;
   }
 
   static String _newId() {
@@ -697,6 +722,11 @@ class PaneLayout extends StatelessWidget {
   /// Working directory passed to each [TerminalView] (typically user home).
   final String workingDirectory;
 
+  /// Called whenever a shell reports its cwd via OSC 7. The workspace
+  /// uses this to remember the last-known cwd per shell type so the next
+  /// tab of the same shell starts there.
+  final void Function(ShellProfile profile, String cwd)? onShellCwdChanged;
+
   /// Available shell profiles for the new-tab/shell-selector menu.
   final List<ShellProfile> availableShells;
   final int defaultShellIndex;
@@ -726,6 +756,7 @@ class PaneLayout extends StatelessWidget {
     required this.onMoveSurfaceBetweenContainers,
     required this.onDropToSplitEdge,
     required this.workingDirectory,
+    this.onShellCwdChanged,
     required this.availableShells,
     required this.defaultShellIndex,
     required this.onDefaultShellChanged,
@@ -906,6 +937,12 @@ class PaneLayout extends StatelessWidget {
                             // new directory even when the shell doesn't
                             // set its own OSC 0/2 title.
                             surface.currentCwd = pwd.isEmpty ? null : pwd;
+                            // Feed the workspace-level cwd memory so the
+                            // next tab of the same shell type starts here.
+                            final p = surface.profile;
+                            if (p != null && pwd.isNotEmpty) {
+                              onShellCwdChanged?.call(p, pwd);
+                            }
                           },
                           onExited: () {
                             surface.exited = true;

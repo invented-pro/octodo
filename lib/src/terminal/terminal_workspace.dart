@@ -176,6 +176,13 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   PaneContainer? _focusedContainer;
   int _defaultShellIndex = 0;
 
+  /// Last-known cwd per shell type, keyed by `ShellProfile.shortName`.
+  /// Updated whenever a Surface reports a new cwd via OSC 7 (for shells
+  /// with reliable OSC 7 — `showCwdInTitle == true`). Consumed by
+  /// [_makeSurface] so a new tab of the same shell starts where the last
+  /// one left off. Session-scoped — not persisted to disk.
+  final Map<String, String> _lastCwdByShell = {};
+
   /// Workspace-level "any tab drag in flight" signal. Owned here so
   /// every [PaneContainer] in the tree rebuilds its `_PaneDropOverlay`
   /// (and the tab bar's `_localDragActive`-derived feedback) the moment
@@ -441,8 +448,8 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
 
   /// Build a [Surface] for [profile], starting in [workingDirectory].
   /// The profile is carried so the tab bar can render the shell's
-  /// icon + shortName as the fallback title before the shell sets
-  /// its own via OSC.
+  /// icon + shortName as the fallback title before the shell sets its
+  /// own via OSC.
   ///
   /// [workingDirectory] is always a Windows path. We translate it to
   /// the shell-native form so `Surface.initialCwd == currentCwd`
@@ -454,14 +461,123 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// path (`/mnt/c/Users/<user>`) does NOT match OSC 7's Linux form
   /// and is used only as the timeout/failure fallback. The query is
   /// awaited once per surface creation.
+  ///
+  /// When a workspace-remembered cwd exists for this shell type
+  /// ([_lastCwdByShell]), the surface starts there instead:
+  ///   - WSL: the `--cd` arg is overridden with the remembered Linux
+  ///     path (the PTY `workingDirectory` is ignored by WSL when
+  ///     `--cd` is present).
+  ///   - Git Bash: the remembered MSYS path is reverse-translated to
+  ///     a Windows path and set as [Surface.spawnCwd].
+  /// Only shells with reliable OSC 7 (`showCwdInTitle == true`)
+  /// contribute to the remembered map, so this is a no-op for
+  /// PowerShell / CMD / Nushell.
+  ///
+  /// For shells with `showCwdInTitle == true`, a `PROMPT_COMMAND` that
+  /// emits OSC 7 is injected via [Surface.env]. Most bash-based shells
+  /// (Debian WSL, plain Git Bash) don't emit OSC 7 by default; the env
+  /// var is picked up by bash unless the user's `.bashrc` sets its own
+  /// `PROMPT_COMMAND` (which is the correct behaviour — oh-my-posh,
+  /// starship, etc. emit OSC 7 themselves). For WSL the var is forwarded
+  /// via `WSLENV`.
   Future<Surface> _makeSurface(
     ShellProfile profile,
     String workingDirectory,
   ) async {
-    final initialCwd = await _resolveInitialCwd(profile, workingDirectory);
+    final remembered = _lastCwdByShell[profile.shortName];
+
+    String spawnCwd = workingDirectory;
+    List<String> args = profile.args;
+    String? initialCwdOverride;
+    String? homePath;
+    final Map<String, String> env = {};
+
+    // Resolve the home path (used by Surface._isAtHome) and, for WSL,
+    // reuse the $HOME query for initialCwd to avoid a second call.
+    if (profile.isWsl) {
+      final wslHome = await _queryWslHome(profile);
+      homePath = wslHome;
+    } else {
+      homePath = translateCwdForShell(
+        cwd: workingDirectory,
+        program: profile.program,
+      );
+    }
+
+    if (remembered != null && profile.showCwdInTitle) {
+      if (profile.isWsl) {
+        args = _wslArgsWithCd(profile, remembered);
+        initialCwdOverride = remembered;
+      } else {
+        final winPath = reverseTranslateCwd(
+          cwd: remembered,
+          program: profile.program,
+        );
+        if (winPath != null) {
+          spawnCwd = winPath;
+        }
+      }
+    }
+
+    if (profile.showCwdInTitle) {
+      env['PROMPT_COMMAND'] = _osc7PromptCommand;
+      if (profile.isWsl) {
+        final existing = Platform.environment['WSLENV'] ?? '';
+        env['WSLENV'] = existing.contains('PROMPT_COMMAND')
+            ? existing
+            : (existing.isEmpty
+                ? 'PROMPT_COMMAND/u'
+                : '$existing:PROMPT_COMMAND/u');
+      }
+    }
+
+    final initialCwd = initialCwdOverride ??
+        await _resolveInitialCwd(profile, spawnCwd, preresolvedWslHome: homePath);
     return Surface(profile: profile, initialCwd: initialCwd)
       ..program = profile.program
-      ..args = profile.args;
+      ..args = args
+      ..spawnCwd = spawnCwd
+      ..env = env
+      ..homePath = homePath;
+  }
+
+  /// Bash snippet that emits an OSC 7 sequence (`ESC ] 7 ; file://host/path
+  /// ST`) before each prompt. Used as `PROMPT_COMMAND` so the terminal engine
+  /// can track the shell's working directory. The `%s` format specifiers are
+  /// filled by `printf` from `"$(hostname)"` and `"$PWD"` (double-quoted so
+  /// bash expands them at prompt time).
+  static const String _osc7PromptCommand =
+      r'''printf '\033]7;file://%s%s\033\\' "$(hostname)" "$PWD"''';
+
+  /// Replace (or append) the `--cd` argument in [profile]'s args with
+  /// [linuxPath], so a new WSL tab starts in the remembered directory
+  /// instead of the default `~`.
+  static List<String> _wslArgsWithCd(
+    ShellProfile profile,
+    String linuxPath,
+  ) {
+    final args = List<String>.of(profile.args);
+    final cdIdx = args.indexWhere(
+      (a) => a == '--cd' || a.startsWith('--cd='),
+    );
+    if (cdIdx >= 0) {
+      if (args[cdIdx] == '--cd' && cdIdx + 1 < args.length) {
+        args[cdIdx + 1] = linuxPath;
+      } else {
+        args[cdIdx] = '--cd=$linuxPath';
+      }
+    } else {
+      args.addAll(['--cd', linuxPath]);
+    }
+    return args;
+  }
+
+  /// Record a shell's last-known cwd (from OSC 7) so the next tab of
+  /// the same type starts there. Only stores for shells with reliable
+  /// OSC 7 reporting (`showCwdInTitle == true`).
+  void _rememberShellCwd(ShellProfile profile, String cwd) {
+    if (!profile.showCwdInTitle || cwd.isEmpty) return;
+    _lastCwdByShell[profile.shortName] = cwd;
   }
 
   /// Marker sentinel used as `initialCwd` when a WSL distro's `$HOME` could
@@ -473,10 +589,11 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
 
   Future<String> _resolveInitialCwd(
     ShellProfile profile,
-    String workingDirectory,
-  ) async {
+    String workingDirectory, {
+    String? preresolvedWslHome,
+  }) async {
     if (profile.isWsl) {
-      final home = await _queryWslHome(profile);
+      final home = preresolvedWslHome ?? await _queryWslHome(profile);
       if (home != null) return home;
       // Query failed / timed out — bash still starts in $HOME via
       // `--cd ~`, so we don't translate the Windows cwd down to a
@@ -1397,6 +1514,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
                   isAnyTabDragActive: _isAnyTabDragActive,
                   onAnyDragActiveChanged: _setAnyDragActive,
                   workingDirectory: userHome,
+                  onShellCwdChanged: _rememberShellCwd,
                   availableShells: widget.availableShells,
                   defaultShellIndex: _defaultShellIndex,
                   onDefaultShellChanged: _openShellFromSelector,

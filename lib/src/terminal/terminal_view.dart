@@ -23,6 +23,7 @@ import '../settings/settings_runtime.dart';
 import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart' show Surface;
+import 'shell_cwd.dart';
 import 'terminal_settings_scope.dart';
 
 final Logger _log = moduleLogger('terminal.terminal_view');
@@ -1038,9 +1039,10 @@ class TerminalViewState extends State<TerminalView> {
   void _start() {
     final (ptyProgram, ptyArgs) =
         _buildPtyLaunchArgs(widget.surface.program, widget.surface.args);
+    final cwd = widget.surface.spawnCwd ?? widget.workingDirectory;
 
     _log.fine(
-      '_start: ptyProgram=$ptyProgram ptyArgs=$ptyArgs (program="${widget.surface.program}") cwd=${widget.workingDirectory}',
+      '_start: ptyProgram=$ptyProgram ptyArgs=$ptyArgs (program="${widget.surface.program}") cwd=$cwd',
     );
     final pty = fa.FlutterPtyBackend(
       rows: 24,
@@ -1048,7 +1050,8 @@ class TerminalViewState extends State<TerminalView> {
       shell: fa.ShellConfig(
         program: ptyProgram.isEmpty ? null : ptyProgram,
         args: ptyArgs,
-        workingDirectory: widget.workingDirectory,
+        workingDirectory: cwd,
+        env: widget.surface.env,
       ),
     );
     _pty = pty;
@@ -1133,7 +1136,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _syncPwd() {
-    final pwd = _engine.workingDir.value;
+    final pwd = stripFileUri(_engine.workingDir.value);
     if (pwd == _lastPwd) return;
     _lastPwd = pwd;
     widget.onPwdChanged?.call(pwd);

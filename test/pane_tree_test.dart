@@ -146,6 +146,40 @@ void main() {
     });
 
     test(
+        'cd into /home/<user>/subdir → basename, NOT `~` '
+        '(regression: only one component after /home/ is home)',
+        () {
+      // `/home/u1/projects` starts with /home/ but is NOT home — the
+      // shape heuristic must require exactly one component after
+      // /home/. This is the user-reported bug where every subdir under
+      // /home/ incorrectly showed `~`.
+      final s = Surface(profile: wslProfile(), initialCwd: '~');
+      s.currentCwd = '/home/u1/projects';
+      expect(s.fallbackTitle, 'ubuntu projects');
+    });
+
+    test(
+        'homePath set: cwd == homePath → `~`',
+        () {
+      final s = Surface(profile: wslProfile(), initialCwd: '/mnt/c/proj')
+        ..homePath = '/home/u1';
+      s.currentCwd = '/home/u1';
+      expect(s.fallbackTitle, 'ubuntu ~');
+    });
+
+    test(
+        'homePath set: cwd != homePath (remembered cwd) → basename, NOT `~`',
+        () {
+      // A new tab starting at a remembered cwd (/mnt/c/proj) that
+      // happens to be under /home/ must not trigger the `~` shortcut
+      // when homePath is known.
+      final s = Surface(profile: wslProfile(), initialCwd: '/home/u1/src')
+        ..homePath = '/home/u1';
+      s.currentCwd = '/home/u1/src';
+      expect(s.fallbackTitle, 'ubuntu src');
+    });
+
+    test(
         'sentinel with empty currentCwd and empty initialCwd → just shortName',
         () {
       // OSC 7 hasn't fired yet. Sentinel matches no path; the fallback

@@ -157,4 +157,170 @@ void main() {
     expect(bash, '/c/Users/alice');
     expect(wsl, isNot(equals(bash)));
   });
+
+  group('reverseTranslateCwd', () {
+    test('wsl.exe /mnt/<drive>/… → Windows', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/mnt/c/Users/alice/projects',
+          program: r'C:\Windows\System32\wsl.exe',
+        ),
+        r'C:\Users\alice\projects',
+      );
+    });
+
+    test('bash.exe /<drive>/… → Windows', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/c/Users/alice/projects',
+          program: r'C:\Program Files\Git\bin\bash.exe',
+        ),
+        r'C:\Users\alice\projects',
+      );
+    });
+
+    test('sh.exe /<drive>/… → Windows (same as bash)', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/d/repo',
+          program: r'C:\msys64\usr\bin\sh.exe',
+        ),
+        r'D:\repo',
+      );
+    });
+
+    test('already-Windows path passes through', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: r'C:\Users\alice',
+          program: r'C:\Program Files\PowerShell\7\pwsh.exe',
+        ),
+        r'C:\Users\alice',
+      );
+    });
+
+    test('wsl drive root → drive:\\', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/mnt/c/',
+          program: r'C:\Windows\System32\wsl.exe',
+        ),
+        r'C:\',
+      );
+    });
+
+    test('msys drive root → drive:\\', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/c/',
+          program: r'C:\Program Files\Git\bin\bash.exe',
+        ),
+        r'C:\',
+      );
+    });
+
+    test('pure POSIX /home → null (no Windows equivalent)', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/home/alice',
+          program: r'C:\Windows\System32\wsl.exe',
+        ),
+        isNull,
+      );
+    });
+
+    test('MSYS internal /usr/bin → null', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/usr/bin',
+          program: r'C:\Program Files\Git\bin\bash.exe',
+        ),
+        isNull,
+      );
+    });
+
+    test('empty cwd → null', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '',
+          program: r'C:\Windows\System32\wsl.exe',
+        ),
+        isNull,
+      );
+    });
+
+    test('upper-case drive letter in result', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/mnt/z/data',
+          program: r'C:\Windows\System32\wsl.exe',
+        ),
+        r'Z:\data',
+      );
+    });
+
+    test('round-trip: translate then reverse yields original Windows path', () {
+      const original = r'D:\projects\octodo';
+      final posix = translateCwdForShell(
+        cwd: original,
+        program: r'C:\Windows\System32\wsl.exe',
+      );
+      final back = reverseTranslateCwd(
+        cwd: posix,
+        program: r'C:\Windows\System32\wsl.exe',
+      );
+      expect(back, original);
+    });
+
+    test('pwsh.exe with POSIX cwd → null (no mount mapping)', () {
+      expect(
+        reverseTranslateCwd(
+          cwd: '/mnt/c/Users',
+          program: r'C:\Program Files\PowerShell\7\pwsh.exe',
+        ),
+        isNull,
+      );
+    });
+  });
+
+  group('stripFileUri', () {
+    test('file://hostname/path → /path', () {
+      expect(
+        stripFileUri('file://HP66/home/alice/projects'),
+        '/home/alice/projects',
+      );
+    });
+
+    test('file:///path (localhost) → /path', () {
+      expect(
+        stripFileUri('file:///home/alice'),
+        '/home/alice',
+      );
+    });
+
+    test('bare POSIX path unchanged', () {
+      expect(
+        stripFileUri('/mnt/c/Users/alice'),
+        '/mnt/c/Users/alice',
+      );
+    });
+
+    test('Windows path unchanged', () {
+      expect(
+        stripFileUri(r'C:\Users\alice'),
+        r'C:\Users\alice',
+      );
+    });
+
+    test('empty string unchanged', () {
+      expect(stripFileUri(''), '');
+    });
+
+    test('file:// with no path after hostname', () {
+      expect(
+        stripFileUri('file://hostname'),
+        'file://hostname',
+      );
+    });
+  });
 }

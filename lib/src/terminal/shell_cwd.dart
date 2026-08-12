@@ -1,3 +1,23 @@
+/// Extract the path component from a `file://` URI emitted by OSC 7.
+///
+/// The Alacritty engine stores the raw OSC 7 payload (`file://host/path`)
+/// in `workingDir` without parsing the URI, so callers that need the bare
+/// path must strip the scheme + authority themselves.
+///
+///   `file://hostname/home/user` → `/home/user`
+///   `file:///home/user`         → `/home/user` (empty host = localhost)
+///   `/home/user`                 → `/home/user` (already a bare path)
+///   `C:\Users`                   → `C:\Users`   (Windows path, unchanged)
+String stripFileUri(String cwd) {
+  if (!cwd.startsWith('file://')) return cwd;
+  // Skip "file://" (7 chars), then find the first "/" which marks the
+  // start of the path (everything before it is the hostname).
+  final afterScheme = cwd.substring(7);
+  final slashIdx = afterScheme.indexOf('/');
+  if (slashIdx >= 0) return afterScheme.substring(slashIdx);
+  return cwd;
+}
+
 /// Convert a Windows path to the format the given shell expects for
 /// its `lpCurrentDirectory` (and the format its OSC 7 reports back).
 ///
@@ -58,4 +78,51 @@ String _windowsToMsys(String p) {
   final drive = m.group(1)!.toLowerCase();
   final rest = m.group(2)!.replaceAll('\\', '/');
   return '/$drive/$rest';
+}
+
+/// Reverse of [translateCwdForShell]: converts a POSIX-style path
+/// reported by OSC 7 back to a Windows path, for spawning a new shell
+/// in the remembered directory.
+///
+///   `/mnt/c/Users/x`  →  `C:\Users\x`   (WSL)
+///   `/c/Users/x`      →  `C:\Users\x`   (MSYS / Git Bash)
+///   `C:\Users\x`      →  `C:\Users\x`   (already Windows — passthrough)
+///   `/home/user`      →  `null`         (pure POSIX — no Windows form)
+///   `/usr/bin`        →  `null`         (MSYS internal — no Windows form)
+///
+/// Returns `null` when the path has no Windows equivalent, so callers
+/// can fall back to the user home. Classification is by the executable's
+/// basename, matching [translateCwdForShell].
+String? reverseTranslateCwd({
+  required String cwd,
+  required String program,
+}) {
+  if (cwd.isEmpty) return null;
+  // Already a Windows drive path — return as-is (handles both `\` and `/`).
+  if (_drivePathRe.hasMatch(cwd)) return cwd;
+  final base = _basename(program.toLowerCase());
+  if (base == 'wsl.exe') {
+    final m = _wslMountRe.firstMatch(cwd);
+    if (m != null) {
+      return _toWindowsDrive(m.group(1)!, m.group(2));
+    }
+    return null;
+  }
+  if (base == 'bash.exe' || base == 'sh.exe') {
+    final m = _msysMountRe.firstMatch(cwd);
+    if (m != null) {
+      return _toWindowsDrive(m.group(1)!, m.group(2));
+    }
+    return null;
+  }
+  return null;
+}
+
+final RegExp _wslMountRe = RegExp(r'^/mnt/([a-z])(?:/(.*))?$');
+final RegExp _msysMountRe = RegExp(r'^/([a-z])(?:/(.*))?$');
+
+String _toWindowsDrive(String driveLower, String? rest) {
+  final drive = driveLower.toUpperCase();
+  if (rest == null || rest.isEmpty) return '$drive:\\';
+  return '$drive:\\${rest.replaceAll('/', '\\')}';
 }
