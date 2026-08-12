@@ -73,6 +73,34 @@ class ShellProfile {
   /// whether to query the distro `$HOME`.
   bool get isWsl => p.basename(program).toLowerCase() == 'wsl.exe';
 
+  /// `true` for `nu.exe` (Nushell). Used by the workspace and terminal
+  /// view to identify Nushell for cwd tracking via OSC 2 title parsing
+  /// (ConPTY eats OSC 7 from Nushell on Windows).
+  bool get isNushell => p.basename(program).toLowerCase() == 'nu.exe';
+
+  /// Whether the workspace should remember this shell's cwd for
+  /// cross-tab persistence. Distinct from [showCwdInTitle]:
+  ///
+  /// - WSL / Git Bash: both `true` (OSC 7 is reliable AND drives the
+  ///   chip title via `fallbackTitle`).
+  /// - Nushell: `showCwdInTitle` is `false` (chip title comes from
+  ///   OSC 2), but `remembersCwd` is `true` because the cwd is parsed
+  ///   from Nushell's OSC 2 title by `TerminalView._extractCwdFromNuTitle`.
+  /// - PowerShell / CMD: both `false` (OSC 7 is unreliable through
+  ///   ConPTY on those shells).
+  bool get remembersCwd => showCwdInTitle || isNushell;
+
+  /// `true` for bash-based shells that pick up the `PROMPT_COMMAND` env var
+  /// to emit OSC 7. WSL and Git Bash need this injection because their
+  /// default `PROMPT_COMMAND` is empty (especially Debian WSL, plain Git
+  /// Bash). Nushell and PowerShell do NOT use `PROMPT_COMMAND`, so they
+  /// must be excluded from the env injection in `_makeSurface`.
+  bool get needsPromptCommandForOsc7 {
+    if (isWsl) return true;
+    final base = p.basename(program).toLowerCase();
+    return base == 'bash.exe' || base == 'sh.exe';
+  }
+
   const ShellProfile({
     required this.label,
     required this.program,
@@ -518,18 +546,11 @@ List<ShellProfile> detectShellsFrom({
       iconAsset: 'assets/icons/nushell.svg',
       color: _nuTeal,
       shortName: 'nu',
-      // Conservative default: false. Nushell's stable OSC 7 emission
-      // depends on prompt layout — the default `> ` prompt has no
-      // working-directory component, and users who customise their
-      // prompt must opt into OSC 7 (e.g. by emitting the form
-      // `\e]7;file://HOST/PATH\e\\` from a `before_prompt` hook). When
-      // we mistakenly report `true` for shells that don't emit OSC 7,
-      // the [showCwdInTitle] docstring warns the chip can render a
-      // garbled `nu C:/Users/...` string on every prompt redraw (the
-      // same class of bug PowerShell 7 / WindowsPowerShell / CMD
-      // avoid by defaulting to false). PowerShell-family / CMD / bash
-      // with PROMPT_COMMAND already cover the "cwd in chip" use
-      // case for most setups.
+      // `showCwdInTitle` stays `false`: the chip title uses Nushell's OSC 2
+      // (window title, which includes the cwd and is on by default).
+      // OSC 7 (cwd URI) is unreliable through ConPTY for Nushell. Cwd
+      // persistence works by parsing the cwd from the OSC 2 title (see
+      // `TerminalView._extractCwdFromNuTitle` and [remembersCwd]).
       showCwdInTitle: false,
     ));
   }

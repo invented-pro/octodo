@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:octodo/src/terminal/shell_profiles.dart';
@@ -125,10 +126,9 @@ void main() {
       expect(profiles.firstWhere((p) => p.shortName == 'debian').iconAsset,
           'assets/icons/debian.svg');
       expect(nu.iconAsset, 'assets/icons/nushell.svg');
-      // Conservative — see the comment at the profile construction
-      // site. PowerShell 7 / WindowsPowerShell / CMD all default to
-      // false for the same reason (OSC 7 form is not stable across
-      // all default prompt layouts).
+      // showCwdInTitle is false: the chip title comes from Nushell's
+      // OSC 2 (window title), not OSC 7. Cwd persistence is handled
+      // via [remembersCwd] + OSC 2 title parsing.
       expect(nu.showCwdInTitle, isFalse);
     });
 
@@ -567,6 +567,112 @@ void main() {
       // SUSE Linux Enterprise shares the openSUSE chameleon.
       expect(resolveWslIconAsset('SLES-15'),
           'assets/icons/opensuse.svg');
+    });
+  });
+
+  group('needsPromptCommandForOsc7', () {
+    test('wsl.exe → true', () {
+      final p = ShellProfile(
+        label: 'Ubuntu',
+        program: _wslPath,
+        args: const ['-d', 'Ubuntu', '--cd', '~'],
+        icon: Icons.laptop_chromebook,
+        color: Colors.green,
+        shortName: 'ubuntu',
+        showCwdInTitle: true,
+      );
+      expect(p.needsPromptCommandForOsc7, isTrue);
+    });
+
+    test('bash.exe → true', () {
+      final p = ShellProfile(
+        label: 'Git Bash',
+        program: _gitBashPath,
+        args: const ['--login', '-i'],
+        icon: Icons.call_split,
+        color: Colors.orange,
+        shortName: 'bash',
+        showCwdInTitle: true,
+      );
+      expect(p.needsPromptCommandForOsc7, isTrue);
+    });
+
+    test('nu.exe → false (Nushell does not use PROMPT_COMMAND)', () {
+      final p = ShellProfile(
+        label: 'Nushell',
+        program: _nuWingetPath,
+        args: const [],
+        icon: Icons.terminal,
+        color: Colors.teal,
+        shortName: 'nu',
+        showCwdInTitle: true,
+      );
+      expect(p.needsPromptCommandForOsc7, isFalse);
+    });
+
+    test('pwsh.exe → false', () {
+      final p = ShellProfile(
+        label: 'PowerShell 7',
+        program: _pwshPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'pwsh',
+      );
+      expect(p.needsPromptCommandForOsc7, isFalse);
+    });
+  });
+
+  group('remembersCwd', () {
+    test('wsl.exe → true (showCwdInTitle)', () {
+      final p = ShellProfile(
+        label: 'Ubuntu',
+        program: _wslPath,
+        args: const ['-d', 'Ubuntu', '--cd', '~'],
+        icon: Icons.laptop_chromebook,
+        color: Colors.green,
+        shortName: 'ubuntu',
+        showCwdInTitle: true,
+      );
+      expect(p.remembersCwd, isTrue);
+    });
+
+    test('bash.exe → true (showCwdInTitle)', () {
+      final p = ShellProfile(
+        label: 'Git Bash',
+        program: _gitBashPath,
+        args: const ['--login', '-i'],
+        icon: Icons.call_split,
+        color: Colors.orange,
+        shortName: 'bash',
+        showCwdInTitle: true,
+      );
+      expect(p.remembersCwd, isTrue);
+    });
+
+    test('nu.exe → true (isNushell, even though showCwdInTitle is false)', () {
+      final p = ShellProfile(
+        label: 'Nushell',
+        program: _nuWingetPath,
+        args: const [],
+        icon: Icons.terminal,
+        color: Colors.teal,
+        shortName: 'nu',
+        showCwdInTitle: false,
+      );
+      expect(p.remembersCwd, isTrue);
+    });
+
+    test('pwsh.exe → false', () {
+      final p = ShellProfile(
+        label: 'PowerShell 7',
+        program: _pwshPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'pwsh',
+      );
+      expect(p.remembersCwd, isFalse);
     });
   });
 }

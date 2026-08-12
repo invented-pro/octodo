@@ -322,5 +322,33 @@ void main() {
         'file://hostname',
       );
     });
+
+    test('file:///C:/… → C:/… (Windows drive, leading `/` stripped)', () {
+      expect(
+        stripFileUri('file:///C:/Users/alice'),
+        'C:/Users/alice',
+      );
+    });
+
+    test('file://host/C:/… → C:/… (Windows drive via hostname)', () {
+      expect(
+        stripFileUri('file://HP66/C:/Users/alice/projects'),
+        'C:/Users/alice/projects',
+      );
+    });
+
+    test('POSIX path unaffected by drive-letter heuristic', () {
+      // `/home/alice` — `h` is a letter but no `:` follows, so the
+      // drive regex does not match and the leading `/` stays.
+      expect(
+        stripFileUri('file:///home/alice'),
+        '/home/alice',
+      );
+      // `/mnt/c/Users/alice` — same: `/m` has no colon after.
+      expect(
+        stripFileUri('file:///mnt/c/Users/alice'),
+        '/mnt/c/Users/alice',
+      );
+    });
   });
 }

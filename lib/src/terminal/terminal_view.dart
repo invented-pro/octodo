@@ -1133,6 +1133,53 @@ class TerminalViewState extends State<TerminalView> {
     if (title == _lastTitle) return;
     _lastTitle = title;
     widget.onTitleChanged?.call(title);
+
+    // Nushell on Windows: ConPTY eats OSC 7, so we can't get cwd from
+    // the engine's workingDir. Instead, parse it from the OSC 2 title,
+    // which Nushell sets to the cwd (abbreviated with ~ for home).
+    // Format: "~/src/octodo" or "C:\Users\qisha\src\octodo" or
+    //         "~/src/octodo> cd" (after running a command).
+    if (widget.surface.profile?.isNushell == true) {
+      final cwd = _extractCwdFromNuTitle(title);
+      if (cwd != null) {
+        _lastPwd = cwd;
+        widget.onPwdChanged?.call(cwd);
+      }
+    }
+  }
+
+  /// Extract the working directory from a Nushell OSC 2 title string.
+  ///
+  /// Nushell's default title format (when `shell_integration.osc2` is
+  /// on, which is the default) is the cwd path, optionally abbreviated
+  /// with `~` for the home directory, optionally followed by `> cmd`
+  /// after a command is run.
+  ///
+  /// Returns null if the title doesn't look like a path.
+  String? _extractCwdFromNuTitle(String title) {
+    var path = title;
+    // Strip command suffix ("path> cmd").
+    final gtIdx = path.indexOf('> ');
+    if (gtIdx > 0) {
+      path = path.substring(0, gtIdx);
+    }
+    if (path.isEmpty || path == '~') {
+      // Bare "~" → use homePath if available.
+      final home = widget.surface.homePath;
+      return home;
+    }
+    // Expand leading ~ to home directory.
+    if (path.startsWith('~')) {
+      final home = widget.surface.homePath;
+      if (home != null) {
+        path = '$home${path.substring(1)}';
+      } else {
+        return null;
+      }
+    }
+    // Validate: must be a Windows drive path.
+    if (!RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path)) return null;
+    return path;
   }
 
   void _syncPwd() {

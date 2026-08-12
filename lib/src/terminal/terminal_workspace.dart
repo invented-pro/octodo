@@ -469,17 +469,26 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   ///     `--cd` is present).
   ///   - Git Bash: the remembered MSYS path is reverse-translated to
   ///     a Windows path and set as [Surface.spawnCwd].
+  ///   - Nushell: the remembered Windows path is passed through
+  ///     unchanged as [Surface.spawnCwd].
   /// Only shells with reliable OSC 7 (`showCwdInTitle == true`)
   /// contribute to the remembered map, so this is a no-op for
-  /// PowerShell / CMD / Nushell.
+  /// PowerShell / CMD.
   ///
-  /// For shells with `showCwdInTitle == true`, a `PROMPT_COMMAND` that
-  /// emits OSC 7 is injected via [Surface.env]. Most bash-based shells
-  /// (Debian WSL, plain Git Bash) don't emit OSC 7 by default; the env
-  /// var is picked up by bash unless the user's `.bashrc` sets its own
+  /// For bash-based shells with `showCwdInTitle == true` (WSL, Git Bash), a
+  /// `PROMPT_COMMAND` that emits OSC 7 is injected via [Surface.env] (gated
+  /// on [ShellProfile.needsPromptCommandForOsc7]). Most bash-based shells
+  /// (Debian WSL, plain Git Bash) don't emit OSC 7 by default; the env var
+  /// is picked up by bash unless the user's `.bashrc` sets its own
   /// `PROMPT_COMMAND` (which is the correct behaviour — oh-my-posh,
   /// starship, etc. emit OSC 7 themselves). For WSL the var is forwarded
   /// via `WSLENV`.
+  ///
+  /// Nushell (`nu.exe`) defaults `shell_integration.osc7` to `false` on
+  /// Windows, and ConPTY additionally eats OSC 7 from `nu.exe` regardless
+  /// of terminator. Cwd persistence instead works by parsing the cwd from
+  /// Nushell's OSC 2 title (which ConPTY passes through reliably). See
+  /// `TerminalView._extractCwdFromNuTitle`.
   Future<Surface> _makeSurface(
     ShellProfile profile,
     String workingDirectory,
@@ -504,7 +513,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       );
     }
 
-    if (remembered != null && profile.showCwdInTitle) {
+    if (remembered != null && profile.remembersCwd) {
       if (profile.isWsl) {
         args = _wslArgsWithCd(profile, remembered);
         initialCwdOverride = remembered;
@@ -519,7 +528,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       }
     }
 
-    if (profile.showCwdInTitle) {
+    if (profile.showCwdInTitle && profile.needsPromptCommandForOsc7) {
       env['PROMPT_COMMAND'] = _osc7PromptCommand;
       if (profile.isWsl) {
         final existing = Platform.environment['WSLENV'] ?? '';
@@ -576,7 +585,7 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// the same type starts there. Only stores for shells with reliable
   /// OSC 7 reporting (`showCwdInTitle == true`).
   void _rememberShellCwd(ShellProfile profile, String cwd) {
-    if (!profile.showCwdInTitle || cwd.isEmpty) return;
+    if (!profile.remembersCwd || cwd.isEmpty) return;
     _lastCwdByShell[profile.shortName] = cwd;
   }
 

@@ -6,6 +6,8 @@
 ///
 ///   `file://hostname/home/user` → `/home/user`
 ///   `file:///home/user`         → `/home/user` (empty host = localhost)
+///   `file:///C:/Users/x`        → `C:/Users/x` (Windows drive — leading
+///                                           `/` is a URI artifact)
 ///   `/home/user`                 → `/home/user` (already a bare path)
 ///   `C:\Users`                   → `C:\Users`   (Windows path, unchanged)
 String stripFileUri(String cwd) {
@@ -14,9 +16,22 @@ String stripFileUri(String cwd) {
   // start of the path (everything before it is the hostname).
   final afterScheme = cwd.substring(7);
   final slashIdx = afterScheme.indexOf('/');
-  if (slashIdx >= 0) return afterScheme.substring(slashIdx);
+  if (slashIdx >= 0) {
+    final path = afterScheme.substring(slashIdx);
+    // A `file://` URI always begins its path with `/`. For POSIX paths
+    // (`/home/user`, `/mnt/c/…`) that `/` is part of the real path and
+    // must stay. For a Windows drive path the `/` is a URI artifact —
+    // `/C:/Users/x` is not a valid Windows path — so strip it when the
+    // char after the leading `/` is a drive letter followed by `:`.
+    return path.replaceFirstMapped(
+      _leadingSlashDriveRe,
+      (m) => m.group(1)!,
+    );
+  }
   return cwd;
 }
+
+final RegExp _leadingSlashDriveRe = RegExp(r'^/([A-Za-z]:)');
 
 /// Convert a Windows path to the format the given shell expects for
 /// its `lpCurrentDirectory` (and the format its OSC 7 reports back).
