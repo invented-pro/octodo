@@ -116,33 +116,33 @@ void main() {
         );
 
     test(
-        r'resolved home: OSC 7 == initialCwd → `ubuntu ~` '
+        r'resolved home: OSC 7 == initialCwd → `Ubuntu ~` '
         r'(the resolved-$HOME path)',
         () {
       final s = Surface(profile: wslProfile(), initialCwd: '/home/u1');
       s.currentCwd = '/home/u1';
-      expect(s.fallbackTitle, 'ubuntu ~');
+      expect(s.fallbackTitle, 'Ubuntu ~');
     });
 
     test(
-        'unresolved-home sentinel (initialCwd="~"): OSC 7 inside /home → `ubuntu ~`',
+        'unresolved-home sentinel (initialCwd="~"): OSC 7 inside /home → `Ubuntu ~`',
         () {
       // Sentinel case: `_queryWslHome` timed out in terminal_workspace.dart
       // so initialCwd is the literal `~`. Shell still starts in $HOME via
       // `--cd ~`; OSC 7 fires with the distro user's actual `/home/<u>`.
       final s = Surface(profile: wslProfile(), initialCwd: '~');
       s.currentCwd = '/home/u1';
-      expect(s.fallbackTitle, 'ubuntu ~');
+      expect(s.fallbackTitle, 'Ubuntu ~');
     });
 
     test(
-        'unresolved-home sentinel: cd /tmp → `ubuntu tmp` (basename, not `~`)',
+        'unresolved-home sentinel: cd /tmp → `Ubuntu tmp` (basename, not `~`)',
         () {
       // After `cd /tmp`, the chip must drop out of the home shortcut —
       // the structural match against `/home/<…>` shouldn't fire here.
       final s = Surface(profile: wslProfile(), initialCwd: '~');
       s.currentCwd = '/tmp';
-      expect(s.fallbackTitle, 'ubuntu tmp');
+      expect(s.fallbackTitle, 'Ubuntu tmp');
     });
 
     test(
@@ -155,7 +155,7 @@ void main() {
       // /home/ incorrectly showed `~`.
       final s = Surface(profile: wslProfile(), initialCwd: '~');
       s.currentCwd = '/home/u1/projects';
-      expect(s.fallbackTitle, 'ubuntu projects');
+      expect(s.fallbackTitle, 'Ubuntu projects');
     });
 
     test(
@@ -164,7 +164,7 @@ void main() {
       final s = Surface(profile: wslProfile(), initialCwd: '/mnt/c/proj')
         ..homePath = '/home/u1';
       s.currentCwd = '/home/u1';
-      expect(s.fallbackTitle, 'ubuntu ~');
+      expect(s.fallbackTitle, 'Ubuntu ~');
     });
 
     test(
@@ -176,7 +176,7 @@ void main() {
       final s = Surface(profile: wslProfile(), initialCwd: '/home/u1/src')
         ..homePath = '/home/u1';
       s.currentCwd = '/home/u1/src';
-      expect(s.fallbackTitle, 'ubuntu src');
+      expect(s.fallbackTitle, 'Ubuntu src');
     });
 
     test(
@@ -186,7 +186,7 @@ void main() {
       // is the bare shortName so a brand-new tab is readable.
       final s = Surface(profile: wslProfile(), initialCwd: '~');
       expect(s.currentCwd, isNull);
-      expect(s.fallbackTitle, 'ubuntu');
+      expect(s.fallbackTitle, 'Ubuntu');
     });
 
     test(

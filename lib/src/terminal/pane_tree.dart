@@ -186,7 +186,13 @@ class Surface extends ChangeNotifier {
   /// (used by the IME caret reporting and any future cwd-aware
   /// features), it just doesn't leak into the chip.
   String get fallbackTitle {
-    final name = profile?.shortName ?? 'shell';
+    final raw = profile?.shortName ?? 'shell';
+    // Capitalise the first letter of WSL distro names in the chip —
+    // they're proper nouns (Debian, Ubuntu, Kali-linux) and read
+    // better capitalised. The lowercase shortName is preserved for
+    // the cwd-persistence map key. Fixed shells (pwsh, cmd, nu, bash)
+    // stay lowercase — their brand names aren't title-cased.
+    final name = (profile?.isWsl ?? false) ? _capitalizeFirst(raw) : raw;
     final showCwd = profile?.showCwdInTitle ?? false;
     if (!showCwd) return name;
     // Prefer the OSC 7 cwd. Fall back to the initial CWD only if it is a
@@ -231,6 +237,13 @@ class Surface extends ChangeNotifier {
   /// not. This prevents every subdirectory under `/home/` from
   /// incorrectly triggering the `~` shortcut.
   static final RegExp _wslHomeShapeRe = RegExp(r'^/home/[^/]+$');
+
+  /// Uppercase the first character (preserving the rest). Used to
+  /// title-case WSL distro names in the chip (Debian, Ubuntu).
+  static String _capitalizeFirst(String s) {
+    if (s.isEmpty) return s;
+    return s[0].toUpperCase() + s.substring(1);
+  }
 
   bool _isAtHome(String cwd) {
     final home = homePath;
