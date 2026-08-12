@@ -540,6 +540,17 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       }
     }
 
+    // PowerShell: inject a `prompt` override that emits OSC 2 with the
+    // cwd (ConPTY eats OSC 7 from PowerShell, same restriction as
+    // Nushell — see `_extractCwdFromPwshTitle`). The override is
+    // delivered as a temp-file script loaded via `-File` so the
+    // `cmd.exe /c` quoting layer doesn't mangle the script body (the
+    // historical failure mode for `-Command "..."` injection).
+    if (profile.needsPowerShellPromptOverride) {
+      final initPath = await _writePwshInitScript();
+      args = [...args, '-NoExit', '-File', initPath];
+    }
+
     final initialCwd = initialCwdOverride ??
         await _resolveInitialCwd(profile, spawnCwd, preresolvedWslHome: homePath);
     return Surface(profile: profile, initialCwd: initialCwd)
@@ -557,6 +568,85 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// bash expands them at prompt time).
   static const String _osc7PromptCommand =
       r'''printf '\033]7;file://%s%s\033\\' "$(hostname)" "$PWD"''';
+
+  /// PowerShell init script that overrides `prompt` to emit OSC 2 with
+  /// the cwd after each prompt, then chains to whatever the user's
+  /// `$PROFILE` (or the built-in default) installed as `prompt`.
+  ///
+  /// Why OSC 2 (not OSC 7): ConPTY intercepts OSC 7 from PowerShell on
+  /// Windows, so the Alacritty engine never sees the cwd that way.
+  /// ConPTY passes OSC 2 through, so we emit `PowerShell - <cwd>` as
+  /// the window title after every prompt and parse it back in
+  /// `TerminalView._extractCwdFromPwshTitle`.
+  ///
+  /// Why emit AFTER the user's prompt (not before): oh-my-posh /
+  /// starship / `$Host.UI.RawUI.WindowTitle` all emit their own OSC 2
+  /// during the prompt. Emitting ours last means our cwd signal wins,
+  /// and the title the engine sees is always parseable as long as the
+  /// user hasn't manually redefined `prompt` mid-session.
+  ///
+  /// Chaining pattern: save the existing `prompt` scriptblock under a
+  /// reserved name (`__octodo_original_prompt`) on first run, then
+  /// invoke it from the wrapper. If `prompt` is somehow missing (e.g.
+  /// the user's $PROFILE failed and PowerShell fell back to nothing),
+  /// we install a minimal fallback so the wrapper never crashes.
+  ///
+  /// Works for both `pwsh.exe` (PowerShell 7+) and `powershell.exe`
+  /// (Windows PowerShell 5.1) — both implement the `prompt` function
+  /// and `${function:prompt}` scriptblock access identically.
+  static const String _pwshInitScript = r'''
+$__Esc = [char]27
+$__Bel = [char]7
+if (-not (Test-Path Function:__octodo_original_prompt)) {
+    if (Test-Path Function:prompt) {
+        Set-Item -Path Function:__octodo_original_prompt -Value (Get-Item Function:prompt).ScriptBlock
+    } else {
+        Set-Item -Path Function:__octodo_original_prompt -Value { "PS> " }
+    }
+}
+function prompt {
+    $__path = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath
+    $__result = & (Get-Item Function:__octodo_original_prompt)
+    Write-Host -NoNewline "${__Esc}]2;PowerShell - ${__path}${__Bel}"
+    return $__result
+}
+''';
+
+  /// Cached absolute path of the temp file written by
+  /// [_writePwshInitScript]. Cleared between app runs; reused across
+  /// every PowerShell tab within a single run.
+  static String? _pwshInitScriptPath;
+
+  /// Write [_pwshInitScript] to `%TEMP%\octodo_pwsh_init.ps1` and
+  /// return its absolute path. Called once per PowerShell spawn but
+  /// cached so subsequent spawns reuse the same file (the script is
+  /// idempotent and content-identical). Using a temp file (rather
+  /// than `-Command "..."`) avoids `cmd.exe /c` quote-mangling of the
+  /// script body and dodges the Windows ~32K arg-length limit.
+  static Future<String> _writePwshInitScript() async {
+    final cached = _pwshInitScriptPath;
+    if (cached != null) return cached;
+    final tempDir = Directory.systemTemp;
+    final scriptFile = File(
+      '${tempDir.path}${Platform.pathSeparator}octodo_pwsh_init.ps1',
+    );
+    await scriptFile.writeAsString(_pwshInitScript, flush: true);
+    _pwshInitScriptPath = scriptFile.path;
+    return _pwshInitScriptPath!;
+  }
+
+  /// Test-only accessor for [_pwshInitScript]. Exposed so the script
+  /// body can be pinned in a golden-style test without spinning up a
+  /// real PowerShell process.
+  @visibleForTesting
+  static String get pwshInitScriptForTest => _pwshInitScript;
+
+  /// Test-only accessor for [_writePwshInitScript]. The production
+  /// path is `static` and called from [_makeSurface]; tests need the
+  /// same entry point to verify file creation and caching.
+  @visibleForTesting
+  static Future<String> writePwshInitScriptForTest() =>
+      _writePwshInitScript();
 
   /// Replace (or append) the `--cd` argument in [profile]'s args with
   /// [linuxPath], so a new WSL tab starts in the remembered directory

@@ -1134,18 +1134,64 @@ class TerminalViewState extends State<TerminalView> {
     _lastTitle = title;
     widget.onTitleChanged?.call(title);
 
+    final profile = widget.surface.profile;
+    if (profile == null) return;
+
     // Nushell on Windows: ConPTY eats OSC 7, so we can't get cwd from
     // the engine's workingDir. Instead, parse it from the OSC 2 title,
     // which Nushell sets to the cwd (abbreviated with ~ for home).
     // Format: "~/src/octodo" or "C:\Users\qisha\src\octodo" or
     //         "~/src/octodo> cd" (after running a command).
-    if (widget.surface.profile?.isNushell == true) {
+    if (profile.isNushell) {
       final cwd = _extractCwdFromNuTitle(title);
       if (cwd != null) {
         _lastPwd = cwd;
         widget.onPwdChanged?.call(cwd);
       }
+      return;
     }
+
+    // PowerShell: the injected `prompt` override (see
+    // `TerminalWorkspace._writePwshInitScript`) emits
+    // "PowerShell - <cwd>" as the OSC 2 title after each prompt. ConPTY
+    // eats OSC 7 from PowerShell, so this title-based path is the only
+    // cwd channel we have.
+    if (profile.isPowerShell) {
+      final cwd = _extractCwdFromPwshTitle(title);
+      if (cwd != null) {
+        _lastPwd = cwd;
+        widget.onPwdChanged?.call(cwd);
+      }
+      return;
+    }
+  }
+
+  /// Extract the working directory from a PowerShell OSC 2 title string.
+  ///
+  /// The init script injected at PowerShell spawn (see
+  /// `TerminalWorkspace._writePwshInitScript`) overrides `prompt` to
+  /// emit `PowerShell - <cwd>` as the OSC 2 title *after* each prompt
+  /// (so it wins over any title set by oh-my-posh / starship).
+  /// Parsing is the inverse of that emission.
+  ///
+  /// Format: `PowerShell - C:\Users\qisha\src\octodo`
+  ///
+  /// Returns null when the title doesn't match the expected shape —
+  /// e.g. the user manually redefined `prompt` mid-session and the
+  /// title is now something custom. In that case we leave [_lastPwd]
+  /// alone rather than clobbering it with garbage.
+  String? _extractCwdFromPwshTitle(String title) {
+    const prefix = 'PowerShell - ';
+    if (!title.startsWith(prefix)) return null;
+    final path = title.substring(prefix.length);
+    if (path.isEmpty) return null;
+    // Accept Windows drive paths (C:\…, D:/…) and UNC paths (\\server\share).
+    // Reject anything else so we don't feed malformed titles to the
+    // workspace-level cwd memory.
+    final isDrive = RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path);
+    final isUnc = path.startsWith(r'\\');
+    if (!isDrive && !isUnc) return null;
+    return path;
   }
 
   /// Extract the working directory from a Nushell OSC 2 title string.

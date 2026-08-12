@@ -49,16 +49,20 @@ class ShellProfile {
   /// own OSC title (e.g. "pwsh", "cmd", or a lowercased distro name).
   final String shortName;
 
-  /// Whether this shell's tab title should include the cwd (updated via
-  /// OSC 7 from the shell). Defaults to `false` because the native
-  /// Windows shells (PowerShell 7, Windows PowerShell, CMD) emit an
-  /// OSC 7 path that mixes a drive letter with a forward-slash URI,
-  /// plus ConPTY occasionally drops or duplicates the OSC 7 sequence on
-  /// prompt redraw — both leave the chip showing garbled paths like
-  /// `pwsh C:/Users/<user>/projects` that don't match what the user typed
-  /// `cd` to. Set to `true` for shells that emit a stable, reliable
-  /// OSC 7 by default (modern WSL distros, git-bash with a configured
-  /// `PROMPT_COMMAND`).
+  /// Whether this shell's tab title should include the cwd via a
+  /// shell-side cwd-reporting channel. Set to `true` when a reliable
+  /// mechanism exists:
+  ///
+  /// - WSL / Git Bash: native OSC 7 emission (or via injected
+  ///   `PROMPT_COMMAND`); parsed by the Alacritty core.
+  /// - PowerShell: no native OSC 7 through ConPTY, so the workspace
+  ///   injects a `prompt` override that emits OSC 2 with the cwd
+  ///   (see `TerminalWorkspace._writePwshInitScript`); parsed in
+  ///   `TerminalView._extractCwdFromPwshTitle`.
+  ///
+  /// Set to `false` when no mechanism is available (CMD), or when the
+  /// mechanism is OSC 2 driven independently of this flag (Nushell —
+  /// see [remembersCwd]).
   final bool showCwdInTitle;
 
   /// WSL only: the distro name passed to `wsl.exe -d <distro>`. null for
@@ -78,6 +82,16 @@ class ShellProfile {
   /// (ConPTY eats OSC 7 from Nushell on Windows).
   bool get isNushell => p.basename(program).toLowerCase() == 'nu.exe';
 
+  /// `true` for PowerShell (`pwsh.exe` and `powershell.exe`). Used by
+  /// the workspace to inject a `prompt` function override that emits
+  /// OSC 2 with the cwd (ConPTY eats OSC 7 from PowerShell, same
+  /// restriction as Nushell); used by the terminal view to dispatch
+  /// title parsing in `TerminalView._syncTitle`.
+  bool get isPowerShell {
+    final base = p.basename(program).toLowerCase();
+    return base == 'pwsh.exe' || base == 'powershell.exe';
+  }
+
   /// Whether the workspace should remember this shell's cwd for
   /// cross-tab persistence. Distinct from [showCwdInTitle]:
   ///
@@ -86,20 +100,30 @@ class ShellProfile {
   /// - Nushell: `showCwdInTitle` is `false` (chip title comes from
   ///   OSC 2), but `remembersCwd` is `true` because the cwd is parsed
   ///   from Nushell's OSC 2 title by `TerminalView._extractCwdFromNuTitle`.
-  /// - PowerShell / CMD: both `false` (OSC 7 is unreliable through
-  ///   ConPTY on those shells).
+  /// - PowerShell: `showCwdInTitle` is `true` (the injected `prompt`
+  ///   emits OSC 2 with the cwd, parsed by
+  ///   `TerminalView._extractCwdFromPwshTitle`).
+  /// - CMD: `false` (no cwd-reporting mechanism through ConPTY).
   bool get remembersCwd => showCwdInTitle || isNushell;
 
   /// `true` for bash-based shells that pick up the `PROMPT_COMMAND` env var
   /// to emit OSC 7. WSL and Git Bash need this injection because their
-  /// default `PROMPT_COMMAND` is empty (especially Debian WSL, plain Git
-  /// Bash). Nushell and PowerShell do NOT use `PROMPT_COMMAND`, so they
+  /// default `PROMPT_COMMAND` is empty (especially Debian WSL, plain
+  /// Git Bash). Nushell and PowerShell do NOT use `PROMPT_COMMAND`, so they
   /// must be excluded from the env injection in `_makeSurface`.
   bool get needsPromptCommandForOsc7 {
     if (isWsl) return true;
     final base = p.basename(program).toLowerCase();
     return base == 'bash.exe' || base == 'sh.exe';
   }
+
+  /// `true` for PowerShell profiles whose `prompt` function must be
+  /// overridden at startup to emit OSC 2 with the cwd. The override is
+  /// a temp-file PowerShell script loaded via `-File` (see
+  /// `TerminalWorkspace._writePwshInitScript`). Gated on [showCwdInTitle]
+  /// so a profile that opts out (e.g. for debugging) skips the injection.
+  bool get needsPowerShellPromptOverride =>
+      isPowerShell && showCwdInTitle;
 
   const ShellProfile({
     required this.label,
@@ -349,6 +373,7 @@ List<ShellProfile> detectShellsFrom({
       iconAsset: 'assets/icons/powershell-7.svg',
       color: _pwshBlue,
       shortName: 'pwsh',
+      showCwdInTitle: true,
     ));
   }
 
@@ -365,6 +390,7 @@ List<ShellProfile> detectShellsFrom({
       iconAsset: 'assets/icons/powershell.svg',
       color: _pwshBlue,
       shortName: 'powershell',
+      showCwdInTitle: true,
     ));
   }
 

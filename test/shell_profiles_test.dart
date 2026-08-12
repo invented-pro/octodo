@@ -663,7 +663,7 @@ void main() {
       expect(p.remembersCwd, isTrue);
     });
 
-    test('pwsh.exe → false', () {
+    test('pwsh.exe → false (default showCwdInTitle: false)', () {
       final p = ShellProfile(
         label: 'PowerShell 7',
         program: _pwshPath,
@@ -673,6 +673,174 @@ void main() {
         shortName: 'pwsh',
       );
       expect(p.remembersCwd, isFalse);
+    });
+
+    test(
+        'pwsh.exe with showCwdInTitle: true → true '
+        '(injected prompt emits OSC 2)', () {
+      final p = ShellProfile(
+        label: 'PowerShell 7',
+        program: _pwshPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'pwsh',
+        showCwdInTitle: true,
+      );
+      expect(p.remembersCwd, isTrue);
+    });
+
+    test('powershell.exe with showCwdInTitle: true → true', () {
+      final p = ShellProfile(
+        label: 'PowerShell 5',
+        program: _winPsPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'powershell',
+        showCwdInTitle: true,
+      );
+      expect(p.remembersCwd, isTrue);
+    });
+  });
+
+  group('isPowerShell', () {
+    test('pwsh.exe → true', () {
+      final p = ShellProfile(
+        label: 'PowerShell 7',
+        program: _pwshPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'pwsh',
+      );
+      expect(p.isPowerShell, isTrue);
+    });
+
+    test('powershell.exe → true', () {
+      final p = ShellProfile(
+        label: 'PowerShell 5',
+        program: _winPsPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'powershell',
+      );
+      expect(p.isPowerShell, isTrue);
+    });
+
+    test('case-insensitive basename matching', () {
+      final p = ShellProfile(
+        label: 'PS Upper',
+        program: r'C:\PWSH.EXE',
+        args: const [],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'pwsh',
+      );
+      expect(p.isPowerShell, isTrue);
+    });
+
+    test('nu.exe → false', () {
+      final p = ShellProfile(
+        label: 'Nushell',
+        program: _nuWingetPath,
+        args: const [],
+        icon: Icons.terminal,
+        color: Colors.teal,
+        shortName: 'nu',
+      );
+      expect(p.isPowerShell, isFalse);
+    });
+
+    test('wsl.exe → false', () {
+      final p = ShellProfile(
+        label: 'Ubuntu',
+        program: _wslPath,
+        args: const ['-d', 'Ubuntu', '--cd', '~'],
+        icon: Icons.laptop_chromebook,
+        color: Colors.green,
+        shortName: 'ubuntu',
+      );
+      expect(p.isPowerShell, isFalse);
+    });
+
+    test('bash.exe → false', () {
+      final p = ShellProfile(
+        label: 'Git Bash',
+        program: _gitBashPath,
+        args: const ['--login', '-i'],
+        icon: Icons.call_split,
+        color: Colors.orange,
+        shortName: 'bash',
+      );
+      expect(p.isPowerShell, isFalse);
+    });
+  });
+
+  group('needsPowerShellPromptOverride', () {
+    test('pwsh.exe + showCwdInTitle:true → true', () {
+      final p = ShellProfile(
+        label: 'PowerShell 7',
+        program: _pwshPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'pwsh',
+        showCwdInTitle: true,
+      );
+      expect(p.needsPowerShellPromptOverride, isTrue);
+    });
+
+    test('powershell.exe + showCwdInTitle:true → true', () {
+      final p = ShellProfile(
+        label: 'PowerShell 5',
+        program: _winPsPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'powershell',
+        showCwdInTitle: true,
+      );
+      expect(p.needsPowerShellPromptOverride, isTrue);
+    });
+
+    test('pwsh.exe without showCwdInTitle → false (opt-out)', () {
+      final p = ShellProfile(
+        label: 'PowerShell 7',
+        program: _pwshPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        color: Colors.blue,
+        shortName: 'pwsh',
+      );
+      expect(p.needsPowerShellPromptOverride, isFalse);
+    });
+
+    test('nu.exe + showCwdInTitle:true → false (Nushell is not PowerShell)', () {
+      final p = ShellProfile(
+        label: 'Nushell',
+        program: _nuWingetPath,
+        args: const [],
+        icon: Icons.terminal,
+        color: Colors.teal,
+        shortName: 'nu',
+        showCwdInTitle: true,
+      );
+      expect(p.needsPowerShellPromptOverride, isFalse);
+    });
+
+    test('wsl.exe + showCwdInTitle:true → false', () {
+      final p = ShellProfile(
+        label: 'Ubuntu',
+        program: _wslPath,
+        args: const ['-d', 'Ubuntu', '--cd', '~'],
+        icon: Icons.laptop_chromebook,
+        color: Colors.green,
+        shortName: 'ubuntu',
+        showCwdInTitle: true,
+      );
+      expect(p.needsPowerShellPromptOverride, isFalse);
     });
   });
 }
