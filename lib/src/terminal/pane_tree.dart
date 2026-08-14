@@ -957,7 +957,9 @@ class PaneLayout extends StatelessWidget {
                             // OSC 7/9/1337 — update the tracked cwd so
                             // the fallback title (and chip) reflect the
                             // new directory even when the shell doesn't
-                            // set its own OSC 0/2 title.
+                            // set its own OSC 0/2 title. The empty check
+                            // is defensive only — TerminalView suppresses
+                            // empty reports upstream.
                             surface.currentCwd = pwd.isEmpty ? null : pwd;
                             // Feed the workspace-level cwd memory so the
                             // next tab of the same shell type starts here.

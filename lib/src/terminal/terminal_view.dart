@@ -24,6 +24,7 @@ import '../settings/settings_runtime.dart';
 import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart' show Surface;
+import 'osc7_scanner.dart';
 import 'shell_cwd.dart';
 import 'font_family_options.dart';
 import 'terminal_settings_scope.dart';
@@ -312,8 +313,9 @@ class TerminalView extends StatefulWidget {
   final ValueChanged<String>? onTitleChanged;
 
   /// Called whenever the working directory (reported via OSC 7) changes.
-  /// The string is the decoded path, e.g. `C:\Users\x\proj`. Empty when
-  /// the shell clears it.
+  /// The string is the decoded path, e.g. `C:\Users\x\proj`. Never empty —
+  /// malformed/blank reports are suppressed by `_pushPwd` so a stray
+  /// `ESC ] 7 ; ST` can't clobber the last known cwd.
   final ValueChanged<String>? onPwdChanged;
 
   /// Called when the underlying shell process exits.
@@ -376,6 +378,10 @@ class TerminalViewState extends State<TerminalView> {
 
   String _lastTitle = '';
   String _lastPwd = '';
+
+  /// Dart-side OSC 7 pre-scanner over the PTY byte stream; supplements the
+  /// engine's (lossy — see [Osc7Scanner]) extraction. See [_flushOutput].
+  final Osc7Scanner _osc7Scanner = Osc7Scanner();
 
   // ── Settings propagation ────────────────────────────────────────
   //
@@ -454,8 +460,7 @@ class TerminalViewState extends State<TerminalView> {
   /// image-clipboard fallback emitted when a paste finds no text — see
   /// test/paste_bytes_test.dart and GitHub issue #2. Not for production use.
   @visibleForTesting
-  static Uint8List imagePasteTriggerBytesForTest() =>
-      _imagePasteTriggerBytes();
+  static Uint8List imagePasteTriggerBytesForTest() => _imagePasteTriggerBytes();
 
   /// Pixel distance the pointer must travel from the down position
   /// before [_TerminalDragSelector] treats it as a drag. Below this
@@ -618,11 +623,14 @@ class TerminalViewState extends State<TerminalView> {
     // level while frosted acrylic is on, the plain opacity otherwise.
     final runtime = SettingsRuntime.instance;
     double effectiveAlpha() {
-      final frosted =
-          runtime.store.get<bool>(runtime.catalog.general.frostedBackground);
+      final frosted = runtime.store.get<bool>(
+        runtime.catalog.general.frostedBackground,
+      );
       return frosted
           ? runtime.store.get<double>(runtime.catalog.general.frostLevel)
-          : runtime.store.get<double>(runtime.catalog.general.backgroundOpacity);
+          : runtime.store.get<double>(
+              runtime.catalog.general.backgroundOpacity,
+            );
     }
 
     void onAlphaChanged(_) {
@@ -1034,11 +1042,7 @@ class TerminalViewState extends State<TerminalView> {
     }
     return (
       'cmd.exe',
-      <String>[
-        '/c',
-        _quoteForCmd(program),
-        ...args.map(_quoteForCmd),
-      ],
+      <String>['/c', _quoteForCmd(program), ...args.map(_quoteForCmd)],
     );
   }
 
@@ -1049,13 +1053,14 @@ class TerminalViewState extends State<TerminalView> {
   static (String, List<String>) ptyLaunchArgsForTest(
     String program,
     List<String> args,
-  ) =>
-      _buildPtyLaunchArgs(program, args);
+  ) => _buildPtyLaunchArgs(program, args);
 
   /// Spawn the configured shell via [fa.FlutterPtyBackend].
   void _start() {
-    final (ptyProgram, ptyArgs) =
-        _buildPtyLaunchArgs(widget.surface.program, widget.surface.args);
+    final (ptyProgram, ptyArgs) = _buildPtyLaunchArgs(
+      widget.surface.program,
+      widget.surface.args,
+    );
     final cwd = widget.surface.spawnCwd ?? widget.workingDirectory;
 
     _log.fine(
@@ -1133,6 +1138,17 @@ class TerminalViewState extends State<TerminalView> {
     if (_outputBuffer.isEmpty) return;
     final batch = _outputBuffer.takeBytes();
     _outputBuffer.clear();
+    // OSC 7 pre-scan (Dart-side): the Rust engine's own OSC 7 pre-parser
+    // stops scanning a batch at the first OSC it doesn't know (title
+    // OSC 2 / OSC 1 — emitted around every oh-my-zsh prompt), silently
+    // dropping any OSC 7 later in the batch. See Osc7Scanner's dartdoc.
+    // The scanner sees the exact bytes the engine sees, handles sequences
+    // split across batches, and reports payloads in the engine's format
+    // (raw `file://host/path`).
+    final osc7Payloads = _osc7Scanner.scan(batch);
+    for (final payload in osc7Payloads) {
+      _pushPwd(stripFileUri(payload));
+    }
     _engine.feedWithKitty(batch);
   }
 
@@ -1246,8 +1262,16 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _syncPwd() {
-    final pwd = stripFileUri(_engine.workingDir.value);
-    if (pwd == _lastPwd) return;
+    _pushPwd(stripFileUri(_engine.workingDir.value));
+  }
+
+  /// Record [pwd] as this terminal's current working directory and forward
+  /// it to the host via `onPwdChanged` — the single sink shared by the
+  /// engine's OSC 7 channel ([_syncPwd]) and the Dart-side pre-scan in
+  /// [_flushOutput]. Duplicate reports (both channels firing for the same
+  /// emission, e.g. at shell spawn) collapse on the [_lastPwd] check.
+  void _pushPwd(String pwd) {
+    if (pwd.isEmpty || pwd == _lastPwd) return;
     _lastPwd = pwd;
     widget.onPwdChanged?.call(pwd);
   }
@@ -1368,7 +1392,9 @@ class TerminalViewState extends State<TerminalView> {
     if (!mounted) return;
     if (!_notifyOnOsc9) {
       if (_log.isLoggable(Level.FINE)) {
-        _log.fine('OSC 9/777 notification suppressed (setting off): "$payload"');
+        _log.fine(
+          'OSC 9/777 notification suppressed (setting off): "$payload"',
+        );
       }
       return;
     }
@@ -1580,9 +1606,7 @@ class TerminalViewState extends State<TerminalView> {
     final fontFamilyPick = (_settings ?? _defaultTerminalSettings).fontFamily;
     return CallbackShortcuts(
       bindings: {
-        ...TerminalBindings.build(
-          copySelection: _copySelectionToClipboard,
-        ),
+        ...TerminalBindings.build(copySelection: _copySelectionToClipboard),
         // Readline-style Ctrl+U/K/L/A/E — write raw control bytes
         // through the PTY so the shell receives them. These are the
         // bare Ctrl-letter shortcuts that the audit explicitly says
@@ -2148,9 +2172,8 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
     //     Shift, so the inner already handles this case; overriding
     //     would fight the engine's click-count state.
     final modeFlags = widget.engine.grid.modeFlags;
-    final mouseEnabled = (modeFlags &
-            TerminalViewState.terminalAnyMouseModeFlag) !=
-        0;
+    final mouseEnabled =
+        (modeFlags & TerminalViewState.terminalAnyMouseModeFlag) != 0;
     if (!mouseEnabled) {
       return;
     }
@@ -2186,12 +2209,7 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
     // selection on the first qualifying move (rather than a single
     // pixel highlighting the down cell until the next move).
     final start = _pixelToCell(downAt);
-    widget.controller.selectionStart(
-      start.$1,
-      start.$2,
-      start.$3,
-      0,
-    );
+    widget.controller.selectionStart(start.$1, start.$2, start.$3, 0);
     _dragging = true;
     final cur = _pixelToCell(e.localPosition);
     widget.controller.selectionUpdate(cur.$1, cur.$2, cur.$3);
