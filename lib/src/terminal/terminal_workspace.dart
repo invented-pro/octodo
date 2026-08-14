@@ -282,8 +282,9 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       scrollbackLines: runtime.store.get<int>(t.scrollbackLines),
       copyOnSelect: runtime.store.get<bool>(t.copyOnSelect),
       bellMode: runtime.store.get<BellMode>(t.bellMode),
-      linkClickModifier:
-          runtime.store.get<LinkClickModifier>(t.linkClickModifier),
+      linkClickModifier: runtime.store.get<LinkClickModifier>(
+        t.linkClickModifier,
+      ),
       notifyOnOsc9: runtime.store.get<bool>(t.notifyOnOsc9),
       terminalForeground: palette.terminalForeground,
       terminalSelection: palette.terminalSelection,
@@ -444,7 +445,35 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     surface?.focusNode.requestFocus();
   }
 
-  ShellProfile get _defaultShell => widget.availableShells[_defaultShellIndex];
+  ShellProfile get _defaultShell {
+    if (widget.availableShells.isEmpty) {
+      // Defensive: a working host always detects at least one shell, but
+      // a misconfigured box or a future platform with no detector yet
+      // could surface an empty list here. Returning a synthesized profile
+      // with an empty `program` lets flutter_alacritty fall back to
+      // `$SHELL` (documented at `TerminalView._buildPtyLaunchArgs`,
+      // lines 1014–1016, 1051) instead of throwing a RangeError on the
+      // `[_defaultShellIndex]` access below. Once `detectShellsPosixFrom`
+      // is in place the list should never be empty on a working macOS
+      // install — this guard is purely a crash-backstop.
+      return const ShellProfile(
+        label: 'Shell',
+        program: '',
+        // Empty program triggers flutter_alacritty's $SHELL fallback (see
+        // `TerminalView._buildPtyLaunchArgs`); with no args, that fallback
+        // spawns the user's $SHELL as an interactive (not login) shell.
+        // Interactive is the right call here because the fallback path
+        // can't tell what OS we're on — login-shell semantics (-l) are
+        // applied per-profile by `detectShellsPosixFrom` instead.
+        args: [],
+        icon: Icons.terminal,
+        color: Colors.grey,
+        shortName: 'shell',
+        showCwdInTitle: true,
+      );
+    }
+    return widget.availableShells[_defaultShellIndex];
+  }
 
   /// Build a [Surface] for [profile], starting in [workingDirectory].
   /// The profile is carried so the tab bar can render the shell's
@@ -517,6 +546,13 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       if (profile.isWsl) {
         args = _wslArgsWithCd(profile, remembered);
         initialCwdOverride = remembered;
+      } else if (!Platform.isWindows) {
+        // POSIX host: the remembered cwd came from this shell's own OSC 7
+        // (zsh / bash / fish native paths) — it IS the spawn-cwd format
+        // already. `reverseTranslateCwd` would return null (it only maps
+        // WSL `/mnt/<drive>` and MSYS `/<drive>` shapes back to Windows
+        // drive paths), silently dropping the persistence.
+        spawnCwd = remembered;
       } else {
         final winPath = reverseTranslateCwd(
           cwd: remembered,
@@ -528,16 +564,111 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       }
     }
 
-    if (profile.showCwdInTitle && profile.needsPromptCommandForOsc7) {
+    // Inject our self-contained OSC 7 PROMPT_COMMAND where the shell family
+    // uses one (WSL, Git Bash, POSIX bash — see
+    // `ShellProfile.needsPromptCommandForOsc7`). Stock POSIX bash emits no
+    // OSC 7 on its own (hosts without /etc/profile.d/vte.sh, every macOS
+    // install), so the injection is what makes the cwd-reporting channel
+    // work there at all.
+    final injectOsc7PromptCommand =
+        profile.showCwdInTitle && profile.needsPromptCommandForOsc7;
+    if (injectOsc7PromptCommand) {
       env['PROMPT_COMMAND'] = _osc7PromptCommand;
       if (profile.isWsl) {
         final existing = Platform.environment['WSLENV'] ?? '';
         env['WSLENV'] = existing.contains('PROMPT_COMMAND')
             ? existing
             : (existing.isEmpty
-                ? 'PROMPT_COMMAND/u'
-                : '$existing:PROMPT_COMMAND/u');
+                  ? 'PROMPT_COMMAND/u'
+                  : '$existing:PROMPT_COMMAND/u');
       }
+    } else if (!Platform.isWindows &&
+        Platform.environment.containsKey('PROMPT_COMMAND')) {
+      // Suppress any inherited PROMPT_COMMAND on POSIX (macOS / Linux)
+      // hosts BEFORE we hand the env to flutter_alacritty — but only for
+      // shells we did NOT inject for above. flutter_alacritty's
+      // `resolveShellSpec` (in flutter_alacritty's lib/pty/
+      // flutter_pty_backend.dart) passes the *entire* `Platform.environment`
+      // to the spawned shell, so any PROMPT_COMMAND set in the parent process
+      // (e.g. by the terminal app that launched octodo, such as cmux) is
+      // inherited verbatim. On POSIX hosts we don't want that — see below.
+      //
+      // Why suppress rather than pass through:
+      //
+      // 1. PROMPT_COMMAND is *session-level* state, not a system default.
+      //    It refers to functions defined in the parent's interactive
+      //    shell (e.g. `_cmux_prompt_command` defined by the cmux app's
+      //    bash-integration). When octodo spawns a new bash, those
+      //    function definitions do NOT survive the process boundary — env
+      //    vars do, but bash functions don't. The result is a chain that
+      //    bash executes on every prompt, hitting undefined names and
+      //    printing `bash: command not found: _cmux_prompt_command` (or
+      //    similar) on every prompt. This is what the user sees here.
+      //    (When we DID inject above, our value replaces the inherited
+      //    chain entirely — same cure, plus working OSC 7.)
+      //
+      // 2. The shells this branch still covers (zsh, fish, …) don't read
+      //    PROMPT_COMMAND at all — they get their OSC 7 integration via
+      //    the ZDOTDIR shim / `--init-command` injections below — so
+      //    dropping the inherited value costs nothing and stops the
+      //    broken-chain noise from leaking into any bash the user later
+      //    launches inside the tab.
+      //
+      // 3. macOS Terminal.app, iTerm2, and Alacritty all do NOT inherit
+      //    PROMPT_COMMAND from the parent process. Each spawned shell
+      //    starts fresh, and the user's `.bashrc` / `.zshrc` (where
+      //    `starship init bash` etc. correctly register their
+      //    PROMPT_COMMAND contributors) is the single source of truth.
+      //    We follow the same convention.
+      //
+      // On Windows, the injection above has already set PROMPT_COMMAND
+      // for OSC 7 cwd reporting (the Windows code path needs it for WSL /
+      // Git Bash), and this POSIX-only branch never runs there.
+      //
+      // Implementation: the `Env` map is merged on top of
+      // `Platform.environment` by `resolveShellSpec`, so an empty-string
+      // override is the only way to drop the inherited value without
+      // changing the platform layer. (`flutter_pty`'s own whitelist-and-merge
+      // would never carry PROMPT_COMMAND over, but `flutter_alacritty`'s
+      // `resolveShellSpec` does — that's the seam we patch here.)
+      env['PROMPT_COMMAND'] = '';
+    }
+    // Resync `SHELL` to the program we're actually about to launch. The
+    // user's login shell (per `chsh` / `/etc/passwd`) is propagated through
+    // the parent env, so `echo $SHELL` inside a tab reflects the LOGIN
+    // shell of whoever launched octodo — not the shell currently running
+    // in the tab. That's correct per POSIX convention but surprising in
+    // practice: a user who picked zsh from the dropdown expects `echo
+    // $SHELL` to say zsh. Overriding it here makes the tab's `$SHELL`
+    // match the spawned program, which is what tools like `chsh`,
+    // `script(1)`, and shell-aware wrappers (e.g. `git`'s pager) expect.
+    //
+    // Windows shells use the program's own naming convention (pwsh.exe
+    // / powershell.exe / cmd.exe), not $SHELL, so we leave it alone.
+    // The empty-program guard matters on the `_defaultShell` fallback
+    // path (detection found nothing): exporting `SHELL=''` there would
+    // break anything in the child that execs `$SHELL` (tmux
+    // default-shell, `script`, editors spawning subshells).
+    if (!Platform.isWindows && profile.program.isNotEmpty) {
+      env['SHELL'] = profile.program;
+    }
+
+    // POSIX zsh: stock zsh emits no OSC 7 and reads no PROMPT_COMMAND —
+    // cwd reporting is injected via a `ZDOTDIR` shim whose `.zshenv`
+    // registers an OSC 7 `precmd` hook and restores the user's real
+    // ZDOTDIR so the rest of their startup chain (.zprofile / .zshrc /
+    // .zlogin) loads exactly as before. See `_ensureZshOsc7Integration`.
+    if (!Platform.isWindows && profile.isPosixZsh && profile.showCwdInTitle) {
+      env['ZDOTDIR'] = await _ensureZshOsc7Integration();
+    }
+
+    // POSIX fish: stock fish emits no OSC 7 on any platform and reads no
+    // env-var hooks — cwd reporting is injected via `--init-command`,
+    // which fish runs AFTER reading config.fish (so user config loads
+    // untouched) and BEFORE the first interactive prompt. See
+    // `_fishOsc7Init`.
+    if (!Platform.isWindows && profile.isPosixFish && profile.showCwdInTitle) {
+      args = [...args, '-C', _fishOsc7Init];
     }
 
     // PowerShell: inject a `prompt` override that emits OSC 2 with the
@@ -551,8 +682,13 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       args = [...args, '-NoExit', '-File', initPath];
     }
 
-    final initialCwd = initialCwdOverride ??
-        await _resolveInitialCwd(profile, spawnCwd, preresolvedWslHome: homePath);
+    final initialCwd =
+        initialCwdOverride ??
+        await _resolveInitialCwd(
+          profile,
+          spawnCwd,
+          preresolvedWslHome: homePath,
+        );
     return Surface(profile: profile, initialCwd: initialCwd)
       ..program = profile.program
       ..args = args
@@ -568,6 +704,106 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// bash expands them at prompt time).
   static const String _osc7PromptCommand =
       r'''printf '\033]7;file://%s%s\033\\' "$(hostname)" "$PWD"''';
+
+  /// fish snippet handed to `fish --init-command` (`-C`) so cwd reporting
+  /// works in stock fish (which emits no OSC 7 on its own, on any platform).
+  ///
+  /// fish evaluates `-C` commands AFTER reading `config.fish` and BEFORE
+  /// the first interactive prompt, so the user's config loads untouched
+  /// and the handler we register here survives it. The `fish_prompt`
+  /// event fires every time fish displays a prompt — exactly when the
+  /// cwd needs to be (re)reported.
+  ///
+  /// Single-quoted on purpose: fish single quotes pass `\033` through
+  /// literally so the `printf` builtin (not the shell's string parser)
+  /// expands it to ESC — symmetric with [_osc7PromptCommand] on bash.
+  /// BEL (`\a`) terminator instead of ST to sidestep fish's own
+  /// backslash collapsing inside quotes; the Alacritty engine accepts
+  /// both terminators.
+  static const String _fishOsc7Init =
+      r"""function __octodo_osc7 --on-event fish_prompt; printf '\033]7;file://%s%s\a' (hostname) "$PWD"; end""";
+
+  /// zsh `.zshenv` shim written into a temp `ZDOTDIR` by
+  /// [_ensureZshOsc7Integration]. zsh reads `$ZDOTDIR/.zshenv` before any
+  /// other startup file (login or not), which makes ZDOTDIR the one
+  /// env-var-reachable seam for injecting into zsh — zsh itself reads no
+  /// PROMPT_COMMAND-style hooks from the environment.
+  ///
+  /// The shim must do three things, in order:
+  ///
+  /// 1. Restore the user's real ZDOTDIR (baked in by Dart at write time)
+  ///    so every later startup file — `.zprofile`, `.zshrc`, `.zlogin` —
+  ///    loads from its normal location, and so nested zsh processes
+  ///    inherit the real value instead of re-running this shim.
+  /// 2. Register the OSC 7 `precmd` hook by appending to
+  ///    `precmd_functions` (no `add-zsh-hook` autoload needed — the
+  ///    array append is what add-zsh-hook does internally, and works
+  ///    this early in .zshenv where fpath-based autoloads are risky).
+  ///    `$HOST` is zsh-native (no `$(hostname)` subprocess per prompt).
+  ///    Registered in .zshenv, the hook runs before the user's `.zshrc`
+  ///    and survives it — even a `.zshrc` that replaces the prompt.
+  /// 3. Chain to the user's real `.zshenv`, which zsh skipped because it
+  ///    read ours (ZDOTDIR was already pointing here).
+  ///
+  /// Emission duplicates (user already has OSC 7 integration, e.g.
+  /// ghostty/kitty hooks) are harmless: the engine just re-parses the
+  /// same `file://` URI.
+  static String _zshEnvShim(String realZdotdir) =>
+      '''
+# octodo shell integration (OSC 7 cwd reporting)
+export ZDOTDIR='${_shellSingleQuote(realZdotdir)}'
+_octodo_osc7() { printf '\\033]7;file://%s%s\\033\\\\' "\$HOST" "\$PWD" }
+typeset -ga precmd_functions
+[[ " \${precmd_functions[@]} " == *" _octodo_osc7 "* ]] || precmd_functions+=(_octodo_osc7)
+[[ -f "\$ZDOTDIR/.zshenv" ]] && source "\$ZDOTDIR/.zshenv"
+''';
+
+  /// POSIX-shell single-quote escaping for embedding a path in a
+  /// shell script ('…' + `\'` + '…' concatenation).
+  static String _shellSingleQuote(String s) => s.replaceAll("'", r"'\''");
+
+  /// Cached absolute path of the temp ZDOTDIR written by
+  /// [_ensureZshOsc7Integration]. Cleared between app runs; reused across
+  /// every zsh tab within a single run (the shim is idempotent and
+  /// content-identical).
+  static String? _zshIntegrationDirPath;
+
+  /// Write the zsh OSC 7 shim (see [_zshEnvShim]) into a temp directory
+  /// as `.zshenv` and return the directory path, which `_makeSurface`
+  /// exports as `ZDOTDIR` for zsh tabs. Called once per zsh spawn but
+  /// cached so subsequent spawns reuse the same directory.
+  static Future<String> _ensureZshOsc7Integration() async {
+    final cached = _zshIntegrationDirPath;
+    if (cached != null) return cached;
+    // The user's real ZDOTDIR: normally unset (zsh then uses $HOME); when
+    // set (oh-my-zsh custom ZDOTDIR layouts, Nix etc.) restore THAT.
+    final realZdotdir =
+        Platform.environment['ZDOTDIR'] ?? Platform.environment['HOME'] ?? '/';
+    final dir = Directory(
+      '${Directory.systemTemp.path}/octodo_zsh_integration',
+    );
+    await dir.create(recursive: true);
+    await File(
+      '${dir.path}/.zshenv',
+    ).writeAsString(_zshEnvShim(realZdotdir), flush: true);
+    _zshIntegrationDirPath = dir.path;
+    return dir.path;
+  }
+
+  /// Test-only accessors mirroring [pwshInitScriptForTest] /
+  /// [writePwshInitScriptForTest]: let tests pin the shim body, the
+  /// fish snippet, and the temp-dir writer without spinning up real
+  /// zsh / fish processes.
+  @visibleForTesting
+  static String zshEnvShimForTest(String realZdotdir) =>
+      _zshEnvShim(realZdotdir);
+
+  @visibleForTesting
+  static String get fishOsc7InitForTest => _fishOsc7Init;
+
+  @visibleForTesting
+  static Future<String> writeZshIntegrationForTest() =>
+      _ensureZshOsc7Integration();
 
   /// PowerShell init script that overrides `prompt` to emit OSC 2 with
   /// the cwd after each prompt, then chains to whatever the user's
@@ -645,20 +881,14 @@ function prompt {
   /// path is `static` and called from [_makeSurface]; tests need the
   /// same entry point to verify file creation and caching.
   @visibleForTesting
-  static Future<String> writePwshInitScriptForTest() =>
-      _writePwshInitScript();
+  static Future<String> writePwshInitScriptForTest() => _writePwshInitScript();
 
   /// Replace (or append) the `--cd` argument in [profile]'s args with
   /// [linuxPath], so a new WSL tab starts in the remembered directory
   /// instead of the default `~`.
-  static List<String> _wslArgsWithCd(
-    ShellProfile profile,
-    String linuxPath,
-  ) {
+  static List<String> _wslArgsWithCd(ShellProfile profile, String linuxPath) {
     final args = List<String>.of(profile.args);
-    final cdIdx = args.indexWhere(
-      (a) => a == '--cd' || a.startsWith('--cd='),
-    );
+    final cdIdx = args.indexWhere((a) => a == '--cd' || a.startsWith('--cd='));
     if (cdIdx >= 0) {
       if (args[cdIdx] == '--cd' && cdIdx + 1 < args.length) {
         args[cdIdx + 1] = linuxPath;

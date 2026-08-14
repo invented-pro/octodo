@@ -6,6 +6,7 @@
 import 'package:flutter/material.dart';
 import 'setting.dart';
 import 'setting_codec.dart';
+import '../terminal/font_family_options.dart' show defaultPlatformMonospaceFont;
 
 enum CursorStyle { block, underline, bar }
 
@@ -52,7 +53,11 @@ class SettingsCatalog {
 class TerminalSettingsSection {
   final fontFamily = StringSetting(
     'terminal.fontFamily',
-    defaultValue: 'Cascadia Code',
+    // Per-platform default lives in font_family_options.dart (explicit
+    // Platform.isWindows / isMacOS / else branches) so the platform
+    // dispatch has exactly one home and Windows picks Cascadia Code,
+    // macOS picks Menlo, Linux picks the generic CSS keyword.
+    defaultValue: defaultPlatformMonospaceFont,
     title: 'Font family',
     subtitle: 'Take effect for new workspace.',
     icon: Icons.text_fields,

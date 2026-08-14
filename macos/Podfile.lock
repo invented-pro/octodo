@@ -1,0 +1,28 @@
+PODS:
+  - flutter_pty (0.0.1):
+    - FlutterMacOS
+  - FlutterMacOS (1.0.0)
+  - rust_lib_flutter_alacritty (0.1.0):
+    - FlutterMacOS
+
+DEPENDENCIES:
+  - flutter_pty (from `Flutter/ephemeral/.symlinks/plugins/flutter_pty/macos`)
+  - FlutterMacOS (from `Flutter/ephemeral`)
+  - rust_lib_flutter_alacritty (from `Flutter/ephemeral/.symlinks/plugins/rust_lib_flutter_alacritty/macos`)
+
+EXTERNAL SOURCES:
+  flutter_pty:
+    :path: Flutter/ephemeral/.symlinks/plugins/flutter_pty/macos
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+  rust_lib_flutter_alacritty:
+    :path: Flutter/ephemeral/.symlinks/plugins/rust_lib_flutter_alacritty/macos
+
+SPEC CHECKSUMS:
+  flutter_pty: 41b6f848ade294be726a6b94cdd4a67c3bc52f59
+  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  rust_lib_flutter_alacritty: e4fcb8b0170e665aa1eae60613876324cb3f0ebd
+
+PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
+
+COCOAPODS: 1.16.2

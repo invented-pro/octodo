@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:isolate';
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
 
 /// A selectable shell profile.
 ///
@@ -75,12 +74,12 @@ class ShellProfile {
   /// `true` for `wsl.exe`-backed profiles. The workspace uses this to decide
   /// whether to translate the initial cwd to the `/mnt/<drive>/…` layout and
   /// whether to query the distro `$HOME`.
-  bool get isWsl => p.basename(program).toLowerCase() == 'wsl.exe';
+  bool get isWsl => _basenameOf(program).toLowerCase() == 'wsl.exe';
 
   /// `true` for `nu.exe` (Nushell). Used by the workspace and terminal
   /// view to identify Nushell for cwd tracking via OSC 2 title parsing
   /// (ConPTY eats OSC 7 from Nushell on Windows).
-  bool get isNushell => p.basename(program).toLowerCase() == 'nu.exe';
+  bool get isNushell => _basenameOf(program).toLowerCase() == 'nu.exe';
 
   /// `true` for PowerShell (`pwsh.exe` and `powershell.exe`). Used by
   /// the workspace to inject a `prompt` function override that emits
@@ -88,7 +87,7 @@ class ShellProfile {
   /// restriction as Nushell); used by the terminal view to dispatch
   /// title parsing in `TerminalView._syncTitle`.
   bool get isPowerShell {
-    final base = p.basename(program).toLowerCase();
+    final base = _basenameOf(program).toLowerCase();
     return base == 'pwsh.exe' || base == 'powershell.exe';
   }
 
@@ -107,23 +106,48 @@ class ShellProfile {
   bool get remembersCwd => showCwdInTitle || isNushell;
 
   /// `true` for bash-based shells that pick up the `PROMPT_COMMAND` env var
-  /// to emit OSC 7. WSL and Git Bash need this injection because their
-  /// default `PROMPT_COMMAND` is empty (especially Debian WSL, plain
-  /// Git Bash). Nushell and PowerShell do NOT use `PROMPT_COMMAND`, so they
-  /// must be excluded from the env injection in `_makeSurface`.
+  /// to emit OSC 7. This covers:
+  ///
+  /// - WSL (`wsl.exe`): needs the injection because the parent Windows
+  ///   process has no `PROMPT_COMMAND` to inherit.
+  /// - Git Bash (`bash.exe` / `sh.exe`): its MSYS2 base may or may not ship
+  ///   a default `PROMPT_COMMAND` (especially Debian WSL, plain Git Bash).
+  /// - POSIX bash (`/bin/bash`, `/opt/homebrew/bin/bash`, …): stock macOS
+  ///   and most Linux installs (anything without `/etc/profile.d/vte.sh`)
+  ///   emit no OSC 7 by default, so the env injection is what makes the
+  ///   cwd-reporting channel work at all.
+  ///
+  /// Nushell, PowerShell, zsh, and fish do NOT use `PROMPT_COMMAND` (zsh
+  /// uses `precmd` hooks, fish uses event handlers — the workspace injects
+  /// those shells via their own mechanisms), so they must be excluded from
+  /// the env injection in `_makeSurface`.
   bool get needsPromptCommandForOsc7 {
     if (isWsl) return true;
-    final base = p.basename(program).toLowerCase();
-    return base == 'bash.exe' || base == 'sh.exe';
+    final base = _basenameOf(program).toLowerCase();
+    return base == 'bash.exe' || base == 'sh.exe' || base == 'bash';
   }
+
+  /// `true` for POSIX zsh profiles (basename `zsh`, no `.exe` — Windows
+  /// never produces these). Used by the workspace to inject an OSC 7
+  /// `precmd` hook via the `ZDOTDIR` shim
+  /// (`TerminalWorkspace._ensureZshOsc7Integration`): stock zsh (macOS and
+  /// most Linuxes) does NOT emit OSC 7 without shell integration.
+  bool get isPosixZsh => _basenameOf(program).toLowerCase() == 'zsh';
+
+  /// `true` for POSIX fish profiles (basename `fish`, no `.exe`). Used by
+  /// the workspace to append `--init-command` to the spawn args
+  /// (`TerminalWorkspace._fishOsc7Init`): fish reads no env-var hooks, and
+  /// `-C` code runs after the user's `config.fish`, so the OSC 7 event
+  /// handler survives user config. Stock fish emits no OSC 7 on any
+  /// platform.
+  bool get isPosixFish => _basenameOf(program).toLowerCase() == 'fish';
 
   /// `true` for PowerShell profiles whose `prompt` function must be
   /// overridden at startup to emit OSC 2 with the cwd. The override is
   /// a temp-file PowerShell script loaded via `-File` (see
   /// `TerminalWorkspace._writePwshInitScript`). Gated on [showCwdInTitle]
   /// so a profile that opts out (e.g. for debugging) skips the injection.
-  bool get needsPowerShellPromptOverride =>
-      isPowerShell && showCwdInTitle;
+  bool get needsPowerShellPromptOverride => isPowerShell && showCwdInTitle;
 
   const ShellProfile({
     required this.label,
@@ -141,6 +165,19 @@ class ShellProfile {
   String toString() => 'ShellProfile($label)';
 }
 
+/// Basename of a shell [program] path that splits on BOTH `/` and `\`.
+///
+/// `p.basename` (from package:path) picks its separator style from the
+/// *host* platform, so on a macOS/Linux host it treats
+/// `C:\Windows\System32\wsl.exe` as one giant filename — every
+/// Windows-path profile then fails its basename checks, and tests
+/// asserting those checks fail when run on POSIX CI. This helper is
+/// host-independent, mirroring `_basename` in `shell_cwd.dart`.
+String _basenameOf(String path) {
+  final slash = path.lastIndexOf(RegExp(r'[\\/]'));
+  return slash < 0 ? path : path.substring(slash + 1);
+}
+
 // ── Predefined icon colours ──────────────────────────────────────────
 
 const _pwshBlue = Color(0xFF0078D4); // Microsoft blue
@@ -148,6 +185,10 @@ const _cmdAmber = Color(0xFFE8A838); // CMD amber
 const _wslGreen = Color(0xFF22C55E); // Linux green (Tux)
 const _bashOrange = Color(0xFFF05033); // Git orange-red
 const _nuTeal = Color(0xFF3FB28F); // Nushell prompt green
+// Neutral grey for POSIX shells (zsh / bash / fish) — no shell in this
+// family ships a Material glyph or a bundled SVG, so the icon is always
+// `Icons.terminal` and the tint stays understated to match.
+const _posixGrey = Color(0xFF9E9E9E);
 
 // ── WSL distro icon resolution ───────────────────────────────────────
 
@@ -236,30 +277,38 @@ typedef WslDistroLister = List<String> Function(String wslPath);
 bool _hostPathExists(String path) =>
     File(path).existsSync() || Link(path).existsSync();
 
-/// Detect available shells on this Windows host.
+/// Detect available shells on this host (Windows, macOS, or Linux).
 ///
-/// Includes Command Prompt, Windows PowerShell, PowerShell 7, Git Bash,
-/// Nushell, and one profile per installed WSL distro — when their
-/// executables are found. CMD and Windows PowerShell ship with virtually
-/// every desktop Windows install; the others are added only when detected
-/// at standard locations (PowerShell 7 and Nushell also via PATH, WSL
-/// distros via `wsl.exe --list --quiet`).
+/// Dispatches by host platform:
 ///
-/// Called once at app startup. The returned list is ordered by preference
-/// (PowerShell 7, Windows PowerShell, CMD, then each WSL distro, then Git
-/// Bash, then Nushell).
+/// - **Windows**: delegates to [detectShellsFrom] (CMD, Windows PowerShell,
+///   PowerShell 7, Git Bash, Nushell, one profile per WSL distro).
+/// - **macOS / Linux**: delegates to [detectShellsPosixFrom] (`$SHELL`,
+///   `/bin/zsh`, `/bin/bash`, and fish at its common install paths).
+///
+/// Called once at app startup. The returned list is ordered by preference;
+/// see each delegate for its ordering rationale.
 ///
 /// This function is synchronous on purpose: the work is a handful of
-/// `File.existsSync` calls plus one `wsl.exe --list --quiet` (a fast
-/// registry query that does NOT launch a distro — measured ~90 ms). All of
-/// it runs before the first frame, where a brief blocking step cannot drop
-/// an interactive frame. Distros are enumerated synchronously here so the
-/// shell list is complete by the time the workspace builds.
-List<ShellProfile> detectShells() => detectShellsFrom(
+/// `File.existsSync` calls plus, on Windows, one `wsl.exe --list --quiet`
+/// (a fast registry query that does NOT launch a distro — measured ~90 ms).
+/// All of it runs before the first frame, where a brief blocking step cannot
+/// drop an interactive frame. Distros are enumerated synchronously here so
+/// the shell list is complete by the time the workspace builds.
+List<ShellProfile> detectShells() {
+  if (Platform.isWindows) {
+    return detectShellsFrom(
       fileExists: _hostPathExists,
       environment: Platform.environment,
       listWslDistros: _listWslDistros,
     );
+  }
+  return detectShellsPosixFrom(
+    fileExists: _hostPathExists,
+    environment: Platform.environment,
+    isMacOSHost: Platform.isMacOS,
+  );
+}
 
 /// Off-isolate variant of [detectShells]. The probe work
 /// (`existsSync` × ~6, plus a `Process.runSync` for WSL) is fast in
@@ -276,11 +325,25 @@ List<ShellProfile> detectShells() => detectShellsFrom(
 /// returned, which the UI handles by showing the same loading
 /// placeholder.
 Future<List<ShellProfile>> detectShellsAsync() {
+  if (Platform.isWindows) {
+    return Isolate.run<List<ShellProfile>>(
+      () => detectShellsFrom(
+        fileExists: _hostPathExists,
+        environment: Platform.environment,
+        listWslDistros: _listWslDistros,
+      ),
+      debugName: 'ShellProfile.detect',
+    );
+  }
+  // POSIX hosts need no WSL distro enumeration (no ConPTY, no `wsl.exe`),
+  // so the probe is purely a handful of `File.existsSync` calls — still
+  // off-loaded to a background isolate so the first frame paints while the
+  // shell list assembles.
   return Isolate.run<List<ShellProfile>>(
-    () => detectShellsFrom(
+    () => detectShellsPosixFrom(
       fileExists: _hostPathExists,
       environment: Platform.environment,
-      listWslDistros: _listWslDistros,
+      isMacOSHost: Platform.isMacOS,
     ),
     debugName: 'ShellProfile.detect',
   );
@@ -351,8 +414,7 @@ List<ShellProfile> detectShellsFrom({
     // Older Chocolatey package variant.
     r'C:\tools\powershell-7\pwsh.exe',
     // .NET global tool (`dotnet tool install -g PowerShell`).
-    if (userProfile.isNotEmpty)
-      '$userProfile\\.dotnet\\tools\\pwsh.exe',
+    if (userProfile.isNotEmpty) '$userProfile\\.dotnet\\tools\\pwsh.exe',
   ];
   String? pwsh;
   for (final p in pwshPaths) {
@@ -365,46 +427,52 @@ List<ShellProfile> detectShellsFrom({
   // the user has on PATH but that isn't in our enumerate list above.
   pwsh ??= _findOnPathIn('pwsh.exe', environment['PATH'] ?? '', fileExists);
   if (pwsh != null) {
-    profiles.add(ShellProfile(
-      label: 'PowerShell 7',
-      program: pwsh,
-      args: const ['-NoLogo'],
-      icon: Icons.bolt,
-      iconAsset: 'assets/icons/powershell-7.svg',
-      color: _pwshBlue,
-      shortName: 'pwsh',
-      showCwdInTitle: true,
-    ));
+    profiles.add(
+      ShellProfile(
+        label: 'PowerShell 7',
+        program: pwsh,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        iconAsset: 'assets/icons/powershell-7.svg',
+        color: _pwshBlue,
+        shortName: 'pwsh',
+        showCwdInTitle: true,
+      ),
+    );
   }
 
   // ── Windows PowerShell (present on virtually all Win10/11 desktops) ──
   final winPsPath = '$system32\\WindowsPowerShell\\v1.0\\powershell.exe';
   if (fileExists(winPsPath)) {
-    profiles.add(ShellProfile(
-      label: 'PowerShell 5',
-      program: winPsPath,
-      args: const ['-NoLogo'],
-      icon: Icons.bolt,
-      // Plain blue shield: PS7 uses the dark powershell-7.svg variant so
-      // the two are visually distinct in the dropdown / tab chips.
-      iconAsset: 'assets/icons/powershell.svg',
-      color: _pwshBlue,
-      shortName: 'powershell',
-      showCwdInTitle: true,
-    ));
+    profiles.add(
+      ShellProfile(
+        label: 'PowerShell 5',
+        program: winPsPath,
+        args: const ['-NoLogo'],
+        icon: Icons.bolt,
+        // Plain blue shield: PS7 uses the dark powershell-7.svg variant so
+        // the two are visually distinct in the dropdown / tab chips.
+        iconAsset: 'assets/icons/powershell.svg',
+        color: _pwshBlue,
+        shortName: 'powershell',
+        showCwdInTitle: true,
+      ),
+    );
   }
 
   // ── Command Prompt ─────────────────────────────────────────────
   final cmdPath = '$system32\\cmd.exe';
   if (fileExists(cmdPath)) {
-    profiles.add(ShellProfile(
-      label: 'Command Prompt',
-      program: cmdPath,
-      args: const [],
-      icon: Icons.terminal,
-      color: _cmdAmber,
-      shortName: 'cmd',
-    ));
+    profiles.add(
+      ShellProfile(
+        label: 'Command Prompt',
+        program: cmdPath,
+        args: const [],
+        icon: Icons.terminal,
+        color: _cmdAmber,
+        shortName: 'cmd',
+      ),
+    );
   }
 
   // ── WSL — one profile per installed distro ─────────────────────
@@ -426,29 +494,31 @@ List<ShellProfile> detectShellsFrom({
   final wslPath = '$system32\\wsl.exe';
   if (fileExists(wslPath)) {
     for (final distro in listWslDistros(wslPath)) {
-      profiles.add(ShellProfile(
-        label: distro,
-        program: wslPath,
-        args: ['-d', distro, '--cd', '~'],
-        wslDistro: distro,
-        // Windows Terminal ships per-distro Tux-style PNGs for WSL
-        // profiles (ms-appx:///ProfileIcons/wsl.png + per-distro
-        // variants for Ubuntu/Debian/Fedora). Octodo goes one
-        // further and ships per-distro SVGs resolved by
-        // [resolveWslIconAsset]; the Material `laptop_chromebook`
-        // is kept as a last-resort fallback for any distro the
-        // resolver doesn't recognise.
-        icon: Icons.laptop_chromebook,
-        iconAsset: resolveWslIconAsset(distro),
-        color: _wslGreen,
-        shortName: _sanitizeShortName(distro),
-        // Modern WSL distros (Ubuntu 22.04+, Debian 12+, Fedora 38+)
-        // emit OSC 7 reliably — bash's default `PROMPT_COMMAND`
-        // reports `\w`, and the shell's `__set_pwd` writes the
-        // `file://host/path` URI the engine decodes into
-        // `_engine.workingDir`.
-        showCwdInTitle: true,
-      ));
+      profiles.add(
+        ShellProfile(
+          label: distro,
+          program: wslPath,
+          args: ['-d', distro, '--cd', '~'],
+          wslDistro: distro,
+          // Windows Terminal ships per-distro Tux-style PNGs for WSL
+          // profiles (ms-appx:///ProfileIcons/wsl.png + per-distro
+          // variants for Ubuntu/Debian/Fedora). Octodo goes one
+          // further and ships per-distro SVGs resolved by
+          // [resolveWslIconAsset]; the Material `laptop_chromebook`
+          // is kept as a last-resort fallback for any distro the
+          // resolver doesn't recognise.
+          icon: Icons.laptop_chromebook,
+          iconAsset: resolveWslIconAsset(distro),
+          color: _wslGreen,
+          shortName: _sanitizeShortName(distro),
+          // Modern WSL distros (Ubuntu 22.04+, Debian 12+, Fedora 38+)
+          // emit OSC 7 reliably — bash's default `PROMPT_COMMAND`
+          // reports `\w`, and the shell's `__set_pwd` writes the
+          // `file://host/path` URI the engine decodes into
+          // `_engine.workingDir`.
+          showCwdInTitle: true,
+        ),
+      );
     }
   }
 
@@ -476,25 +546,27 @@ List<ShellProfile> detectShellsFrom({
     }
   }
   if (gitBash != null) {
-    profiles.add(ShellProfile(
-      label: 'Git Bash',
-      program: gitBash,
-      args: const ['--login', '-i'],
-      // `call_split` is the canonical "branching" glyph — the
-      // visual identity of Git. Distinct from `code` (which reads
-      // as a generic "code" button) and `terminal` (CMD). The
-      // official Git branch-mark SVG in `iconAsset` supersedes it
-      // where the renderer supports it.
-      icon: Icons.call_split,
-      iconAsset: 'assets/icons/git-bash.svg',
-      color: _bashOrange,
-      shortName: 'bash',
-      // Git Bash's MSYS2 base ships a `PROMPT_COMMAND` that emits
-      // OSC 7 reliably (the `\w` from `pwd` lands in the URI).
-      // Users with a custom `.bashrc` that nukes it can edit this
-      // to `false` — but the default config works.
-      showCwdInTitle: true,
-    ));
+    profiles.add(
+      ShellProfile(
+        label: 'Git Bash',
+        program: gitBash,
+        args: const ['--login', '-i'],
+        // `call_split` is the canonical "branching" glyph — the
+        // visual identity of Git. Distinct from `code` (which reads
+        // as a generic "code" button) and `terminal` (CMD). The
+        // official Git branch-mark SVG in `iconAsset` supersedes it
+        // where the renderer supports it.
+        icon: Icons.call_split,
+        iconAsset: 'assets/icons/git-bash.svg',
+        color: _bashOrange,
+        shortName: 'bash',
+        // Git Bash's MSYS2 base ships a `PROMPT_COMMAND` that emits
+        // OSC 7 reliably (the `\w` from `pwd` lands in the URI).
+        // Users with a custom `.bashrc` that nukes it can edit this
+        // to `false` — but the default config works.
+        showCwdInTitle: true,
+      ),
+    );
   }
 
   // ── Nushell (nu.exe) ───────────────────────────────────────────
@@ -531,12 +603,9 @@ List<ShellProfile> detectShellsFrom({
   // that exists wins, so we never emit duplicate entries even when
   // multiple paths point at the same binary.
   final nuPaths = <String>[
-    if (localAppData.isNotEmpty)
-      '$localAppData\\Programs\\nu\\bin\\nu.exe',
-    if (userProfile.isNotEmpty)
-      '$userProfile\\.cargo\\bin\\nu.exe',
-    if (userProfile.isNotEmpty)
-      '$userProfile\\scoop\\shims\\nu.exe',
+    if (localAppData.isNotEmpty) '$localAppData\\Programs\\nu\\bin\\nu.exe',
+    if (userProfile.isNotEmpty) '$userProfile\\.cargo\\bin\\nu.exe',
+    if (userProfile.isNotEmpty) '$userProfile\\scoop\\shims\\nu.exe',
     '$programFiles\\Programs\\nu\\bin\\nu.exe',
     '$programFiles\\nu\\bin\\nu.exe',
     '$programFiles\\Nushell\\nu.exe',
@@ -555,30 +624,32 @@ List<ShellProfile> detectShellsFrom({
   // with a system binary — `nu.exe` is unique to Nushell.
   nu ??= _findOnPathIn('nu.exe', environment['PATH'] ?? '', fileExists);
   if (nu != null) {
-    profiles.add(ShellProfile(
-      label: 'Nushell',
-      program: nu,
-      // Nushell has no `-NoLogo` analog — its startup banner is
-      // controlled by `config.show_banner` in the user's `config.nu`
-      // (out of scope for us to mutate). The valid startup flags are
-      // `-i` (interactive — default), `-l` (login shell — would
-      // disable login-time hooks users rely on), `-c <cmd>` (one-shot),
-      // `--no-config-file`, `--no-history`, `--no-std-lib`. None of
-      // them are appropriate defaults for a plain interactive tab.
-      // Pass no args so `nu` reads its config and history files the
-      // way the user already has them set up.
-      args: const [],
-      icon: Icons.terminal,
-      iconAsset: 'assets/icons/nushell.svg',
-      color: _nuTeal,
-      shortName: 'nu',
-      // `showCwdInTitle` stays `false`: the chip title uses Nushell's OSC 2
-      // (window title, which includes the cwd and is on by default).
-      // OSC 7 (cwd URI) is unreliable through ConPTY for Nushell. Cwd
-      // persistence works by parsing the cwd from the OSC 2 title (see
-      // `TerminalView._extractCwdFromNuTitle` and [remembersCwd]).
-      showCwdInTitle: false,
-    ));
+    profiles.add(
+      ShellProfile(
+        label: 'Nushell',
+        program: nu,
+        // Nushell has no `-NoLogo` analog — its startup banner is
+        // controlled by `config.show_banner` in the user's `config.nu`
+        // (out of scope for us to mutate). The valid startup flags are
+        // `-i` (interactive — default), `-l` (login shell — would
+        // disable login-time hooks users rely on), `-c <cmd>` (one-shot),
+        // `--no-config-file`, `--no-history`, `--no-std-lib`. None of
+        // them are appropriate defaults for a plain interactive tab.
+        // Pass no args so `nu` reads its config and history files the
+        // way the user already has them set up.
+        args: const [],
+        icon: Icons.terminal,
+        iconAsset: 'assets/icons/nushell.svg',
+        color: _nuTeal,
+        shortName: 'nu',
+        // `showCwdInTitle` stays `false`: the chip title uses Nushell's OSC 2
+        // (window title, which includes the cwd and is on by default).
+        // OSC 7 (cwd URI) is unreliable through ConPTY for Nushell. Cwd
+        // persistence works by parsing the cwd from the OSC 2 title (see
+        // `TerminalView._extractCwdFromNuTitle` and [remembersCwd]).
+        showCwdInTitle: false,
+      ),
+    );
   }
 
   return profiles;
@@ -598,6 +669,219 @@ String? _findOnPathIn(String exeName, String pathVar, PathProbe fileExists) {
   return null;
 }
 
+// ── POSIX shell detection (macOS + Linux) ────────────────────────────
+//
+// Sibling to the Windows-only [detectShellsFrom] above. The two never
+// overlap at runtime (the host is either Windows or POSIX), but they're
+// kept as separate top-level functions so each has a focused,
+// host-independent testable seam. [detectShells] / [detectShellsAsync]
+// dispatch to the right one by platform.
+
+/// Pure, host-independent core of [detectShellsPosix]. Mirrors the
+/// testable-seam shape of [detectShellsFrom]: callers inject [fileExists]
+/// (so tests never touch the real filesystem) and [environment] (so tests
+/// simulate `$SHELL` without mutating `Platform.environment`).
+///
+/// Detection probes, in priority order (first match wins, deduped by
+/// resolved path so `$SHELL=/bin/zsh` doesn't double-count `/bin/zsh`):
+///
+/// 1. **`$SHELL`** env var — when set, non-empty, AND the path exists, it
+///    becomes the first profile. This is the user's login shell and gets
+///    top priority: a user who switched to fish via `chsh` expects fish
+///    first in the dropdown, not a hardcoded zsh/bash ordering.
+/// 2. **`/bin/zsh`** — the macOS default since 10.15 Catalina and present
+///    on most Linux distros that ship it.
+/// 3. **`/bin/bash`** — present on virtually every Linux install per the
+///    FHS, and still on macOS (Apple ships 3.2 as `/bin/bash` for licensing
+///    reasons even after zsh became the default).
+/// 4. **`/opt/homebrew/bin/fish`** — Apple Silicon Homebrew's default prefix.
+/// 5. **`/usr/local/bin/fish`** — Intel Homebrew on macOS, and the common
+///    manual-install prefix on Linux.
+/// 6. **`/usr/bin/fish`** — system package manager install (apt / dnf).
+///
+/// [isMacOSHost] differentiates the platform for future default-fallback
+/// decisions (macOS leans zsh, Linux leans bash). It is passed as a
+/// parameter rather than read from `Platform.isMacOS` inside the function
+/// so tests can simulate either host without depending on the CI runner's
+/// OS — the same hermeticity principle that drives [detectShellsFrom]'s
+/// injected probes.
+///
+/// [resolveExecutable], when non-null, is a last-resort PATH lookup for
+/// fish (called as `resolveExecutable('fish')`, returning the resolved
+/// absolute path or an empty string when not found). The production
+/// [detectShellsPosix] call does NOT pass it — the three explicit fish
+/// paths above cover every standard install — but the seam is kept so a
+/// future "fish anywhere on PATH" mode can be added without changing the
+/// signature, and so tests can exercise the PATH fallback in isolation.
+///
+/// Every emitted profile has:
+/// - `args: const ['-l', '-i']` — interactive login shell. The two flags
+///   together are what gets the user's dotfiles + prompt helpers (PROMPT_COMMAND,
+///   starship, mise, cmux) to actually run:
+///     - `-l` (login): sources `.bash_profile` / `.zprofile` / `.profile` /
+///       `.zshrc` / `.config/fish/config.fish` as appropriate for the shell.
+///     - `-i` (interactive): forces `.bashrc` to be sourced even if the
+///       login dotfiles didn't chain to it (the standard `[ -f ~/.bashrc ]
+///       && . ~/.bashrc` chain only triggers for interactive shells).
+///       Without `-i`, bash treats `flutter_pty`'s spawn as non-interactive
+///       (its `$0` is just `bash`, not `-bash`), so PROMPT_COMMAND never
+///       fires — which is what breaks all the user's prompt-side helpers
+///       (starship, `_cmux_prompt_command`, mise's hook, etc.).
+///   Mirrors Git Bash on Windows (`args: const ['--login', '-i']`, line 508
+///   above): the same login+interactive combo, just with the POSIX flag
+///   spelling. The documented xterm/rxvt/urxvt default is non-login
+///   non-interactive, but those emulators don't carry a user's prompt
+///   stack; we do, so we need both flags.
+/// - `icon: Icons.terminal` — no shell-specific Material glyph exists for
+///   zsh / bash / fish.
+/// - `iconAsset: null` — no SVG assets are shipped for POSIX shells, so
+///   the renderer falls back to [ShellProfile.icon].
+/// - `color: _posixGrey` — neutral tint.
+/// - `shortName`: basename without extension (`zsh`, `bash`, `fish`).
+/// - `showCwdInTitle: true` — the workspace injects OSC 7 emission for
+///   all three families (stock macOS/Linux shells don't emit it on their
+///   own), so the cwd-reporting channel works out of the box.
+/// - `wslDistro: null` — POSIX shells are never WSL.
+@visibleForTesting
+List<ShellProfile> detectShellsPosixFrom({
+  required PathProbe fileExists,
+  required Map<String, String> environment,
+  required bool isMacOSHost,
+  String Function(String)? resolveExecutable,
+}) {
+  final profiles = <ShellProfile>[];
+  // Resolved paths already emitted — drives dedup so $SHELL=/bin/zsh plus
+  // the static /bin/zsh probe produce exactly one zsh profile, not two.
+  final seen = <String>{};
+  // Short names already emitted — drives dedup so $SHELL=/opt/homebrew/bin/bash
+  // plus the static /bin/bash probe produce exactly one bash profile even
+  // though they resolve to distinct binaries (Apple's /bin/bash 3.2 vs.
+  // Homebrew's bash 5.x are real different files, not a symlink pair).
+  final seenShortNames = <String>{};
+
+  /// Emit [programPath] as a POSIX shell profile if it exists on the host
+  /// and hasn't already been emitted. Dedup is by resolved path AND by
+  /// short name: two probes pointing at the same binary collapse, and a
+  /// $SHELL-derived /opt/homebrew/bin/bash wins over a subsequent /bin/bash
+  /// probe because both share the basename "bash".
+  void emitShell(String programPath) {
+    if (!fileExists(programPath)) return; // not present on this host
+    final shortName = _posixShortName(programPath);
+    if (seenShortNames.contains(shortName)) {
+      // Already have a profile with this basename (typically the
+      // $SHELL-derived Homebrew bash suppressing the static /bin/bash
+      // probe, or the first fish-path probe suppressing a later one).
+      return;
+    }
+    if (seen.contains(programPath)) return; // path already emitted
+    seen.add(programPath);
+    seenShortNames.add(shortName);
+    profiles.add(
+      ShellProfile(
+        label: _posixLabel(shortName),
+        program: programPath,
+        // Launch as an interactive login shell (`-l -i`) so the user's
+        // dotfiles AND prompt helpers actually run:
+        //
+        //   zsh   → -l: ~/.zprofile, ~/.zshrc, ~/.zlogin
+        //          -i: forces interactive mode (zsh auto-detects TTY, but
+        //              explicit -i guards against PTY-pair edge cases where
+        //              fd 0 is a pipe rather than a tty)
+        //
+        //   bash  → -l: ~/.bash_profile, ~/.bash_login, ~/.profile
+        //          -i: sources ~/.bashrc (without -i, bash skips .bashrc
+        //              in login mode — the standard
+        //              `[ -f ~/.bashrc ] && . ~/.bashrc` chain in
+        //              .bash_profile only fires when bash is interactive),
+        //              AND makes PROMPT_COMMAND fire on every prompt
+        //              (PROMPT_COMMAND is a no-op in non-interactive
+        //              shells — that's how -i triggers starship /
+        //              _cmux_prompt_command / mise hooks).
+        //
+        //   fish  → -l: ~/.config/fish/config.fish
+        //          -i: same as zsh — explicit interactive flag.
+        //
+        // Without `-i`, $PROMPT_COMMAND is silently ignored by bash, so the
+        // user's `PROMPT_COMMAND='_mise_hook_prompt_command;_cmux_prompt_command;
+        // starship_precmd;__ghostty_hook 2>/dev/null'` fires the
+        // `bash: _cmux_prompt_command: command not found` warning ONCE per
+        // tab, the bootstrap function never gets defined, and the user's
+        // prompt stays broken. User explicitly requested interactive bash.
+        //
+        // Mirrors Git Bash on Windows (line 508: `args: const ['--login',
+        // '-i']`) — same login+interactive combo, POSIX flag spelling.
+        args: const ['-l', '-i'],
+        icon: Icons.terminal,
+        iconAsset: null,
+        color: _posixGrey,
+        shortName: shortName,
+        // Stock zsh / bash / fish emit NO OSC 7 without shell integration
+        // (macOS zsh, fish everywhere, and bash on any host without
+        // vte.sh) — but the flag stays true because the workspace injects
+        // emission per shell family: PROMPT_COMMAND for bash
+        // (`needsPromptCommandForOsc7`), a ZDOTDIR .zshenv shim for zsh
+        // (`isPosixZsh`), and a fish `--init-command` for fish
+        // (`isPosixFish`). No ConPTY mangling on POSIX hosts, so the
+        // injected OSC 7 reaches the engine unmodified and drives the tab
+        // chip's `~` shortcut and cross-tab cwd persistence.
+        showCwdInTitle: true,
+      ),
+    );
+  }
+
+  // 1. $SHELL — the user's login shell (chsh target). Highest priority so
+  //    a user who switched to fish sees fish first in the dropdown.
+  final envShell = environment['SHELL'];
+  if (envShell != null && envShell.isNotEmpty) {
+    emitShell(envShell);
+  }
+
+  // 2–3. zsh and bash at their FHS / macOS-standard locations.
+  emitShell('/bin/zsh');
+  emitShell('/bin/bash');
+
+  // 4–6. fish at its common install prefixes (Apple Silicon Homebrew,
+  //      Intel Homebrew / Linux manual, system package manager).
+  emitShell('/opt/homebrew/bin/fish');
+  emitShell('/usr/local/bin/fish');
+  emitShell('/usr/bin/fish');
+
+  // Optional PATH fallback for fish — only when the explicit paths missed
+  // AND the caller injected a resolver. The production call leaves this
+  // null; tests use it to exercise the PATH-lookup branch in isolation.
+  if (resolveExecutable != null) {
+    final fishOnPath = resolveExecutable('fish');
+    if (fishOnPath.isNotEmpty) {
+      emitShell(fishOnPath);
+    }
+  }
+
+  // Note: [isMacOSHost] is intentionally not branched on in the probe
+  // logic above — the static probe list covers both macOS and Linux
+  // (zsh and bash are present on both; fish paths are enumerated for
+  // both prefixes). The parameter is part of the testable contract so
+  // tests can simulate either host without depending on the CI runner's
+  // OS (mirroring [detectShellsFrom]'s injected probes), and it is
+  // reserved for a future platform-specific default-fallback decision.
+  return profiles;
+}
+
+/// Derive a POSIX shell's shortName from its program path: the basename
+/// with a trailing `.exe` stripped (defensive — POSIX paths never carry
+/// `.exe`, but keeping the helper symmetric with the Windows shortName
+/// derivation avoids a surprise if a symlink path ever includes it).
+String _posixShortName(String programPath) {
+  final base = _basenameOf(programPath);
+  return base.endsWith('.exe') ? base.substring(0, base.length - 4) : base;
+}
+
+/// Capitalize the first letter of [shortName] for the dropdown label
+/// (`zsh` → `Zsh`, `bash` → `Bash`, `fish` → `Fish`).
+String _posixLabel(String shortName) {
+  if (shortName.isEmpty) return 'Shell';
+  return shortName[0].toUpperCase() + shortName.substring(1);
+}
+
 /// Return the installed WSL distro names, via `wsl.exe --list --quiet`.
 ///
 /// This is a fast registry query — it does NOT launch a distro or the WSL
@@ -611,11 +895,10 @@ String? _findOnPathIn(String exeName, String pathVar, PathProbe fileExists) {
 /// they are filtered out so the dropdown only lists real user distros.
 List<String> _listWslDistros(String wslPath) {
   try {
-    final result = Process.runSync(
-      wslPath,
-      const ['--list', '--quiet'],
-      stdoutEncoding: null,
-    );
+    final result = Process.runSync(wslPath, const [
+      '--list',
+      '--quiet',
+    ], stdoutEncoding: null);
     if (result.exitCode != 0) return const [];
     final names = decodeWslDistroList(result.stdout as List<int>);
     return names

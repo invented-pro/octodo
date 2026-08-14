@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert' show utf8;
+import 'dart:io' show Platform;
 import 'dart:typed_data' show BytesBuilder;
 
 import 'package:flutter/gestures.dart' show kPrimaryButton, PointerDeviceKind;
@@ -24,6 +25,7 @@ import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart' show Surface;
 import 'shell_cwd.dart';
+import 'font_family_options.dart';
 import 'terminal_settings_scope.dart';
 
 final Logger _log = moduleLogger('terminal.terminal_view');
@@ -401,15 +403,21 @@ class TerminalViewState extends State<TerminalView> {
   static const Duration _slowHintAfter = Duration(seconds: 8);
   Timer? _slowHintTimer;
 
-  // Font fallback chain: Cascadia Code (ASCII) + Microsoft YaHei (CJK).
-  // The primary is always a known-good monospace Latin font; the
-  // user's pick goes into the fallback list so it only kicks in for
-  // the script it actually covers (e.g. "Adobe Devanagari" for
-  // Devanagari glyphs). See _buildConfig for why.
-  static const _cjkFontFamily = 'Microsoft YaHei';
+  // Font fallback chain: a known-good monospace Latin font (the
+  // platform default) plus a CJK face. The primary is always the
+  // user's pick; the platform default goes into the fallback list so
+  // cell metrics have a known baseline. The CJK face covers glyphs
+  // the user's pick doesn't carry. See _buildConfig for why.
+  static String get _cjkFontFamily => defaultPlatformCjkFont;
+
   static const _lineHeight = 1.2;
+
+  // Pinned-Latin fallback used when the user's pick lacks Latin glyphs
+  // (so the Rust renderer's `CellMetrics.measure` doesn't blow up on a
+  // script-only face). Per-platform: Cascadia Code on Windows, Menlo on
+  // macOS, generic monospace on Linux.
   @visibleForTesting
-  static const safeFontFamilyFallback = 'Cascadia Code';
+  static String get safeFontFamilyFallback => defaultPlatformMonospaceFont;
 
   /// Bitmask of every DECSET mode that asks the terminal to capture
   /// mouse input on behalf of the child application. Mirrors
@@ -797,10 +805,7 @@ class TerminalViewState extends State<TerminalView> {
               s.fontFamily != effectiveLatinPrimary(s.fontFamily))
             s.fontFamily,
           _cjkFontFamily,
-          'Microsoft YaHei UI',
-          'SimSun',
-          'Consolas',
-          'monospace',
+          ...defaultPlatformFontFallback,
         ],
         size: _fontSize,
         lineHeight: _lineHeight,
@@ -981,7 +986,7 @@ class TerminalViewState extends State<TerminalView> {
 
   /// Build the `(program, args)` pair to hand to [fa.FlutterPtyBackend].
   ///
-  /// Workaround for a Windows-only flutter_pty 0.4.2 spawn quirk: the
+  /// **Windows only** — workaround for a flutter_pty 0.4.2 spawn quirk: the
   /// native `build_command` (flutter_pty/src/flutter_pty_win.c) emits
   /// `<executable> <executable> <args...>` because the Dart binding sets
   /// `argv[0] = executable` AND `build_command` also iterates `arguments`
@@ -993,12 +998,18 @@ class TerminalViewState extends State<TerminalView> {
   ///   wsl  → `runs the path as a Linux command` → "command not found"
   ///   bash → `<own path>: cannot execute binary file`
   ///
-  /// We therefore launch every shell wrapped in `cmd.exe /c "<real> <args>"`.
-  /// The doubled token becomes a harmless extra `cmd.exe` before `/c`
-  /// (cmd ignores positionals before `/c`), and the real invocation rides
-  /// untouched in the /c payload. Verified:
+  /// We therefore launch every Windows shell wrapped in
+  /// `cmd.exe /c "<real> <args>"`. The doubled token becomes a harmless
+  /// extra `cmd.exe` before `/c` (cmd ignores positionals before `/c`),
+  /// and the real invocation rides untouched in the /c payload. Verified:
   /// `cmd.exe cmd.exe /c "<exe> <args>"` launches pwsh / bash / wsl
   /// correctly.
+  ///
+  /// **macOS and Linux** launch the shell directly — no ConPTY, no
+  /// doubled-token bug — so the program and args pass through untouched
+  /// (no `cmd.exe` wrapper, no [_quoteForCmd] quoting). The
+  /// `Platform.isWindows` guard below is the single decision point; the
+  /// POSIX branch is a plain passthrough.
   ///
   /// We deliberately do NOT pass `-NoProfile` to PowerShell: that flag
   /// suppresses the user's `$PROFILE` (Microsoft.PowerShell_profile.ps1),
@@ -1014,6 +1025,12 @@ class TerminalViewState extends State<TerminalView> {
     if (program.isEmpty) {
       // No profile — let flutter_alacritty fall back to $SHELL/cmd.
       return ('', const <String>[]);
+    }
+    // Windows-only ConPTY workaround (see the dartdoc above). macOS and
+    // Linux have no spawn quirk to paper over, so the program and args
+    // are returned exactly as the profile declared them.
+    if (!Platform.isWindows) {
+      return (program, args);
     }
     return (
       'cmd.exe',
@@ -1578,23 +1595,54 @@ class TerminalViewState extends State<TerminalView> {
         primary(LogicalKeyboardKey.keyA): _sendCtrlA,
         primary(LogicalKeyboardKey.keyE): _sendCtrlE,
       },
-      // Safety-net Focus wrapping the terminal tree. The PRIMARY
-      // path for PageUp/PageDown is `fa.TerminalView._onKeyFallback`,
-      // which (after the change at `_alacrittyShortcutsWithShiftVariants`
-      // above) now finds our `PageUp → ScrollPageIntent` /
-      // `PageDown → ScrollPageIntent` binding and invokes the bundled
-      // `ScrollPageIntent` action (→ `engine.scrollLines`).
-      // That path requires the action lookup to succeed; if it
-      // somehow returns null (e.g. an FA Actions-tree quirk in some
-      // scenario we haven't reproduced), the event propagates up the
-      // focus tree and reaches THIS Focus. We catch plain
-      // PageUp/PageDown and Shift+PageUp/PageDown here and call
-      // `_scrollPage` / `_scrollPageFast` directly, returning
-      // `handled` so the ancestor `CallbackShortcuts` doesn't
-      // double-fire. Ctrl/Alt/Meta combinations are intentionally
-      // ignored — those belong to other parts of the shortcut system.
+      // Safety-net Focus wrapping the terminal tree. Two roles:
+      //
+      // 1. Scroll fallback. The PRIMARY path for PageUp/PageDown is
+      //    `fa.TerminalView._onKeyFallback`, which (after the change at
+      //    `_alacrittyShortcutsWithShiftVariants` above) finds our
+      //    `PageUp → ScrollPageIntent` / `PageDown → ScrollPageIntent`
+      //    binding and invokes the bundled action (→ `engine.scrollLines`).
+      //    If that action lookup somehow returns null (e.g. an FA
+      //    Actions-tree quirk), the event propagates up to THIS Focus.
+      //    We catch plain PageUp/PageDown and Shift+PageUp/PageDown
+      //    here and call `_scrollPage` / `_scrollPageFast` directly,
+      //    returning `handled` so the ancestor `CallbackShortcuts`
+      //    doesn't double-fire. Ctrl/Alt/Meta combinations are
+      //    intentionally ignored — those belong to other parts of the
+      //    shortcut system.
+      //
+      // 2. Letter-key auto-repeat fix for macOS. On macOS,
+      //    `fa.TerminalView._onKeyFallback` defers bare letter keys
+      //    (a-z, 0-9, punctuation, Space) to `TextInput`, expecting
+      //    `NSTextInputContext.handleEvent:` → `insertText:` →
+      //    `ImeSession.updateEditingValue` → `_writeCommittedText` to
+      //    feed the PTY per event. Backspace et al. aren't affected
+      //    because they're in `ImeKeyRouting.terminalKeys` and take
+      //    the direct `encodeKey → _writeToEngine` path per repeat.
+      //    The bug: Flutter's macOS embedder only fires `insertText:`
+      //    for the *first* keyDown of a held letter key in English
+      //    (non-composing) input mode — repeated `NSEvent`s with
+      //    `isARepeat == YES` go through `NSTextInputContext` but
+      //    don't generate `insertText:` because the IME has no
+      //    composing range to update. So the PTY only ever sees one
+      //    letter, no matter how long the user holds the key.
+      //    xterm, iTerm2, and the macOS native Terminal all
+      //    auto-repeat letters; restoring that parity is the whole
+      //    point of this Focus. We intercept `KeyRepeatEvent` for
+      //    printable characters here, write the UTF-8 bytes straight
+      //    to the engine, and return `handled`. Because the focus
+      //    tree reports handled before the `dispatchTextEvent:`
+      //    branch in `FlutterKeyboardManager` (engine source:
+      //    `FlutterKeyboardManager.mm:262`, gates text-input on
+      //    `!anyHandled`), the IME never sees the repeat — no
+      //    double-write risk on platforms where it does fire.
+      //    KeyDownEvent (first press) is left alone so CJK IME
+      //    composition still receives its preedit anchor.
+      //    Ctrl/Alt/Meta are gated out so Cmd+letter / Option+letter
+      //    still hit the normal `encodeKey` path (produces ESC + letter
+      //    or Cmd-arrow shortcuts).
       child: Focus(
-        onKeyEvent: _handleScrollFallbackKey,
+        onKeyEvent: _handleKeyFallback,
         child: Stack(
           fit: StackFit.expand,
           children: [
@@ -1668,10 +1716,7 @@ class TerminalViewState extends State<TerminalView> {
                               effectiveLatinPrimary(fontFamilyPick))
                         fontFamilyPick,
                       _cjkFontFamily,
-                      'Microsoft YaHei UI',
-                      'SimSun',
-                      'Consolas',
-                      'monospace',
+                      ...defaultPlatformFontFallback,
                     ],
                     size: _fontSize,
                     lineHeight: _lineHeight,
@@ -1791,26 +1836,65 @@ class TerminalViewState extends State<TerminalView> {
     );
   }
 
-  /// Second-line handler for PageUp / PageDown / Shift+PageUp /
-  /// Shift+PageDown. The PRIMARY path lives inside `fa.TerminalView`
-  /// (`_onKeyFallback` → our `ScrollPageIntent` shortcut → bundled
-  /// action → `engine.scrollLines`). This handler is the safety net:
-  /// if that path returns `ignored` for any reason (e.g. an action
-  /// lookup miss), the event propagates up the focus tree to this
-  /// `Focus` widget, which intercepts the same set of keys and calls
-  /// `_scrollPage` / `_scrollPageFast` directly.
+  /// Second-line key handler for the terminal. Two responsibilities,
+  /// both rooted in the fact that `fa.TerminalView`'s inner Focus
+  /// (`_onKeyFallback`) returns `ignored` for some events we still
+  /// want to act on — the event then propagates up the focus tree
+  /// and reaches this widget.
   ///
-  /// Modifier policy: only intercept when no Ctrl / Alt / Meta is
-  /// pressed. Shift is allowed (and determines 1-page vs 5-page
-  /// scroll). Any chord involving Ctrl / Alt / Meta falls through
-  /// to the rest of the shortcut system.
-  KeyEventResult _handleScrollFallbackKey(FocusNode node, KeyEvent event) {
+  /// 1. Scroll fallback (PageUp / PageDown / Shift+PageUp /
+  ///    Shift+PageDown). The PRIMARY path lives inside `fa.TerminalView`
+  ///    (`_onKeyFallback` → our `ScrollPageIntent` shortcut → bundled
+  ///    action → `engine.scrollLines`). This handler is the safety
+  ///    net: if that path returns `ignored` for any reason (e.g. an
+  ///    action-lookup miss), we call `_scrollPage` / `_scrollPageFast`
+  ///    directly and return `handled` so the ancestor
+  ///    `CallbackShortcuts` doesn't double-fire. Ctrl/Alt/Meta
+  ///    combinations are intentionally ignored — those belong to
+  ///    other parts of the shortcut system.
+  ///
+  /// 2. Letter-key auto-repeat on macOS. `fa.TerminalView` defers
+  ///    bare printable keys (a-z, 0-9, punctuation, Space) to IME on
+  ///    macOS, but Flutter's `NSTextInputContext` only fires
+  ///    `insertText:` for the *first* keyDown of a held key in
+  ///    English input mode — repeated `NSEvent`s reach us unhandled.
+  ///    We write the UTF-8 bytes straight to the engine for any
+  ///    `KeyRepeatEvent` whose `character` is printable, restoring
+  ///    xterm-style auto-repeat. Gated by `Platform.isMacOS` because
+  ///    on Linux/Windows `fa.TerminalView` does NOT defer printables
+  ///    to IME, so a repeat is already on the wire by the time it
+  ///    reaches this handler and writing here would double-fire.
+  ///
+  /// Modifier policy (shared by both paths): only intercept when no
+  /// Ctrl / Alt / Meta is pressed. Shift is allowed (and just
+  /// changes the character that gets written — `event.character`
+  /// already reflects the shift). Any chord involving Ctrl / Alt /
+  /// Meta falls through to the rest of the shortcut system.
+  KeyEventResult _handleKeyFallback(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
     final hw = HardwareKeyboard.instance;
     if (hw.isControlPressed || hw.isAltPressed || hw.isMetaPressed) {
       return KeyEventResult.ignored;
+    }
+    // ── Letter-key auto-repeat (macOS only — see Focus wrapper dartdoc).
+    // We only intercept `KeyRepeatEvent` so the first `KeyDownEvent`
+    // keeps going through `fa.TerminalView` → IME (CJK preedit
+    // anchoring on macOS still works). The `Platform.isMacOS` gate is
+    // load-bearing: on Linux/Windows `fa.TerminalView._onKeyFallback`
+    // does NOT defer printables to IME (`deferUncomposedPrintableOn`
+    // returns `false` there — `ime_key_routing.dart:82-86`), so a
+    // repeat already reaches `encodeKey` → `_writeToEngine` and writes
+    // a byte to the PTY. Without the gate we'd double-fire. On
+    // macOS `fa.TerminalView` returns `ignored` for the printable, so
+    // the repeat reaches us unhandled — writing here is the only path
+    // that puts the byte on the wire.
+    if (event is KeyRepeatEvent &&
+        Platform.isMacOS &&
+        _isPrintableForRepeat(event.character)) {
+      _engine.write(Uint8List.fromList(utf8.encode(event.character!)));
+      return KeyEventResult.handled;
     }
     final isPageUp = event.logicalKey == LogicalKeyboardKey.pageUp;
     final isPageDown = event.logicalKey == LogicalKeyboardKey.pageDown;
@@ -1824,6 +1908,20 @@ class TerminalViewState extends State<TerminalView> {
       _scrollPage(direction);
     }
     return KeyEventResult.handled;
+  }
+
+  /// True when [ch] is a non-empty string of bytes that should bypass IME
+  /// routing on macOS and go straight to the PTY. Mirrors the printability
+  /// check inside `ImeKeyRouting.isDeferrablePrintableKeyEvent`
+  /// (flutter_alacritty `lib/input/ime_key_routing.dart:54-58`) so we
+  /// never intercept a control code that `fa.TerminalView` would
+  /// otherwise route through `encodeKey` itself.
+  static bool _isPrintableForRepeat(String? ch) {
+    if (ch == null || ch.isEmpty) return false;
+    for (final unit in ch.codeUnits) {
+      if (unit < 0x20 || unit == 0x7f) return false;
+    }
+    return true;
   }
 
   @override

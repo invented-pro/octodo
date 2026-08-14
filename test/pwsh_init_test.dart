@@ -16,14 +16,22 @@ void main() {
 
     test('saves the existing prompt into __octodo_original_prompt', () {
       expect(script, contains(r'Function:__octodo_original_prompt'));
-      expect(script, contains(r'Set-Item -Path Function:__octodo_original_prompt'));
+      expect(
+        script,
+        contains(r'Set-Item -Path Function:__octodo_original_prompt'),
+      );
       expect(script, contains('(Get-Item Function:prompt).ScriptBlock'));
     });
 
     test('defines a fallback prompt if none exists', () {
       // Defensive branch: if PowerShell has no `prompt` function for
       // any reason, install a minimal one so the wrapper can chain.
-      expect(script, contains('Set-Item -Path Function:__octodo_original_prompt -Value { "PS> " }'));
+      expect(
+        script,
+        contains(
+          'Set-Item -Path Function:__octodo_original_prompt -Value { "PS> " }',
+        ),
+      );
     });
 
     test('redefines function prompt', () {
@@ -39,23 +47,33 @@ void main() {
       );
     });
 
-    test('emits OSC 2 with "PowerShell - <path>" format after the user prompt runs', () {
-      // The OSC 2 sequence must be emitted AFTER calling the original
-      // prompt so it wins over oh-my-posh / starship titles.
-      expect(script, contains(r'Write-Host -NoNewline'));
-      expect(script, contains(r']2;PowerShell - '));
-      // BEL terminator — raw char in script is fine, escape also works.
-      expect(script, contains(r'$__Bel'));
-      // The chain must happen BEFORE the Write-Host emission.
-      final chainIdx = script.indexOf(r'& (Get-Item Function:__octodo_original_prompt)');
-      final emitIdx = script.indexOf(r'Write-Host -NoNewline');
-      expect(chainIdx, greaterThanOrEqualTo(0),
-          reason: 'must call original prompt');
-      expect(emitIdx, greaterThanOrEqualTo(0),
-          reason: 'must emit OSC 2');
-      expect(emitIdx, greaterThan(chainIdx),
-          reason: 'OSC 2 must be emitted AFTER the original prompt runs');
-    });
+    test(
+      'emits OSC 2 with "PowerShell - <path>" format after the user prompt runs',
+      () {
+        // The OSC 2 sequence must be emitted AFTER calling the original
+        // prompt so it wins over oh-my-posh / starship titles.
+        expect(script, contains(r'Write-Host -NoNewline'));
+        expect(script, contains(r']2;PowerShell - '));
+        // BEL terminator — raw char in script is fine, escape also works.
+        expect(script, contains(r'$__Bel'));
+        // The chain must happen BEFORE the Write-Host emission.
+        final chainIdx = script.indexOf(
+          r'& (Get-Item Function:__octodo_original_prompt)',
+        );
+        final emitIdx = script.indexOf(r'Write-Host -NoNewline');
+        expect(
+          chainIdx,
+          greaterThanOrEqualTo(0),
+          reason: 'must call original prompt',
+        );
+        expect(emitIdx, greaterThanOrEqualTo(0), reason: 'must emit OSC 2');
+        expect(
+          emitIdx,
+          greaterThan(chainIdx),
+          reason: 'OSC 2 must be emitted AFTER the original prompt runs',
+        );
+      },
+    );
 
     test('returns the original prompt output so visible text is preserved', () {
       expect(script, contains(r'return $__result'));
@@ -80,20 +98,26 @@ void main() {
   });
 
   group('_writePwshInitScript (temp file writer)', () {
-    test('writes to %TEMP%\\octodo_pwsh_init.ps1 and returns absolute path',
-        () async {
-      final path = await TerminalWorkspaceState.writePwshInitScriptForTest();
-      expect(path, endsWith('octodo_pwsh_init.ps1'));
-      // Absolute on Windows: <drive>:\... or <drive>:/...
-      expect(RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path), isTrue,
-          reason: 'temp path must be absolute, got: $path');
-      // File should exist and contain the script body.
-      final file = File(path);
-      expect(file.existsSync(), isTrue);
-      final content = file.readAsStringSync();
-      expect(content, contains('function prompt'));
-      expect(content, contains(']2;PowerShell - '));
-    });
+    test(
+      'writes to %TEMP%\\octodo_pwsh_init.ps1 and returns absolute path',
+      () async {
+        final path = await TerminalWorkspaceState.writePwshInitScriptForTest();
+        expect(path, endsWith('octodo_pwsh_init.ps1'));
+        // Absolute on Windows (<drive>:\... or <drive>:/...) and on POSIX
+        // (leading /) — the suite runs on macOS / Linux CI too.
+        expect(
+          RegExp(r'^([A-Za-z]:[\\/]|/)').hasMatch(path),
+          isTrue,
+          reason: 'temp path must be absolute, got: $path',
+        );
+        // File should exist and contain the script body.
+        final file = File(path);
+        expect(file.existsSync(), isTrue);
+        final content = file.readAsStringSync();
+        expect(content, contains('function prompt'));
+        expect(content, contains(']2;PowerShell - '));
+      },
+    );
 
     test('cached path is returned on subsequent calls (idempotent)', () async {
       final first = await TerminalWorkspaceState.writePwshInitScriptForTest();
@@ -172,10 +196,7 @@ void main() {
       // The parser doesn't distinguish — both emit the same
       // "PowerShell - <path>" shape because the init script uses
       // that exact prefix for both versions.
-      expect(
-        extract(r'PowerShell - C:\Users\qisha'),
-        r'C:\Users\qisha',
-      );
+      expect(extract(r'PowerShell - C:\Users\qisha'), r'C:\Users\qisha');
     });
   });
 

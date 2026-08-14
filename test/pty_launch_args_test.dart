@@ -10,6 +10,16 @@
 // future contributor cannot silently reintroduce `-NoProfile` (or any other
 // profile-suppressing flag) for PowerShell without also updating the
 // docstring and failing here.
+//
+// Platform awareness: `_buildPtyLaunchArgs` has two branches:
+//   - Windows: wraps everything in `cmd.exe /c "<real> <args>"` to work
+//     around a flutter_pty 0.4.2 spawn quirk.
+//   - macOS / Linux: passes through untouched (no ConPTY, no doubled-token
+//     bug).
+// Each test below branches on `Platform.isWindows` so the same regression
+// contract is enforced on every host.
+
+import 'dart:io' show Platform;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:octodo/src/terminal/terminal_view.dart';
@@ -23,14 +33,22 @@ void main() {
       final (ptyProgram, ptyArgs) =
           TerminalViewState.ptyLaunchArgsForTest(program, const ['-NoLogo']);
 
-      expect(ptyProgram, 'cmd.exe');
-      // The executable path contains a space, so it must survive cmd's /c
-      // parser wrapped in double quotes; -NoLogo has no space so stays bare.
-      expect(ptyArgs, [
-        '/c',
-        r'"C:\Program Files\PowerShell\7\pwsh.exe"',
-        '-NoLogo',
-      ]);
+      if (Platform.isWindows) {
+        // Windows wraps in cmd.exe /c. The executable path contains a
+        // space, so it must survive cmd's /c parser wrapped in double
+        // quotes; -NoLogo has no space so stays bare.
+        expect(ptyProgram, 'cmd.exe');
+        expect(ptyArgs, [
+          '/c',
+          r'"C:\Program Files\PowerShell\7\pwsh.exe"',
+          '-NoLogo',
+        ]);
+      } else {
+        // macOS / Linux: pwsh.exe (or whatever executable) is passed through
+        // verbatim. No cmd.exe wrapper, no quoting layer.
+        expect(ptyProgram, program);
+        expect(ptyArgs, const ['-NoLogo']);
+      }
       // The crux of issue #1: no token may suppress the profile.
       expect(
         ptyArgs,
@@ -43,8 +61,13 @@ void main() {
     test('Windows PowerShell: no -NoProfile', () {
       const program =
           r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe';
-      final (_, ptyArgs) =
+      final (ptyProgram, ptyArgs) =
           TerminalViewState.ptyLaunchArgsForTest(program, const ['-NoLogo']);
+      if (Platform.isWindows) {
+        expect(ptyProgram, 'cmd.exe');
+      } else {
+        expect(ptyProgram, program);
+      }
       expect(ptyArgs, isNot(contains('-NoProfile')));
       expect(ptyArgs, contains('-NoLogo'));
     });
@@ -53,9 +76,14 @@ void main() {
       const program = r'C:\Users\me\scoop\shims\pwsh.exe';
       final (ptyProgram, ptyArgs) =
           TerminalViewState.ptyLaunchArgsForTest(program, const ['-NoLogo']);
-      expect(ptyProgram, 'cmd.exe');
-      // No spaces → no quoting needed.
-      expect(ptyArgs, ['/c', program, '-NoLogo']);
+      if (Platform.isWindows) {
+        expect(ptyProgram, 'cmd.exe');
+        // No spaces → no quoting needed.
+        expect(ptyArgs, ['/c', program, '-NoLogo']);
+      } else {
+        expect(ptyProgram, program);
+        expect(ptyArgs, const ['-NoLogo']);
+      }
       expect(ptyArgs, isNot(contains('-NoProfile')));
     });
 
@@ -63,8 +91,13 @@ void main() {
       const program = r'C:\Windows\System32\cmd.exe';
       final (ptyProgram, ptyArgs) =
           TerminalViewState.ptyLaunchArgsForTest(program, const []);
-      expect(ptyProgram, 'cmd.exe');
-      expect(ptyArgs, ['/c', program]);
+      if (Platform.isWindows) {
+        expect(ptyProgram, 'cmd.exe');
+        expect(ptyArgs, ['/c', program]);
+      } else {
+        expect(ptyProgram, program);
+        expect(ptyArgs, isEmpty);
+      }
       expect(ptyArgs, isNot(contains('-NoProfile')));
       expect(ptyArgs, isNot(contains('-NoLogo')));
     });
@@ -73,11 +106,17 @@ void main() {
       // wsl.exe -d Ubuntu --cd ~ ; passing -NoProfile here would make wsl
       // try to run a Linux binary named "NoProfile".
       const program = r'C:\Windows\System32\wsl.exe';
-      final (_, ptyArgs) = TerminalViewState.ptyLaunchArgsForTest(
+      final (ptyProgram, ptyArgs) = TerminalViewState.ptyLaunchArgsForTest(
         program,
         const ['-d', 'Ubuntu', '--cd', '~'],
       );
-      expect(ptyArgs, ['/c', program, '-d', 'Ubuntu', '--cd', '~']);
+      if (Platform.isWindows) {
+        expect(ptyProgram, 'cmd.exe');
+        expect(ptyArgs, ['/c', program, '-d', 'Ubuntu', '--cd', '~']);
+      } else {
+        expect(ptyProgram, program);
+        expect(ptyArgs, const ['-d', 'Ubuntu', '--cd', '~']);
+      }
       expect(ptyArgs, isNot(contains('-NoProfile')));
     });
 
@@ -92,16 +131,25 @@ void main() {
       // Guards the _quoteForCmd contract for a flag with a space, e.g. a
       // hypothetical -File "some path.ps1" arg.
       const program = r'C:\Program Files\PowerShell\7\pwsh.exe';
-      final (_, ptyArgs) = TerminalViewState.ptyLaunchArgsForTest(
+      final (ptyProgram, ptyArgs) = TerminalViewState.ptyLaunchArgsForTest(
         program,
         const ['-NoLogo', r'C:\Some Dir\script.ps1'],
       );
-      expect(ptyArgs, [
-        '/c',
-        r'"C:\Program Files\PowerShell\7\pwsh.exe"',
-        '-NoLogo',
-        r'"C:\Some Dir\script.ps1"',
-      ]);
+      if (Platform.isWindows) {
+        // The executable path contains a space → _quoteForCmd wraps it.
+        // The script path also contains a space → wrapped.
+        expect(ptyArgs, [
+          '/c',
+          r'"C:\Program Files\PowerShell\7\pwsh.exe"',
+          '-NoLogo',
+          r'"C:\Some Dir\script.ps1"',
+        ]);
+      } else {
+        // macOS / Linux: passthrough, no quoting at this layer (the
+        // underlying fork/exec handles argv natively, no cmd.exe parser).
+        expect(ptyProgram, program);
+        expect(ptyArgs, const ['-NoLogo', r'C:\Some Dir\script.ps1']);
+      }
       expect(ptyArgs, isNot(contains('-NoProfile')));
     });
   });
@@ -117,9 +165,13 @@ void main() {
     ];
     for (final (program, args) in cases) {
       test('$program never receives a profile-suppression flag', () {
-        final (_, ptyArgs) =
+        final (ptyProgram, ptyArgs) =
             TerminalViewState.ptyLaunchArgsForTest(program, args);
-        for (final token in ptyArgs) {
+        // Scan every token including the program itself (Windows cmd.exe
+        // wrapper case, where the program is the second token).
+        final allTokens = [ptyProgram, ...ptyArgs];
+        for (final token in allTokens) {
+          if (token.isEmpty) continue;
           final lower = token.toLowerCase();
           expect(
             lower,

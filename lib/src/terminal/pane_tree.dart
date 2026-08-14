@@ -5,7 +5,6 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:path/path.dart' as p;
 import '../shortcuts/app_shortcuts.dart';
 import '../theme/app_theme.dart';
 import '../theme/palette_context.dart';
@@ -197,14 +196,24 @@ class Surface extends ChangeNotifier {
     if (!showCwd) return name;
     // Prefer the OSC 7 cwd. Fall back to the initial CWD only if it is a
     // real path; the WSL unresolved-home sentinel (`'~'`) carries no
-    // path information and must NOT be passed to `p.basename` (which
+    // path information and must NOT be passed to [_cwdBasename] (which
     // would happily return `'~'` and put `~` back into the chip).
     final cwd = _currentCwd ?? (initialCwd == '~' ? null : initialCwd);
     if (cwd == null || cwd.isEmpty) return name;
     if (_isAtHome(cwd)) return '$name ~';
-    final base = p.basename(cwd);
+    final base = _cwdBasename(cwd);
     if (base.isEmpty) return name;
     return '$name $base';
+  }
+
+  /// Host-independent basename for chip titles: splits on BOTH `/` and
+  /// `\` so a Windows-style cwd (`C:\Users\x\proj`) renders its last
+  /// segment on macOS / Linux hosts too. `p.basename` picks its
+  /// separator style from the host platform, which made this chip show
+  /// the entire path on POSIX CI.
+  static String _cwdBasename(String path) {
+    final slash = path.lastIndexOf(RegExp(r'[\\/]'));
+    return slash < 0 ? path : path.substring(slash + 1);
   }
 
   /// The full title to render in the tab chip. Tries the shell-set
@@ -1059,8 +1068,7 @@ class _SplitStackState extends State<_SplitStack> {
             ? renderBox.size.width
             : renderBox.size.height;
         if (totalSize <= 0) return;
-        final newRatio =
-            (split.ratio + delta / totalSize).clamp(0.1, 0.9);
+        final newRatio = (split.ratio + delta / totalSize).clamp(0.1, 0.9);
         widget.onResize(split, newRatio.toDouble());
       },
     );
@@ -1518,7 +1526,10 @@ class ContainerTabBarState extends State<_ContainerTabBar> {
       // [BackgroundAlphaExtension] so the tab bar goes glassy alongside
       // the rest of the chrome.
       color: palette.surface2.withValues(
-          alpha: Theme.of(context).extension<BackgroundAlphaExtension>()?.value ?? 1.0),
+        alpha:
+            Theme.of(context).extension<BackgroundAlphaExtension>()?.value ??
+            1.0,
+      ),
       child: Row(
         children: [
           Expanded(

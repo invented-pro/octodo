@@ -38,25 +38,79 @@ import 'dart:isolate';
 import 'package:flutter/widgets.dart';
 import 'package:just_font_scan/just_font_scan.dart';
 
-/// Well-known monospace faces commonly installed on Windows 10/11
-/// plus the CJK families the terminal renderer wires up as
-/// fallback glyphs. Listed in priority order: most-preferred
-/// monospace pick → western fallbacks → CJK fallbacks → the
-/// generic CSS keyword `monospace`, which every renderer recognises.
+/// Well-known monospace faces commonly installed per-platform plus
+/// the CJK families the terminal renderer wires up as fallback
+/// glyphs. Listed in priority order: most-preferred monospace pick
+/// → western fallbacks → CJK fallbacks → the generic CSS keyword
+/// `monospace`, which every renderer recognises.
 const _kKnownMonospaceFonts = <String>[
+  // ── Windows (pre-installed on Windows 10/11) ─────────────────
   'Cascadia Code',
   'Cascadia Mono',
   'Consolas',
   'Lucida Console',
   'Courier New',
+  // ── macOS (pre-installed on every release since 10.6) ────────
+  'Menlo',
+  'SF Mono',
+  'Monaco',
+  'Andale Mono',
+  'Courier',
+  // ── Cross-platform / supplemental ───────────────────────────
+  'PT Mono',
+  'JetBrains Mono',
+  'Fira Code',
+  // ── CJK fallback glyphs (per-platform) ──────────────────────
   'Microsoft YaHei',
   'Microsoft YaHei UI',
+  'PingFang SC',
+  'Hiragino Sans GB',
+  'Hiragino Sans',
+  'Noto Sans CJK SC',
+  'Noto Sans Mono CJK SC',
   'SimSun',
   'NSimSun',
   'MS Gothic',
   'MS Mincho',
   'monospace',
 ];
+
+/// Per-platform default monospace font. Picked because it ships
+/// pre-installed on every supported release of that OS — no setup,
+/// no download. The fallback chain in `TerminalView._buildConfig`
+/// adds the user's pick + a CJK face; this string is what the
+/// fallback chain reduces to when no better candidate is available.
+String get defaultPlatformMonospaceFont {
+  if (Platform.isWindows) return 'Cascadia Code';
+  if (Platform.isMacOS) return 'Menlo';
+  return 'monospace';
+}
+
+/// Per-platform CJK fallback face. The terminal renderer walks the
+/// `FontConfig.fallback` chain for any glyph the primary doesn't
+/// carry — CJK chars are the common case. Apple ships Hiragino
+/// Sans GB on every release; Linux distros standardise on Noto.
+String get defaultPlatformCjkFont {
+  if (Platform.isWindows) return 'Microsoft YaHei';
+  if (Platform.isMacOS) return 'Hiragino Sans GB';
+  return 'Noto Sans CJK SC';
+}
+
+/// Extra render-side fallback faces appended to whatever the user
+/// picked, so the renderer has a complete (Latin + CJK) chain even
+/// before the JustFontScan enumeration resolves on a worker isolate.
+/// Per-platform: Windows ships Consolas + SimSun + YaHei; macOS
+/// ships Menlo + PingFang + Hiragino; Linux relies on the generic
+/// CSS keyword.
+List<String> get defaultPlatformFontFallback {
+  if (Platform.isWindows) {
+    return const ['Microsoft YaHei UI', 'SimSun', 'Consolas', 'monospace'];
+  }
+  if (Platform.isMacOS) {
+    return const ['Hiragino Sans', 'PingFang SC', 'Courier', 'monospace'];
+  }
+  return const ['Noto Sans Mono CJK SC', 'monospace'];
+}
 
 /// The synchronous fallback list for the font dropdown. Used as a
 /// starter set while the off-isolate scan is in progress, and as a

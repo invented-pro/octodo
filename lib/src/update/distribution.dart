@@ -64,20 +64,32 @@ InstallDistribution resolveInstallDistribution({
   PackageFullNameProbe? probe,
 }) {
   if (override != null) return override;
-  if (!Platform.isWindows) return InstallDistribution.portable;
-  final effectiveProbe = probe ?? nativePackageFullName;
+  // The probe defaults to the Win32 call on Windows; anywhere else the
+  // process cannot have MSIX package identity, so "no package" is the
+  // only correct default. Gating HERE (instead of an early
+  // `!Platform.isWindows → portable` return) keeps the injected
+  // [probe] / [resolvedExecutable] seams usable on macOS / Linux CI:
+  // the path heuristic below is a pure string check and runs fine on
+  // any host (a real POSIX executable path never contains
+  // `\windowsapps\`, so production POSIX still resolves portable).
+  final effectiveProbe =
+      probe ?? (Platform.isWindows ? nativePackageFullName : _noPackage);
   final fullName = effectiveProbe();
-  if (fullName != null && fullName.isNotEmpty &&
+  if (fullName != null &&
+      fullName.isNotEmpty &&
       fullName.startsWith(kMsixIdentityName)) {
     return InstallDistribution.store;
   }
-  final exe = (resolvedExecutable ?? Platform.resolvedExecutable)
-      .toLowerCase();
+  final exe = (resolvedExecutable ?? Platform.resolvedExecutable).toLowerCase();
   if (exe.contains(r'\windowsapps\')) {
     return InstallDistribution.store;
   }
   return InstallDistribution.portable;
 }
+
+/// Default probe for non-Windows hosts (see
+/// [resolveInstallDistribution]): never has MSIX identity.
+String? _noPackage() => null;
 
 /// Win32 `GetCurrentPackageFullName` binding. Returns the package
 /// full name (e.g. `43D421A8.Octodo_1.0.13.0_x64__mr0as8erd2vmy`)
@@ -88,13 +100,17 @@ InstallDistribution resolveInstallDistribution({
 /// must never be called there.
 String? nativePackageFullName() {
   final kernel32 = DynamicLibrary.open('kernel32.dll');
-  final getCurrentPackageFullName = kernel32.lookupFunction<
-      Int32 Function(
+  final getCurrentPackageFullName = kernel32
+      .lookupFunction<
+        Int32 Function(
           Pointer<Uint32> packageFullNameLength,
-          Pointer<Utf16> packageFullName),
-      int Function(
+          Pointer<Utf16> packageFullName,
+        ),
+        int Function(
           Pointer<Uint32> packageFullNameLength,
-          Pointer<Utf16> packageFullName)>('GetCurrentPackageFullName');
+          Pointer<Utf16> packageFullName,
+        )
+      >('GetCurrentPackageFullName');
   final lengthPtr = calloc<Uint32>();
   // 1024 wide chars is well beyond any realistic package full
   // name (they top out ~130 chars). Acts as both the in/out
