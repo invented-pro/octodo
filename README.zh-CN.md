@@ -1,12 +1,13 @@
 # <img src="assets/logo.png" alt="" align="top" width="40" /> Octodo
 
-一个多工作区终端复合体，基于 Flutter + Rust 构建，面向 Windows。
+一个多工作区终端复合体，基于 Flutter + Rust 构建，面向
+Windows 与 macOS。
 
 [English](./README.md) | 简体中文
 
 [![Release](https://img.shields.io/github/v/release/invented-pro/octodo)](https://github.com/invented-pro/octodo/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078d4)](https://github.com/invented-pro/octodo/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-0078d4)](https://github.com/invented-pro/octodo/releases/latest)
 
 ---
 
@@ -31,42 +32,65 @@
 | # | 平台 | 状态 |
 | --- | --- | --- |
 | 1 | Windows | ✅ |
-| 2 | macOS | ❌ |
+| 2 | macOS | ✅ |
 | 3 | Linux | ❌ |
 
 
 
 ## 使用方法
 
-Octodo 可从 Microsoft Store 或便携版 zip 获取。应用内更新会自动
-适配：商店版通过商店更新；便携版自动应用最新的 GitHub 发布。
+应用内更新会自动适配：商店版通过对应商店更新；直接下载版
+自动应用最新的 GitHub 发布（下载 → SHA-256 校验 → 替换 → 重启）。
 
-### Microsoft Store
+### Windows
+
+#### Microsoft Store
 
 从 [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ)
 安装。更新由商店自动交付。
 
-### 便携版
+#### 便携版（zip）
 
 1. 从 [Releases](https://github.com/invented-pro/octodo/releases/latest)
-   下载最新的 `octodo-windows.zip`。
+   下载最新的 `octodo-v<version>-windows-x64.zip`。
 2. 解压前，右键 zip 文件 → **属性** → 勾选 **解除锁定** → **确定**。
    这一步避免 Windows 将解压后的 `.exe` 标记为「不信任」，进而
    拦截网络访问与 shell 启动相关的 API。
 3. 解压到任意目录，双击 `octodo.exe` 即可启动。
+
+### macOS（Apple Silicon）
+
+#### 直接下载
+
+1. 从 [Releases](https://github.com/invented-pro/octodo/releases/latest)
+   下载最新的 `octodo-v<version>-macos-arm64.zip` 或
+   `Octodo-v<version>-macos-arm64.dmg`。
+2. 解压（或挂载 DMG），将 **Octodo.app** 拖入
+   **应用程序（Applications）**。
+3. 若首次启动被 Gatekeeper 拦截，运行：
+
+       xattr -dr com.apple.quarantine /Applications/Octodo.app
+
+后续更新在应用内完成：更新器会下载新版本、校验、原地替换
+应用并自动重启。
+
+#### Mac App Store
+
+即将上线。商店版将通过 App Store 自动更新。
 
 如需从源码构建，请参阅下文。
 
 ### 从源码构建
 
 需要 Flutter SDK（>= 3.44.0）、Rust 工具链（通过
-[rustup](https://rustup.rs/) 安装）以及 Windows 10/11 上的
-**Desktop development with C++** Visual Studio 工作负载：
+[rustup](https://rustup.rs/) 安装），以及对应平台的工具链 —
+Windows 10/11 需 **Desktop development with C++** Visual Studio
+工作负载，macOS 需 Xcode：
 
     git clone https://github.com/invented-pro/octodo.git
     cd octodo
     flutter pub get
-    flutter run -d windows
+    flutter run -d windows    # 或：flutter run -d macos
 
 请见 [CONTRIBUTING.md](./CONTRIBUTING.md) 了解测试、lint 与
 fork 补丁工作流。

@@ -1,12 +1,13 @@
 # <img src="assets/logo.png" alt="" align="top" width="40" /> Octodo
 
-A multi-workspace terminal complex, built on Flutter + Rust, for Windows.
+A multi-workspace terminal complex, built on Flutter + Rust, for
+Windows and macOS.
 
 English | [中文简体](./README.zh-CN.md)
 
 [![Release](https://img.shields.io/github/v/release/invented-pro/octodo)](https://github.com/invented-pro/octodo/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078d4)](https://github.com/invented-pro/octodo/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-0078d4)](https://github.com/invented-pro/octodo/releases/latest)
 
 ---
 
@@ -32,44 +33,68 @@ panes, and tabs.
 | # | Platform | Status |
 | --- | --- | --- |
 | 1 | Windows | ✅ |
-| 2 | macOS | ❌ |
+| 2 | macOS | ✅ |
 | 3 | Linux | ❌ |
 
 
 
 ## Usage
 
-Octodo is available from the Microsoft Store or as a portable zip.
 The in-app updater adapts automatically: Store builds update through
-the Store; portable builds self-apply the latest GitHub release.
+their store; direct-download builds self-apply the latest GitHub
+release (download → SHA-256 verify → swap → relaunch).
 
-### Microsoft Store
+### Windows
+
+#### Microsoft Store
 
 Install from the
 [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ).
 Updates are delivered automatically through the Store.
 
-### Portable
+#### Portable (zip)
 
-1. Download the latest `octodo-windows.zip` from
+1. Download the latest `octodo-v<version>-windows-x64.zip` from
    [Releases](https://github.com/invented-pro/octodo/releases/latest).
 2. Before unzipping, right-click the zip → **Properties** → tick
    **Unblock** → **OK**. This stops Windows from marking the unpacked
    `.exe` as untrusted (which would block network and shell-spawn APIs).
 3. Unzip anywhere and double-click `octodo.exe` to launch.
 
+### macOS (Apple Silicon)
+
+#### Direct download
+
+1. Download the latest `octodo-v<version>-macos-arm64.zip` or
+   `Octodo-v<version>-macos-arm64.dmg` from
+   [Releases](https://github.com/invented-pro/octodo/releases/latest).
+2. Unzip (or mount the DMG) and drag **Octodo.app** into
+   **Applications**.
+3. If Gatekeeper blocks the first launch, run:
+
+       xattr -dr com.apple.quarantine /Applications/Octodo.app
+
+Subsequent updates are delivered in-app: the updater downloads the
+new release, verifies it, swaps the bundle in place, and relaunches.
+
+#### Mac App Store
+
+Coming soon. Store builds will update automatically through the
+App Store.
+
 To build from source instead, see below.
 
 ### Build from source
 
-Requires the Flutter SDK (>= 3.44.0), the Rust toolchain (installed
-via [rustup](https://rustup.rs/)), and Windows 10/11 with the
-**Desktop development with C++** Visual Studio workload:
+Requires the Flutter SDK (>= 3.44.0) and the Rust toolchain (installed
+via [rustup](https://rustup.rs/)), plus your platform toolchain —
+Windows 10/11 with the **Desktop development with C++** Visual Studio
+workload, or macOS with Xcode:
 
     git clone https://github.com/invented-pro/octodo.git
     cd octodo
     flutter pub get
-    flutter run -d windows
+    flutter run -d windows    # or: flutter run -d macos
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for tests, lint, and the
 fork-patch workflow.
