@@ -330,6 +330,43 @@ class AppShellBindings {
         nextWorkspace;
     bindings[primary(LogicalKeyboardKey.bracketLeft, shift: true)] =
         previousWorkspace;
+
+    // macOS alias for the two workspace-cycle bindings above.
+    //
+    // Root cause (verified against the engine source and a live instrumented
+    // run): the macOS embedder derives a key event's logical key from its
+    // layout map first (`FlutterEmbedderKeyResponder.handleDownEvent` →
+    // `layoutMap[keyCode]`), and only falls back to the NSEvent's
+    // `charactersIgnoringModifiers`. `FlutterKeyboardManager.buildLayout`
+    // populates the layout map for letters and digits (mandatory
+    // US-layout goals), which is why ⌘⇧1..9 report `digit1..9` and work
+    // unmodified. Symbol keys like `[` (keyCode 33) get NO layout-map
+    // entry — the US-layout goal is skipped when either clue is EASCII —
+    // so the fallback runs, and per Apple's contract
+    // `charactersIgnoringModifiers` ignores all modifiers EXCEPT Shift:
+    // ⌘⇧[ reports `{` → logical `braceLeft` (0x7b), and ⌘⇧] reports `}`
+    // → logical `braceRight` (0x7d). The `bracketLeft`/`bracketRight`
+    // activators above can never match those events on macOS.
+    //
+    // The fix: bind the brace variants too, macOS only. Windows/Linux
+    // are untouched (VK_OEM_4/VK_OEM_5 and USB-HID mapping always report
+    // `bracketLeft`/`bracketRight`, and this branch never executes
+    // there). The aliases describe the same physical chord (⌘⇧[ / ⌘⇧]),
+    // so the Settings → Shortcuts manifest intentionally does not list
+    // them separately.
+    //
+    // Passthrough note: before these aliases existed, ⌘⇧{ / ⌘⇧} fell
+    // through the early-key handler and were encoded into PTY bytes by
+    // `flutter_alacritty`'s `_onKeyFallback`. They are now intentionally
+    // consumed by the app. If a future "key passthrough" / user keymap
+    // feature surfaces, remember that these chords are no longer
+    // reachable from the shell on macOS.
+    if (Platform.isMacOS) {
+      bindings[primary(LogicalKeyboardKey.braceRight, shift: true)] =
+          nextWorkspace;
+      bindings[primary(LogicalKeyboardKey.braceLeft, shift: true)] =
+          previousWorkspace;
+    }
     // No `Ctrl+,` / `Cmd+,` settings binding — per user request we
     // gave up trying to make it work; settings are reachable via
     // the drawer's Settings button instead.

@@ -261,7 +261,8 @@ class _OctodoAppState extends State<OctodoApp> {
       enableAcrylic(title: kAppName, tint: palette.surface0, alpha: alpha);
     } else {
       windowManager.setBackgroundColor(
-          _windowBackground(palette, opacity, frosted));
+        _windowBackground(palette, opacity, frosted),
+      );
     }
   }
 
@@ -280,12 +281,15 @@ class _OctodoAppState extends State<OctodoApp> {
     final palette = AppPalettes.byId(
       runtime.store.get(runtime.catalog.general.themeName),
     );
-    final opacity =
-        runtime.store.get<double>(runtime.catalog.general.backgroundOpacity);
-    final frosted =
-        runtime.store.get<bool>(runtime.catalog.general.frostedBackground);
-    final frostLevel =
-        runtime.store.get<double>(runtime.catalog.general.frostLevel);
+    final opacity = runtime.store.get<double>(
+      runtime.catalog.general.backgroundOpacity,
+    );
+    final frosted = runtime.store.get<bool>(
+      runtime.catalog.general.frostedBackground,
+    );
+    final frostLevel = runtime.store.get<double>(
+      runtime.catalog.general.frostLevel,
+    );
     // Effective background alpha: frost level wins while frosted, the
     // plain opacity slider otherwise. Drives the scaffold, chrome
     // (via BackgroundAlphaExtension) and the grid's transparent mode.
@@ -297,9 +301,15 @@ class _OctodoAppState extends State<OctodoApp> {
       title: kAppName,
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(
-          palette: palette, backgroundOpacity: alpha, frosted: frosted),
+        palette: palette,
+        backgroundOpacity: alpha,
+        frosted: frosted,
+      ),
       darkTheme: buildAppTheme(
-          palette: palette, backgroundOpacity: alpha, frosted: frosted),
+        palette: palette,
+        backgroundOpacity: alpha,
+        frosted: frosted,
+      ),
       themeMode: palette.brightness == Brightness.dark
           ? ThemeMode.dark
           : ThemeMode.light,
@@ -653,9 +663,7 @@ class _AppShellState extends State<AppShell>
         focusPaneInDirection: _delegateFocusPaneInDirection,
         toggleMaximizePane: _delegateToggleMaximize,
       ),
-      ...TerminalBindings.build(
-        copySelection: _delegateCopySelection,
-      ),
+      ...TerminalBindings.build(copySelection: _delegateCopySelection),
     };
   }
 

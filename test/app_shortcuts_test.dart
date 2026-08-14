@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -141,6 +143,51 @@ void main() {
         reason: 'expected workspace + digit + fullscreen + reserved',
       );
     });
+
+    // macOS reports ⌘⇧[ / ⌘⇧] as braceLeft / braceRight (see the long
+    // comment in AppShellBindings.build), so the app binds the brace
+    // variants as aliases on macOS only. Windows / Linux must NOT have
+    // them — Ctrl+Shift+[ / ] already report bracketLeft / bracketRight
+    // there, and the extra entries would only widen the binding surface.
+    test('macOS braceLeft/braceRight workspace-cycle aliases (macOS only)', () {
+      String? fired;
+      final bindings = AppShellBindings.build(
+        toggleDrawer: () {},
+        newWorkspace: () {},
+        closeCurrentWorkspace: () {},
+        nextWorkspace: () => fired = 'next',
+        previousWorkspace: () => fired = 'previous',
+        jumpToWorkspace: (_) {},
+        toggleFullscreen: () {},
+        quit: () {},
+        showReservedHint: (_) {},
+      );
+
+      SingleActivator? aliasFor(LogicalKeyboardKey key) {
+        final matches = bindings.keys.whereType<SingleActivator>().where(
+          (a) => a.trigger == key && a.shift && !a.alt,
+        );
+        return matches.isEmpty ? null : matches.first;
+      }
+
+      final braceLeft = aliasFor(LogicalKeyboardKey.braceLeft);
+      final braceRight = aliasFor(LogicalKeyboardKey.braceRight);
+      if (Platform.isMacOS) {
+        // Aliases exist, use the platform primary modifier (meta), and
+        // dispatch to the same callbacks as the bracket bindings.
+        expect(braceLeft, isNotNull, reason: '⌘⇧[ reports braceLeft');
+        expect(braceRight, isNotNull, reason: '⌘⇧] reports braceRight');
+        expect(braceLeft!.meta, isTrue);
+        expect(braceRight!.meta, isTrue);
+        bindings[braceLeft]!();
+        expect(fired, 'previous');
+        bindings[braceRight]!();
+        expect(fired, 'next');
+      } else {
+        expect(braceLeft, isNull, reason: 'no brace alias off-macOS');
+        expect(braceRight, isNull, reason: 'no brace alias off-macOS');
+      }
+    });
   });
 
   group('WorkspaceBindings.build()', () {
@@ -201,9 +248,7 @@ void main() {
 
   group('TerminalBindings.build()', () {
     test('every binding has a non-null callback', () {
-      final bindings = TerminalBindings.build(
-        copySelection: () {},
-      );
+      final bindings = TerminalBindings.build(copySelection: () {});
       expect(bindings, isNotEmpty);
       for (final entry in bindings.entries) {
         expect(entry.value, isNotNull);
@@ -220,9 +265,7 @@ void main() {
       // future zoom behavior alacritty adds. Instead, `TerminalView`
       // passes an extended `shortcuts:` map (alacritty's defaults +
       // shift variants) to `fa.TerminalView`.
-      final bindings = TerminalBindings.build(
-        copySelection: () {},
-      );
+      final bindings = TerminalBindings.build(copySelection: () {});
 
       // None of the zoom activators should be present.
       bool hasZoomActivator(bool Function(SingleActivator) test) =>
