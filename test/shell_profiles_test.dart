@@ -614,8 +614,13 @@ void main() {
         expect(profiles.first.args, const ['-l', '-i']);
         // macOS/Linux zsh/bash emit OSC 7 reliably — no ConPTY mangling.
         expect(profiles.first.showCwdInTitle, isTrue);
-        // No shell-specific Material glyph or SVG asset for zsh/bash.
-        expect(profiles.first.iconAsset, isNull);
+        // Brand SVGs ship for zsh/bash/fish/nu; others keep the
+        // Material terminal glyph (see _posixIconAsset).
+        expect(profiles.first.iconAsset, 'assets/icons/zsh.svg');
+        expect(
+          profiles.firstWhere((p) => p.shortName == 'bash').iconAsset,
+          'assets/icons/bash.svg',
+        );
         expect(profiles.first.wslDistro, isNull);
       },
     );
@@ -679,8 +684,36 @@ void main() {
         final fish = profiles.where((p) => p.shortName == 'fish').single;
         expect(fish.program, _fishArmHomebrew);
         expect(fish.showCwdInTitle, isTrue);
+        expect(fish.iconAsset, 'assets/icons/fish.svg');
       },
     );
+
+    test('\$SHELL=/bin/sh → Material fallback (no SVG for unknown shells)', () {
+      // sh (and dash/ksh/…) has no bundled logo: the profile keeps
+      // iconAsset null so the chip renders Icons.terminal, and stays
+      // that way even when sh is the login shell.
+      final profiles = detectShellsPosixFrom(
+        fileExists: _existsFor(const {_zshPath, '/bin/sh'}),
+        environment: const {'SHELL': '/bin/sh'},
+        isMacOSHost: true,
+      );
+      final sh = profiles.where((p) => p.shortName == 'sh').single;
+      expect(sh.iconAsset, isNull);
+      expect(sh.icon, Icons.terminal);
+    });
+
+    test('\$SHELL=nushell → reuses the nushell.svg brand asset', () {
+      // Nushell as the POSIX login shell is detected by the POSIX
+      // probe (not the Windows-side logic), so the mapping reuses the
+      // existing nushell.svg for visual consistency with Windows.
+      final profiles = detectShellsPosixFrom(
+        fileExists: _existsFor(const {'/opt/homebrew/bin/nu'}),
+        environment: const {'SHELL': '/opt/homebrew/bin/nu'},
+        isMacOSHost: true,
+      );
+      expect(profiles.single.shortName, 'nu');
+      expect(profiles.single.iconAsset, 'assets/icons/nushell.svg');
+    });
 
     test(
       'fish at /usr/local/bin/fish is detected (Intel Homebrew / Linux manual)',

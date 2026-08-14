@@ -185,10 +185,34 @@ const _cmdAmber = Color(0xFFE8A838); // CMD amber
 const _wslGreen = Color(0xFF22C55E); // Linux green (Tux)
 const _bashOrange = Color(0xFFF05033); // Git orange-red
 const _nuTeal = Color(0xFF3FB28F); // Nushell prompt green
-// Neutral grey for POSIX shells (zsh / bash / fish) — no shell in this
-// family ships a Material glyph or a bundled SVG, so the icon is always
-// `Icons.terminal` and the tint stays understated to match.
+// Neutral grey for POSIX shells without a bundled SVG (sh, dash, ksh…)
+// — the icon is always `Icons.terminal` and the tint stays understated
+// to match. zsh / bash / fish / nu ship brand SVGs (see
+// [_posixIconAsset]) and render untinted.
 const _posixGrey = Color(0xFF9E9E9E);
+
+/// Per-shell brand SVG for the POSIX profiles, or `null` when the shell
+/// has no bundled logo — the renderer then falls back to the Material
+/// glyph on [ShellProfile.icon].
+///
+/// Sources (official logos):
+/// - zsh:  Wikimedia Commons "Z Shell Logo Color Vertical" (CC BY-SA).
+/// - bash: odb/official-bash-logo `128x128.svg`, stripped of the
+///   Adobe-private `<i:pgf>` editing payload (~800KB → 3KB; the
+///   graphics themselves are untouched).
+/// - fish: fishshell.com `Terminal_Logo_CRT_4.svg` (the site's header
+///   logo — fish ships no logo file in its repo).
+/// - nu:   the existing [assets/icons/nushell.svg], reused because a
+///   Nushell installed as the macOS login shell ($SHELL) is detected
+///   by the POSIX probe, not by the Windows-side Nushell logic.
+const Map<String, String> _posixIconAssets = {
+  'zsh': 'assets/icons/zsh.svg',
+  'bash': 'assets/icons/bash.svg',
+  'fish': 'assets/icons/fish.svg',
+  'nu': 'assets/icons/nushell.svg',
+};
+
+String? _posixIconAsset(String shortName) => _posixIconAssets[shortName];
 
 // ── WSL distro icon resolution ───────────────────────────────────────
 
@@ -732,11 +756,9 @@ String? _findOnPathIn(String exeName, String pathVar, PathProbe fileExists) {
 ///   spelling. The documented xterm/rxvt/urxvt default is non-login
 ///   non-interactive, but those emulators don't carry a user's prompt
 ///   stack; we do, so we need both flags.
-/// - `icon: Icons.terminal` — no shell-specific Material glyph exists for
-///   zsh / bash / fish.
-/// - `iconAsset: null` — no SVG assets are shipped for POSIX shells, so
-///   the renderer falls back to [ShellProfile.icon].
-/// - `color: _posixGrey` — neutral tint.
+/// - `icon: Icons.terminal` + `iconAsset`: the official-logo SVG ships
+///   for zsh / bash / fish / nu ([_posixIconAsset]); anything else
+///   (sh, dash, ksh…) keeps `Icons.terminal` in [_posixGrey].
 /// - `shortName`: basename without extension (`zsh`, `bash`, `fish`).
 /// - `showCwdInTitle: true` — the workspace injects OSC 7 emission for
 ///   all three families (stock macOS/Linux shells don't emit it on their
@@ -812,7 +834,7 @@ List<ShellProfile> detectShellsPosixFrom({
         // '-i']`) — same login+interactive combo, POSIX flag spelling.
         args: const ['-l', '-i'],
         icon: Icons.terminal,
-        iconAsset: null,
+        iconAsset: _posixIconAsset(shortName),
         color: _posixGrey,
         shortName: shortName,
         // Stock zsh / bash / fish emit NO OSC 7 without shell integration
