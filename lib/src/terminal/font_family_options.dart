@@ -26,8 +26,10 @@
 //   * the user's currently-selected value (so a custom face the user
 //     previously picked never disappears from the picker);
 //   * the well-known monospace + CJK faces the terminal explicitly
-//     requires as fallbacks (so Cascadia Code et al. are present even
-//     if the scan returns nothing useful — e.g. on Linux, which
+//     requires as fallbacks, gated to the *current* platform via
+//     `Platform.is*` — so e.g. "Microsoft YaHei" (a Windows font)
+//     never shows up in the dropdown on macOS. These remain present
+//     even if the scan returns nothing useful (e.g. on Linux, which
 //     `just_font_scan` doesn't support);
 //   * every family `just_font_scan` reports (sorted, deduplicated).
 
@@ -38,42 +40,85 @@ import 'dart:isolate';
 import 'package:flutter/widgets.dart';
 import 'package:just_font_scan/just_font_scan.dart';
 
-/// Well-known monospace faces commonly installed per-platform plus
-/// the CJK families the terminal renderer wires up as fallback
-/// glyphs. Listed in priority order: most-preferred monospace pick
-/// → western fallbacks → CJK fallbacks → the generic CSS keyword
-/// `monospace`, which every renderer recognises.
-const _kKnownMonospaceFonts = <String>[
-  // ── Windows (pre-installed on Windows 10/11) ─────────────────
+/// Well-known monospace faces pre-installed per-platform plus the
+/// CJK families the terminal renderer wires up as fallback glyphs.
+/// Listed in priority order: most-preferred monospace pick →
+/// western fallbacks → cross-platform supplemental faces → CJK
+/// fallbacks → the generic CSS keyword `monospace`, which every
+/// renderer recognises.
+///
+/// Gated to the current platform via `Platform.is*`: Windows-only
+/// faces ("Microsoft YaHei", "SimSun", …) must not appear in the
+/// dropdown on macOS, and vice versa. The OS scan would never
+/// report them, but this list is merged into the dropdown *before*
+/// and *after* the scan resolves, so an ungated entry would leak
+/// through on every platform.
+const _kWindowsLatinFonts = <String>[
   'Cascadia Code',
   'Cascadia Mono',
   'Consolas',
   'Lucida Console',
   'Courier New',
-  // ── macOS (pre-installed on every release since 10.6) ────────
+];
+
+const _kWindowsCjkFonts = <String>[
+  'Microsoft YaHei',
+  'Microsoft YaHei UI',
+  'SimSun',
+  'NSimSun',
+  'MS Gothic',
+  'MS Mincho',
+];
+
+const _kMacosLatinFonts = <String>[
+  // Pre-installed on every release since 10.6.
   'Menlo',
   'SF Mono',
   'Monaco',
   'Andale Mono',
   'Courier',
-  // ── Cross-platform / supplemental ───────────────────────────
-  'PT Mono',
-  'JetBrains Mono',
-  'Fira Code',
-  // ── CJK fallback glyphs (per-platform) ──────────────────────
-  'Microsoft YaHei',
-  'Microsoft YaHei UI',
+];
+
+const _kMacosCjkFonts = <String>[
   'PingFang SC',
   'Hiragino Sans GB',
   'Hiragino Sans',
+];
+
+const _kLinuxLatinFonts = <String>[
+  // Distros vary too much to pin Latin faces; the generic
+  // `monospace` keyword resolves to the distro's default.
+];
+
+const _kLinuxCjkFonts = <String>[
   'Noto Sans CJK SC',
   'Noto Sans Mono CJK SC',
-  'SimSun',
-  'NSimSun',
-  'MS Gothic',
-  'MS Mincho',
-  'monospace',
 ];
+
+/// Cross-platform / supplemental monospace faces users commonly
+/// install themselves. Kept on every platform.
+const _kSupplementalFonts = <String>[
+  'PT Mono',
+  'JetBrains Mono',
+  'Fira Code',
+];
+
+/// The well-known fallback list for the current platform only, in
+/// priority order (see the per-platform consts above). Reads
+/// `Platform.*` at call time, so it cannot be `const`.
+List<String> get _knownMonospaceFonts {
+  final latin = Platform.isWindows
+      ? _kWindowsLatinFonts
+      : Platform.isMacOS
+      ? _kMacosLatinFonts
+      : _kLinuxLatinFonts;
+  final cjk = Platform.isWindows
+      ? _kWindowsCjkFonts
+      : Platform.isMacOS
+      ? _kMacosCjkFonts
+      : _kLinuxCjkFonts;
+  return [...latin, ..._kSupplementalFonts, ...cjk, 'monospace'];
+}
 
 /// Per-platform default monospace font. Picked because it ships
 /// pre-installed on every supported release of that OS — no setup,
@@ -115,9 +160,10 @@ List<String> get defaultPlatformFontFallback {
 /// The synchronous fallback list for the font dropdown. Used as a
 /// starter set while the off-isolate scan is in progress, and as a
 /// guaranteed-present set of entries even if the scan fails
-/// outright. Sorted by [_kKnownMonospaceFonts] priority order.
+/// outright. Contains only the current platform's well-known faces
+/// (see [_knownMonospaceFonts]), sorted by its priority order.
 List<String> fallbackFontFamilies() =>
-    List<String>.unmodifiable(_kKnownMonospaceFonts);
+    List<String>.unmodifiable(_knownMonospaceFonts);
 
 /// Pinned-current + fallback union, returned synchronously. Caller
 /// passes [pinCurrent] (typically the value already stored in
@@ -132,7 +178,7 @@ List<String> initialFontFamilies({String? pinCurrent}) {
   }
 
   if (pinCurrent != null) add(pinCurrent);
-  for (final f in _kKnownMonospaceFonts) {
+  for (final f in _knownMonospaceFonts) {
     add(f);
   }
   return out;
@@ -323,7 +369,8 @@ List<String> _enumerateInBackground() {
 /// caller's pinned current value. Order:
 ///
 ///   1. Pinned current value (if any), at the top.
-///   2. Fallback monospace / CJK faces in priority order.
+///   2. Fallback monospace / CJK faces for the current platform,
+///      in priority order.
 ///   3. Discovered faces, sorted A→Z (case-insensitive, with a
 ///      case-sensitive tie-breaker so 'A' comes before 'a').
 ///
@@ -345,7 +392,7 @@ List<String> mergeFontFamilies({
   }
 
   if (pinCurrent != null) add(pinCurrent);
-  for (final f in _kKnownMonospaceFonts) {
+  for (final f in _knownMonospaceFonts) {
     add(f);
   }
 

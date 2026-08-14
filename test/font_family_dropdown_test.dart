@@ -86,8 +86,15 @@ void main() {
   group('fallbackFontFamilies', () {
     test('contains the canonical monospace and CJK faces', () {
       final list = fallbackFontFamilies();
-      // The first entry is the user's most-preferred monospace face.
-      expect(list.first, 'Cascadia Code');
+      // The first entry is the platform's most-preferred monospace
+      // face (branched the same way the production getter does —
+      // see safe_font_family_test.dart for the same pattern).
+      final expectedFirst = Platform.isWindows
+          ? 'Cascadia Code'
+          : Platform.isMacOS
+              ? 'Menlo'
+              : 'PT Mono';
+      expect(list.first, expectedFirst);
       // Generic `monospace` is always available and must be last so
       // every other entry is preferred at render time.
       expect(list.last, 'monospace');
@@ -97,6 +104,57 @@ void main() {
         list.length,
         reason: 'fallback list must not contain duplicates',
       );
+    });
+
+    test('contains only the current platform\'s well-known faces', () {
+      // Regression guard: the fallback list used to be a flat
+      // cross-platform union, so Windows-only faces ("Microsoft
+      // YaHei", "SimSun", …) leaked into the dropdown on macOS and
+      // vice versa. Each platform must see only its own faces (the
+      // OS scan never reports the other platform's fonts, but this
+      // list is merged in regardless of the scan result).
+      final list = fallbackFontFamilies();
+      if (Platform.isMacOS) {
+        for (final windowsOnly in const [
+          'Cascadia Code',
+          'Cascadia Mono',
+          'Consolas',
+          'Lucida Console',
+          'Courier New',
+          'Microsoft YaHei',
+          'Microsoft YaHei UI',
+          'SimSun',
+          'NSimSun',
+          'MS Gothic',
+          'MS Mincho',
+        ]) {
+          expect(
+            list,
+            isNot(contains(windowsOnly)),
+            reason:
+                'Windows-only face "$windowsOnly" must not appear on macOS',
+          );
+        }
+      }
+      if (Platform.isWindows) {
+        for (final macosOnly in const [
+          'Menlo',
+          'SF Mono',
+          'Monaco',
+          'Andale Mono',
+          'Courier',
+          'PingFang SC',
+          'Hiragino Sans GB',
+          'Hiragino Sans',
+        ]) {
+          expect(
+            list,
+            isNot(contains(macosOnly)),
+            reason:
+                'macOS-only face "$macosOnly" must not appear on Windows',
+          );
+        }
+      }
     });
 
     test('is unmodifiable so callers can\'t mutate the cached list', () {
@@ -353,16 +411,18 @@ void main() {
 
     testWidgets('is empty fallback when the current value already matches a '
         'fallback (no duplication, no empty pin)', (tester) async {
-      // Pick a value that IS in the fallback list — pin must not
-      // introduce a duplicate above it.
-      final items = await pumpAndReadItems(
-        tester,
-        currentValue: 'Cascadia Code',
-      );
+      // Pick a value that IS in the current platform's fallback
+      // list — pin must not introduce a duplicate above it.
+      final knownFace = Platform.isWindows
+          ? 'Cascadia Code'
+          : Platform.isMacOS
+              ? 'Menlo'
+              : 'monospace';
+      final items = await pumpAndReadItems(tester, currentValue: knownFace);
       final values = items.map((i) => i.value).toList();
       // The user's value is the first entry, not duplicated later.
-      expect(values.first, 'Cascadia Code');
-      expect(values.where((v) => v == 'Cascadia Code').length, 1);
+      expect(values.first, knownFace);
+      expect(values.where((v) => v == knownFace).length, 1);
       expect(values.length, fallbackFontFamilies().length);
     });
 
