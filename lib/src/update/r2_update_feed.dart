@@ -65,9 +65,18 @@ class R2UpdateFeed implements UpdateFeedSource {
   final Duration _timeout;
   final String _userAgentVersion;
 
+  /// Which platform build's asset to match when resolving the
+  /// manifest (see [assetPatternFor]). Defaults to
+  /// [kDefaultAssetToken]; production wiring passes
+  /// [currentAssetToken]. The R2 manifest is platform-agnostic —
+  /// it lists every platform's assets, and the token picks which
+  /// one this install downloads.
+  final String assetToken;
+
   R2UpdateFeed({
     required this.manifestUrl,
     required String userAgentVersion,
+    this.assetToken = kDefaultAssetToken,
     http.Client? client,
     Duration timeout = const Duration(seconds: 5),
   })  : _client = client ?? http.Client(),
@@ -112,6 +121,7 @@ class R2UpdateFeed implements UpdateFeedSource {
       // R2 — that's the point of mirroring the schema.
       return resolveReleaseJson(
         utf8.decode(response.bodyBytes, allowMalformed: true),
+        assetToken: assetToken,
       );
     } on UpdateFeedException {
       rethrow;

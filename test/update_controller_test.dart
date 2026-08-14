@@ -24,6 +24,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:path/path.dart' as p;
 
+import 'package:octodo/src/app_info.dart';
 import 'package:octodo/src/settings/setting.dart';
 import 'package:octodo/src/settings/settings_catalog.dart';
 import 'package:octodo/src/settings/settings_runtime.dart';
@@ -100,8 +101,7 @@ String _releaseBody({String tagName = 'v9.9.9', int zipSize = 12345}) {
       {
         'name': zipName,
         'size': zipSize,
-        'browser_download_url':
-            'https://example.com/$tagName/$zipName',
+        'browser_download_url': 'https://example.com/$tagName/$zipName',
         'content_type': 'application/zip',
       },
     ],
@@ -109,10 +109,10 @@ String _releaseBody({String tagName = 'v9.9.9', int zipSize = 12345}) {
 }
 
 UpdateFeed _feedFrom(MockClient mock) => UpdateFeed(
-      repository: 'invented-pro/octodo',
-      userAgentVersion: '1.0.0',
-      client: mock,
-    );
+  repository: 'invented-pro/octodo',
+  userAgentVersion: '1.0.0',
+  client: mock,
+);
 
 /// Build a R2-style manifest JSON body — same shape as GitHub's
 /// `/releases/latest` payload so the existing resolver parses it
@@ -122,18 +122,14 @@ UpdateFeed _feedFrom(MockClient mock) => UpdateFeed(
 /// retry/fallback tests below can use it; the original inline
 /// definition in the `fallback feed (R2)` group called into this
 /// via `r2ManifestBody(...)`.
-String r2ManifestBody({
-  String tagName = 'v9.9.9',
-  int zipSize = 99887766,
-}) {
+String r2ManifestBody({String tagName = 'v9.9.9', int zipSize = 99887766}) {
   final zipName = 'octodo-$tagName-windows-x64.zip';
   return jsonEncode(<String, dynamic>{
     'tag_name': tagName,
     'name': tagName,
     'prerelease': false,
     'published_at': '2026-06-15T12:00:00Z',
-    'html_url':
-        'https://github.com/invented-pro/octodo/releases/tag/$tagName',
+    'html_url': 'https://github.com/invented-pro/octodo/releases/tag/$tagName',
     'body': 'R2 mirror.',
     'assets': <Map<String, dynamic>>[
       {
@@ -231,6 +227,7 @@ void main() {
       // 6-attempt failure (3 primary + 3 fallback) doesn't burn
       // ~2 s per test.
       retryDelayFactor: Duration.zero,
+      minCheckDisplay: Duration.zero,
     );
   }
 
@@ -264,8 +261,7 @@ void main() {
       controller.dispose();
     });
 
-    test('background probe error does NOT surface the error pill',
-        () async {
+    test('background probe error does NOT surface the error pill', () async {
       final mock = MockClient((req) async {
         throw const SocketException('Network unreachable');
       });
@@ -281,27 +277,29 @@ void main() {
       controller.dispose();
     });
 
-    test('manual check surfaces network errors with a Retry callback',
-        () async {
-      var callCount = 0;
-      final mock = MockClient((req) async {
-        callCount += 1;
-        throw const SocketException('Network unreachable');
-      });
-      final controller = buildController(mock);
-      await controller.start();
-      await _waitFor(() => model.state == UpdateState.idle);
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+    test(
+      'manual check surfaces network errors with a Retry callback',
+      () async {
+        var callCount = 0;
+        final mock = MockClient((req) async {
+          callCount += 1;
+          throw const SocketException('Network unreachable');
+        });
+        final controller = buildController(mock);
+        await controller.start();
+        await _waitFor(() => model.state == UpdateState.idle);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      await controller.checkForUpdates();
-      await _waitFor(() => model.state == UpdateState.error);
-      expect(model.state, UpdateState.error);
-      expect(model.error?.onRetry, isNotNull);
-      expect(model.error?.message, contains('reach update feed'));
-      // Sanity: we hit the network at least twice (initial + manual).
-      expect(callCount, greaterThanOrEqualTo(2));
-      controller.dispose();
-    });
+        await controller.checkForUpdates();
+        await _waitFor(() => model.state == UpdateState.error);
+        expect(model.state, UpdateState.error);
+        expect(model.error?.onRetry, isNotNull);
+        expect(model.error?.message, contains('reach update feed'));
+        // Sanity: we hit the network at least twice (initial + manual).
+        expect(callCount, greaterThanOrEqualTo(2));
+        controller.dispose();
+      },
+    );
 
     test('rate limit (remaining=0) shows precise retry window', () async {
       // 47 minutes in the future.
@@ -335,8 +333,7 @@ void main() {
   });
 
   group('probe single-flight', () {
-    test('second checkForUpdates while one is in flight is skipped',
-        () async {
+    test('second checkForUpdates while one is in flight is skipped', () async {
       // Each request gets its own completer so we can hold the
       // first manual check open while issuing a second one.
       final completers = <Completer<http.Response>>[];
@@ -353,6 +350,7 @@ void main() {
             UpdateFeed(repository: r, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
 
       // Complete the initial probe so start() returns.
@@ -399,9 +397,11 @@ void main() {
       // Pre-skip the version; subsequent probes must not surface it.
       controller.skipVersion('9.9.9');
       await controller.checkForUpdates();
-      await _waitFor(() =>
-          model.state == UpdateState.notFound ||
-          model.state == UpdateState.idle);
+      await _waitFor(
+        () =>
+            model.state == UpdateState.notFound ||
+            model.state == UpdateState.idle,
+      );
 
       expect(
         model.state == UpdateState.notFound || model.state == UpdateState.idle,
@@ -413,23 +413,24 @@ void main() {
   });
 
   group('isUpToDate persistence', () {
-    test('background probe returning the same version marks up-to-date',
-        () async {
-      final mock = MockClient((req) async {
-        return http.Response(_releaseBody(tagName: 'v1.0.0'), 200);
-      });
-      final controller = buildController(mock);
-      await controller.start();
+    test(
+      'background probe returning the same version marks up-to-date',
+      () async {
+        final mock = MockClient((req) async {
+          return http.Response(_releaseBody(tagName: 'v1.0.0'), 200);
+        });
+        final controller = buildController(mock);
+        await controller.start();
 
-      await _waitFor(() => model.state == UpdateState.idle);
-      await _waitFor(() => model.isUpToDate);
+        await _waitFor(() => model.state == UpdateState.idle);
+        await _waitFor(() => model.isUpToDate);
 
-      expect(model.isUpToDate, isTrue);
-      controller.dispose();
-    });
+        expect(model.isUpToDate, isTrue);
+        controller.dispose();
+      },
+    );
 
-    test('manual probe returning the same version marks up-to-date',
-        () async {
+    test('manual probe returning the same version marks up-to-date', () async {
       final mock = MockClient((req) async {
         return http.Response(_releaseBody(tagName: 'v1.0.0'), 200);
       });
@@ -446,9 +447,11 @@ void main() {
       // Now trigger a manual probe; the controller should keep
       // the flag set through the notFound → idle transition.
       await controller.checkForUpdates();
-      await _waitFor(() =>
-          model.state == UpdateState.notFound ||
-          model.state == UpdateState.idle);
+      await _waitFor(
+        () =>
+            model.state == UpdateState.notFound ||
+            model.state == UpdateState.idle,
+      );
 
       // Even after the 2.5 s notFound flash would expire, the
       // flag remains — that's the whole point.
@@ -477,8 +480,7 @@ void main() {
       controller.dispose();
     });
 
-    test('background probe error does NOT set the up-to-date flag',
-        () async {
+    test('background probe error does NOT set the up-to-date flag', () async {
       final mock = MockClient((req) async {
         throw const SocketException('Network unreachable');
       });
@@ -493,21 +495,24 @@ void main() {
   });
 
   group('feedFactory override', () {
-    test('production callers leave feedFactory null and get a real feed',
-        () async {
-      // No feedFactory means the controller builds its own
-      // UpdateFeed. We don't exercise the network here — just
-      // assert that start() runs without throwing.
-      final controller = UpdateController(
-        model: model,
-        settings: catalog.update,
-        userAgentVersion: '1.0.0',
-        skipListFileFactory: () => skipListFile,
-        retryDelayFactor: Duration.zero,
-      );
-      await controller.start();
-      controller.dispose();
-    });
+    test(
+      'production callers leave feedFactory null and get a real feed',
+      () async {
+        // No feedFactory means the controller builds its own
+        // UpdateFeed. We don't exercise the network here — just
+        // assert that start() runs without throwing.
+        final controller = UpdateController(
+          model: model,
+          settings: catalog.update,
+          userAgentVersion: '1.0.0',
+          skipListFileFactory: () => skipListFile,
+          retryDelayFactor: Duration.zero,
+          minCheckDisplay: Duration.zero,
+        );
+        await controller.start();
+        controller.dispose();
+      },
+    );
   });
 
   group('default repository', () {
@@ -527,8 +532,7 @@ void main() {
     // the asset `browser_download_url` host — the controller cares
     // only that the manifest is parseable.
 
-    test('empty `update.fallbackUrl` setting → no fallback tried',
-        () async {
+    test('empty `update.fallbackUrl` setting → no fallback tried', () async {
       var primaryCalls = 0;
       final primary = MockClient((req) async {
         primaryCalls += 1;
@@ -544,13 +548,11 @@ void main() {
         model: model,
         settings: catalog.update,
         userAgentVersion: '1.0.0',
-        primaryFeedFactory: (r, u) => UpdateFeed(
-              repository: r,
-              userAgentVersion: u,
-              client: primary,
-            ),
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: primary),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.idle);
@@ -567,8 +569,7 @@ void main() {
       c.dispose();
     });
 
-    test('primary succeeds → fallback URL is never fetched',
-        () async {
+    test('primary succeeds → fallback URL is never fetched', () async {
       final hitHosts = <String>[];
       final mock = MockClient((req) async {
         hitHosts.add(req.url.host);
@@ -583,13 +584,11 @@ void main() {
         model: model,
         settings: catalog.update,
         userAgentVersion: '1.0.0',
-        primaryFeedFactory: (r, u) => UpdateFeed(
-              repository: r,
-              userAgentVersion: u,
-              client: mock,
-            ),
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.updateAvailable);
@@ -601,8 +600,7 @@ void main() {
       c.dispose();
     });
 
-    test('primary throws → fallback URL is fetched, R2 release wins',
-        () async {
+    test('primary throws → fallback URL is fetched, R2 release wins', () async {
       var primaryCalls = 0;
       final mock = MockClient((req) async {
         if (req.url.host == 'api.github.com') {
@@ -619,20 +617,15 @@ void main() {
         model: model,
         settings: catalog.update,
         userAgentVersion: '1.0.0',
-        primaryFeedFactory: (r, u) => UpdateFeed(
-              repository: r,
-              userAgentVersion: u,
-              client: mock,
-            ),
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
         // Build the fallback feed with the same MockClient so the
         // mock's branching handler can route both feeds in one place.
-        fallbackFeedFactory: (url, u) => R2UpdateFeed(
-              manifestUrl: url,
-              userAgentVersion: u,
-              client: mock,
-            ),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.updateAvailable);
@@ -665,25 +658,22 @@ void main() {
         }
         return http.Response(r2ManifestBody(tagName: 'v7.7.7'), 200);
       });
-      await store.set(catalog.update.fallbackUrl,
-          'https://s3.example.test/octodo/manifest.json');
+      await store.set(
+        catalog.update.fallbackUrl,
+        'https://s3.example.test/octodo/manifest.json',
+      );
 
       final c = UpdateController(
         model: model,
         settings: catalog.update,
         userAgentVersion: '1.0.0',
-        primaryFeedFactory: (r, u) => UpdateFeed(
-              repository: r,
-              userAgentVersion: u,
-              client: mock,
-            ),
-        fallbackFeedFactory: (url, u) => R2UpdateFeed(
-              manifestUrl: url,
-              userAgentVersion: u,
-              client: mock,
-            ),
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.idle);
@@ -698,31 +688,27 @@ void main() {
       c.dispose();
     });
 
-    test('both fail → primary error surfaces, no update surfaced',
-        () async {
+    test('both fail → primary error surfaces, no update surfaced', () async {
       final mock = MockClient((req) async {
         // Both feeds return an error.
         return http.Response('', 500);
       });
-      await store.set(catalog.update.fallbackUrl,
-          'https://s3.example.test/octodo/manifest.json');
+      await store.set(
+        catalog.update.fallbackUrl,
+        'https://s3.example.test/octodo/manifest.json',
+      );
 
       final c = UpdateController(
         model: model,
         settings: catalog.update,
         userAgentVersion: '1.0.0',
-        primaryFeedFactory: (r, u) => UpdateFeed(
-              repository: r,
-              userAgentVersion: u,
-              client: mock,
-            ),
-        fallbackFeedFactory: (url, u) => R2UpdateFeed(
-              manifestUrl: url,
-              userAgentVersion: u,
-              client: mock,
-            ),
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.idle);
@@ -741,8 +727,7 @@ void main() {
       c.dispose();
     });
 
-    test('non-http(s) fallbackUrl is dropped + logged at warning',
-        () async {
+    test('non-http(s) fallbackUrl is dropped + logged at warning', () async {
       // Empty is the default; set a clearly bad URL and confirm
       // the controller does NOT try to probe it.
       await store.set(catalog.update.fallbackUrl, 'ftp://nope');
@@ -759,13 +744,11 @@ void main() {
         model: model,
         settings: catalog.update,
         userAgentVersion: '1.0.0',
-        primaryFeedFactory: (r, u) => UpdateFeed(
-              repository: r,
-              userAgentVersion: u,
-              client: mock,
-            ),
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.updateAvailable);
@@ -776,8 +759,7 @@ void main() {
       c.dispose();
     });
 
-    test('changing update.fallbackUrl rebinds the fallback feed',
-        () async {
+    test('changing update.fallbackUrl rebinds the fallback feed', () async {
       // Start with no fallback; primary fails → idle.
       var primaryCalls = 0;
       var fallbackCalls = 0;
@@ -794,26 +776,23 @@ void main() {
         model: model,
         settings: catalog.update,
         userAgentVersion: '1.0.0',
-        primaryFeedFactory: (r, u) => UpdateFeed(
-              repository: r,
-              userAgentVersion: u,
-              client: mock,
-            ),
-        fallbackFeedFactory: (url, u) => R2UpdateFeed(
-              manifestUrl: url,
-              userAgentVersion: u,
-              client: mock,
-            ),
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => primaryCalls >= 1);
       expect(fallbackCalls, 0, reason: 'no fallback URL configured');
 
       // Now flip the setting — controller rebuilds the fallback feed.
-      await store.set(catalog.update.fallbackUrl,
-          'https://s3.example.test/octodo/manifest.json');
+      await store.set(
+        catalog.update.fallbackUrl,
+        'https://s3.example.test/octodo/manifest.json',
+      );
       // Allow the watch stream to propagate + the next probe cycle.
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
@@ -873,6 +852,7 @@ void main() {
             R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.updateAvailable);
@@ -905,6 +885,7 @@ void main() {
             R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await c.start();
       await _waitFor(() => model.state == UpdateState.updateAvailable);
@@ -915,56 +896,58 @@ void main() {
       c.dispose();
     });
 
-    test('primary fails 3x → fallback fails 3x → primary error propagates',
-        () async {
-      var primaryCalls = 0;
-      var fallbackCalls = 0;
-      final mock = MockClient((req) async {
-        if (req.url.host == 'api.github.com') {
-          primaryCalls += 1;
-          return http.Response('', 503);
-        }
-        fallbackCalls += 1;
-        return http.Response('', 502);
-      });
-      const fallbackUrl = 'https://s3.example.test/octodo/manifest.json';
-      await store.set(catalog.update.fallbackUrl, fallbackUrl);
+    test(
+      'primary fails 3x → fallback fails 3x → primary error propagates',
+      () async {
+        var primaryCalls = 0;
+        var fallbackCalls = 0;
+        final mock = MockClient((req) async {
+          if (req.url.host == 'api.github.com') {
+            primaryCalls += 1;
+            return http.Response('', 503);
+          }
+          fallbackCalls += 1;
+          return http.Response('', 502);
+        });
+        const fallbackUrl = 'https://s3.example.test/octodo/manifest.json';
+        await store.set(catalog.update.fallbackUrl, fallbackUrl);
 
-      final c = UpdateController(
-        model: model,
-        settings: catalog.update,
-        userAgentVersion: '1.0.0',
-        primaryFeedFactory: (r, u) =>
-            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
-        fallbackFeedFactory: (url, u) =>
-            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
-        skipListFileFactory: () => skipListFile,
-        retryDelayFactor: Duration.zero,
-      );
-      await c.start();
-      await _waitFor(() => model.state == UpdateState.idle);
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+        final c = UpdateController(
+          model: model,
+          settings: catalog.update,
+          userAgentVersion: '1.0.0',
+          primaryFeedFactory: (r, u) =>
+              UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+          fallbackFeedFactory: (url, u) =>
+              R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
+          skipListFileFactory: () => skipListFile,
+          retryDelayFactor: Duration.zero,
+          minCheckDisplay: Duration.zero,
+        );
+        await c.start();
+        await _waitFor(() => model.state == UpdateState.idle);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      await c.checkForUpdates();
-      await _waitFor(() => model.state == UpdateState.error);
+        await c.checkForUpdates();
+        await _waitFor(() => model.state == UpdateState.error);
 
-      // The probe runs twice (initial background + manual check);
-      // both feeds hit exactly _kMaxAttemptsPerSource times per
-      // probe. 2 probes × 3 attempts × 2 feeds = the totals below.
-      // No silent infinite retry; the periodic timer (~1 h later)
-      // is the next round.
-      expect(primaryCalls, _kMaxAttemptsPerSource * 2);
-      expect(fallbackCalls, _kMaxAttemptsPerSource * 2);
-      // No update surfaces; the error pill carries the primary's
-      // last message (with the fallback's recorded in the log).
-      expect(model.detected, isNull);
-      c.dispose();
-    });
+        // The probe runs twice (initial background + manual check);
+        // both feeds hit exactly _kMaxAttemptsPerSource times per
+        // probe. 2 probes × 3 attempts × 2 feeds = the totals below.
+        // No silent infinite retry; the periodic timer (~1 h later)
+        // is the next round.
+        expect(primaryCalls, _kMaxAttemptsPerSource * 2);
+        expect(fallbackCalls, _kMaxAttemptsPerSource * 2);
+        // No update surfaces; the error pill carries the primary's
+        // last message (with the fallback's recorded in the log).
+        expect(model.detected, isNull);
+        c.dispose();
+      },
+    );
   });
 
   group('download retry + fallback', () {
-    test('primary zip fails 3x → fallback zip succeeds → downloaded',
-        () async {
+    test('primary zip fails 3x → fallback zip succeeds → downloaded', () async {
       // Build a real (small) zip with a single stub file so the
       // SHA-256 verification step has something to digest. This is
       // the minimum valid payload the download chain can produce.
@@ -1029,6 +1012,7 @@ void main() {
             R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
         downloadClientFactory: () => mock,
       );
       await c.start();
@@ -1048,13 +1032,15 @@ void main() {
       expect(primaryZipCalls, _kMaxAttemptsPerSource);
       expect(fallbackManifestCalls, 1);
       expect(fallbackZipCalls, 1);
-      expect(model.state, UpdateState.downloaded,
-          reason: 'fallback chain should have rescued the download');
+      expect(
+        model.state,
+        UpdateState.downloaded,
+        reason: 'fallback chain should have rescued the download',
+      );
       c.dispose();
     });
 
-    test('primary zip fails 3x → fallback zip fails 3x → error',
-        () async {
+    test('primary zip fails 3x → fallback zip fails 3x → error', () async {
       var primaryZipCalls = 0;
       var fallbackZipCalls = 0;
       final mock = MockClient((req) async {
@@ -1068,10 +1054,7 @@ void main() {
         }
         if (req.url.host == 's3.example.test' &&
             req.url.path.endsWith('manifest.json')) {
-          return http.Response(
-            r2ManifestBody(tagName: 'v9.9.9'),
-            200,
-          );
+          return http.Response(r2ManifestBody(tagName: 'v9.9.9'), 200);
         }
         if (req.url.host == 's3.example.test') {
           fallbackZipCalls += 1;
@@ -1093,6 +1076,7 @@ void main() {
             R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
         downloadClientFactory: () => mock,
       );
       await c.start();
@@ -1115,8 +1099,7 @@ void main() {
     // the UI mistakenly calls it. Detection (the probe) is
     // distribution-agnostic and still surfaces updateAvailable.
 
-    test('probe still surfaces updateAvailable on a store build',
-        () async {
+    test('probe still surfaces updateAvailable on a store build', () async {
       final mock = MockClient((req) async {
         return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
       });
@@ -1132,6 +1115,7 @@ void main() {
         primaryFeedFactory: (repo, ua) => _feedFrom(mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await controller.start();
       await _waitFor(() => storeModel.state == UpdateState.updateAvailable);
@@ -1158,6 +1142,7 @@ void main() {
         primaryFeedFactory: (repo, ua) => _feedFrom(mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await controller.start();
       await _waitFor(() => storeModel.state == UpdateState.updateAvailable);
@@ -1191,6 +1176,7 @@ void main() {
         primaryFeedFactory: (repo, ua) => _feedFrom(mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await controller.start();
       await _waitFor(() => storeModel.state == UpdateState.updateAvailable);
@@ -1198,12 +1184,14 @@ void main() {
       // Seed a fake downloaded payload so applyDownloaded would
       // otherwise have something to apply; the guard must still
       // refuse.
-      storeModel.setDownloaded(DownloadedPayload(
-        version: '9.9.9',
-        zipPath: File(p.join(tmp.path, 'fake.zip')),
-        sizeBytes: 1,
-        digestVerified: true,
-      ));
+      storeModel.setDownloaded(
+        DownloadedPayload(
+          version: '9.9.9',
+          zipPath: File(p.join(tmp.path, 'fake.zip')),
+          sizeBytes: 1,
+          digestVerified: true,
+        ),
+      );
       await controller.applyDownloaded();
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
@@ -1224,15 +1212,21 @@ void main() {
       // holds. Guard the assumption up front so that if the env
       // ever changes we fail HERE — before applyDownloaded could
       // reach exit(0) and kill the test runner.
-      final helperNextToRunner = File(p.join(
-          p.dirname(Platform.resolvedExecutable), 'octodo_helper.exe'));
-      expect(helperNextToRunner.existsSync(), isFalse,
-          reason: 'test relies on no helper beside the flutter_tester '
-              'host; if that changes, fail here rather than risk '
-              'exit(0) tearing down the runner');
+      final helperNextToRunner = File(
+        p.join(p.dirname(Platform.resolvedExecutable), 'octodo_helper.exe'),
+      );
+      expect(
+        helperNextToRunner.existsSync(),
+        isFalse,
+        reason:
+            'test relies on no helper beside the flutter_tester '
+            'host; if that changes, fail here rather than risk '
+            'exit(0) tearing down the runner',
+      );
 
-      final mock = MockClient((req) async =>
-          http.Response(_releaseBody(tagName: 'v9.9.9'), 200));
+      final mock = MockClient(
+        (req) async => http.Response(_releaseBody(tagName: 'v9.9.9'), 200),
+      );
       final portableModel = UpdateStateModel(
         currentVersion: '1.0.0',
         distribution: InstallDistribution.portable,
@@ -1245,25 +1239,114 @@ void main() {
         primaryFeedFactory: (repo, ua) => _feedFrom(mock),
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
       );
       await controller.start();
-      await _waitFor(
-          () => portableModel.state == UpdateState.updateAvailable);
+      await _waitFor(() => portableModel.state == UpdateState.updateAvailable);
 
-      portableModel.setDownloaded(DownloadedPayload(
-        version: '9.9.9',
-        zipPath: File(p.join(tmp.path, 'fake.zip')),
-        sizeBytes: 1,
-        digestVerified: true,
-      ));
+      // The staged zip must actually exist — the pre-apply checks
+      // now verify it before anything else, precisely so a missing
+      // payload errors HERE instead of quitting into a no-op.
+      final stagedZip = File(p.join(tmp.path, 'fake.zip'));
+      await stagedZip.writeAsBytes(utf8.encode('stub-zip'));
+
+      portableModel.setDownloaded(
+        DownloadedPayload(
+          version: '9.9.9',
+          zipPath: stagedZip,
+          sizeBytes: 1,
+          digestVerified: true,
+        ),
+      );
 
       await controller.applyDownloaded();
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
       // Reaching the assertions at all proves the process didn't
-      // exit(0). The model moved to error with the reinstall prompt.
+      // exit(0). The model moved to error. Which pre-quit guard
+      // fired depends on the host: on Windows the helper exe is
+      // genuinely missing next to flutter_tester; on macOS the
+      // bundle check fires first (flutter_tester doesn't run from
+      // a .app bundle). Either way: error state, alive process.
       expect(portableModel.state, UpdateState.error);
-      expect(portableModel.error?.message, contains('helper is missing'));
+      if (Platform.isMacOS) {
+        expect(portableModel.error?.message, contains('.app'));
+      } else {
+        expect(portableModel.error?.message, contains('helper is missing'));
+      }
+      controller.dispose();
+    });
+
+    test('applyDownloaded surfaces a pre-apply error when the staged '
+        'zip is missing', () async {
+      final mock = MockClient(
+        (req) async => http.Response(_releaseBody(tagName: 'v9.9.9'), 200),
+      );
+      final model = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+      );
+      final controller = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+      );
+      await controller.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      model.setDownloaded(
+        DownloadedPayload(
+          version: '9.9.9',
+          // Deleted / never written — e.g. the user cleaned their
+          // temp dir between download and restart-to-install.
+          zipPath: File(p.join(tmp.path, 'vanished.zip')),
+          sizeBytes: 1,
+          digestVerified: true,
+        ),
+      );
+
+      await controller.applyDownloaded();
+
+      expect(model.state, UpdateState.error);
+      expect(model.error?.message, contains('missing'));
+      expect(model.error?.technicalDetails,
+          contains(kAppRepositoryReleases));
+      // Never got as far as installing.
+      expect(model.state, isNot(UpdateState.installing));
+      controller.dispose();
+    });
+
+    test('manual check holds the checking state for the minimum '
+        'display duration', () async {
+      // cmux-style UX floor: a sub-100 ms probe response must not
+      // flash the checking pill for a single frame.
+      final mock = MockClient(
+        (req) async => http.Response(_releaseBody(tagName: 'v0.0.1'), 200),
+      );
+      final model = UpdateStateModel(currentVersion: '1.0.0');
+      final controller = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: const Duration(milliseconds: 300),
+      );
+      await controller.start();
+
+      final sw = Stopwatch()..start();
+      await controller.checkForUpdates();
+      sw.stop();
+      expect(sw.elapsed,
+          greaterThan(const Duration(milliseconds: 250)),
+          reason: 'the result must not surface before the floor');
+      // And the probe DID complete (up to date → notFound flash).
+      expect(model.isUpToDate, isTrue);
       controller.dispose();
     });
   });

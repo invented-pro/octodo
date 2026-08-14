@@ -444,4 +444,320 @@ void main() {
       expect(snapshot, isNot(contains('OCTODO_UPDATE_HELPER=1')));
     });
   });
+
+  group('_awaitProcessExit (POSIX signal-0 poll)', () {
+    // Windows has its own tasklist path exercised only on Windows
+    // hosts; the POSIX branch is the new code under test.
+    test('returns promptly once the pid is gone', () async {
+      if (Platform.isWindows) return;
+      final proc = await Process.start('/bin/sleep', ['0']);
+      await proc.exitCode;
+      final sw = Stopwatch()..start();
+      await StagedApply.awaitProcessExitForTest(
+        proc.pid,
+        initialDelay: Duration.zero,
+        pollInterval: const Duration(milliseconds: 5),
+        timeout: const Duration(seconds: 2),
+      );
+      sw.stop();
+      expect(sw.elapsed, lessThan(const Duration(seconds: 1)));
+    }, timeout: const Timeout(Duration(seconds: 10)));
+
+    test('gives up after the timeout for a live pid (no throw)', () async {
+      if (Platform.isWindows) return;
+      final proc = await Process.start('/bin/sleep', ['30']);
+      try {
+        final sw = Stopwatch()..start();
+        await StagedApply.awaitProcessExitForTest(
+          proc.pid,
+          initialDelay: Duration.zero,
+          pollInterval: const Duration(milliseconds: 10),
+          timeout: const Duration(milliseconds: 200),
+        );
+        sw.stop();
+        expect(sw.elapsed, greaterThan(const Duration(milliseconds: 150)));
+      } finally {
+        proc.kill();
+        await proc.exitCode;
+      }
+    }, timeout: const Timeout(Duration(seconds: 10)));
+  });
+
+  group('_extractArchive (symlinks + exec bits)', () {
+    late Directory target;
+
+    setUp(() async {
+      target = await Directory.systemTemp.createTemp('extract_test_');
+    });
+
+    tearDown(() async {
+      if (await target.exists()) {
+        await target.delete(recursive: true);
+      }
+    });
+
+    ArchiveFile makeFile(String name, String content, {int mode = 0x81A4}) {
+      final bytes = content.codeUnits;
+      return ArchiveFile(name, bytes.length, bytes)..mode = mode;
+    }
+
+    ArchiveFile makeSymlink(String name, String linkTarget) {
+      final bytes = linkTarget.codeUnits;
+      return ArchiveFile(name, bytes.length, bytes)
+        ..isSymbolicLink = true
+        ..nameOfLinkedFile = linkTarget
+        ..mode = 0xA1FF;
+    }
+
+    test('recreates relative symlinks and exec bits (POSIX)', () async {
+      if (Platform.isWindows) return; // NTFS symlink needs privileges
+      final archive = Archive()
+        ..addFile(makeFile('Octodo.app/Contents/MacOS/Octodo', 'BIN',
+            mode: 0x81ED))
+        ..addFile(makeFile('Octodo.app/Contents/Frameworks/F.framework'
+            '/Versions/A/F', 'FW', mode: 0x81ED))
+        ..addFile(makeSymlink('Octodo.app/Contents/Frameworks/F.framework'
+            '/Versions/Current', 'A'))
+        ..addFile(makeSymlink('Octodo.app/Contents/Frameworks/F.framework'
+            '/Resources', 'Versions/Current/Resources'));
+
+      await StagedApply.extractArchiveForTest(archive, target);
+
+      final root = target.path;
+      final current =
+          Link(p.join(root, 'Octodo.app/Contents/Frameworks/F.framework'
+              '/Versions/Current'));
+      expect(current.existsSync(), isTrue);
+      expect(await current.target(), 'A');
+
+      final resources = Link(p.join(
+          root, 'Octodo.app/Contents/Frameworks/F.framework/Resources'));
+      expect(resources.existsSync(), isTrue);
+      expect(await resources.target(), 'Versions/Current/Resources');
+
+      final bin = File(p.join(root, 'Octodo.app/Contents/MacOS/Octodo'));
+      expect((await bin.stat()).mode & 0x49, isNot(0),
+          reason: 'payload binaries must keep their exec bit');
+      final fw = File(p.join(root,
+          'Octodo.app/Contents/Frameworks/F.framework/Versions/A/F'));
+      expect((await fw.stat()).mode & 0x49, isNot(0));
+    });
+
+    test('refuses absolute symlink targets', () async {
+      final archive = Archive()
+        ..addFile(makeSymlink('Octodo.app/evil', '/etc/passwd'));
+      await expectLater(
+        StagedApply.extractArchiveForTest(archive, target),
+        throwsA(isA<StagedApplyException>()),
+      );
+    });
+
+    test('refuses symlink targets escaping the extract root', () async {
+      final archive = Archive()
+        ..addFile(makeSymlink('Octodo.app/evil', '../../../etc/passwd'));
+      await expectLater(
+        StagedApply.extractArchiveForTest(archive, target),
+        throwsA(isA<StagedApplyException>()),
+      );
+    });
+  });
+
+  group('StagedApply.run bundle swap (macOS layout)', () {
+    // End-to-end through the real zip path: a ditto-created zip
+    // (symlinks + modes preserved, Unix creator bytes) is decoded,
+    // extracted, and swapped over a fake install. Skipped on
+    // Windows hosts — ditto and the bundle layout don't exist
+    // there, and the per-file path is covered above.
+    late Directory workDir;
+    late Directory appsDir;
+
+    setUp(() async {
+      workDir = await Directory.systemTemp.createTemp('bundle_swap_');
+      appsDir = Directory(p.join(workDir.path, 'apps'))
+        ..createSync();
+    });
+
+    tearDown(() async {
+      if (await workDir.exists()) {
+        await workDir.delete(recursive: true);
+      }
+    });
+
+    Future<File> buildPayloadZip(String zipName) async {
+      final payloadRoot = Directory(p.join(workDir.path, 'payload'));
+      final bundle = Directory(p.join(payloadRoot.path, 'Octodo.app'));
+      final macosDir = Directory(p.join(bundle.path, 'Contents', 'MacOS'));
+      await macosDir.create(recursive: true);
+      final bin = File(p.join(macosDir.path, 'Octodo'));
+      await bin.writeAsString('#!/bin/sh\necho new-bin\n');
+      final helper = File(p.join(macosDir.path, 'octodo_helper'));
+      await helper.writeAsString('#!/bin/sh\necho helper\n');
+      // A framework-ish tree with the two canonical symlinks.
+      final fw = Directory(p.join(
+          bundle.path, 'Contents', 'Frameworks', 'F.framework'));
+      final versionsA =
+          Directory(p.join(fw.path, 'Versions', 'A', 'Resources'));
+      await versionsA.create(recursive: true);
+      final fwBin = File(p.join(fw.path, 'Versions', 'A', 'F'));
+      await fwBin.writeAsString('#!/bin/sh\necho fw\n');
+      await File(p.join(versionsA.path, 'info.txt')).writeAsString('hi');
+      await Link(p.join(fw.path, 'Versions', 'Current')).create('A');
+      await Link(p.join(fw.path, 'Resources'))
+          .create('Versions/Current/Resources');
+      // Exec bits for everything that needs them.
+      for (final f in [bin, helper, fwBin]) {
+        final r = await Process.run('chmod', ['+x', f.path]);
+        if (r.exitCode != 0) throw StateError('chmod failed');
+      }
+
+      final staging = Directory(p.join(workDir.path, 'staging'))
+        ..createSync();
+      final zipPath = p.join(staging.path, zipName);
+      final r = await Process.run('ditto',
+          ['-c', '-k', '--sequesterRsrc', '--keepParent', bundle.path, zipPath]);
+      if (r.exitCode != 0) {
+        throw StateError('ditto failed: ${r.stderr}');
+      }
+      return File(zipPath);
+    }
+
+    Future<InstallerPaths> buildPaths(File zip) async {
+      final oldBundle =
+          Directory(p.join(appsDir.path, 'Octodo.app', 'Contents', 'MacOS'));
+      await oldBundle.create(recursive: true);
+      await File(p.join(oldBundle.path, 'Octodo'))
+          .writeAsString('old-bin-contents');
+      return InstallerPaths(
+        installDir: appsDir,
+        stagingDir: Directory(p.join(workDir.path, 'staging')),
+        zipFile: zip,
+        extractDir:
+            Directory(p.join(workDir.path, 'staging', 'extracted')),
+        applyStrategy: ApplyStrategy.bundleSwap,
+        appBundleRoot: Directory(p.join(appsDir.path, 'Octodo.app')),
+      );
+    }
+
+    test('swaps the bundle, restores symlinks + exec bits, cleans aside',
+        () async {
+      if (Platform.isWindows) return;
+      final zip = await buildPayloadZip('octodo-v1.2.3-macos-arm64.zip');
+      final paths = await buildPaths(zip);
+
+      await StagedApply.run(
+        paths: paths,
+        pidToIgnore: 0,
+        initialDelay: Duration.zero,
+        pidTimeout: const Duration(milliseconds: 100),
+        relaunchAfter: false,
+      );
+
+      final bundle = p.join(appsDir.path, 'Octodo.app');
+      final bin = File(p.join(bundle, 'Contents', 'MacOS', 'Octodo'));
+      expect(await bin.readAsString(), contains('new-bin'));
+      expect((await bin.stat()).mode & 0x49, isNot(0));
+
+      final current =
+          Link(p.join(bundle, 'Contents', 'Frameworks', 'F.framework',
+              'Versions', 'Current'));
+      expect(current.existsSync(), isTrue);
+      expect(await current.target(), 'A');
+
+      final resources = Link(p.join(
+          bundle, 'Contents', 'Frameworks', 'F.framework', 'Resources'));
+      expect(resources.existsSync(), isTrue);
+
+      // No rename-aside left behind.
+      final entries = appsDir.listSync(followLinks: false).map(
+          (e) => p.basename(e.path));
+      expect(entries, equals(['Octodo.app']));
+    }, timeout: const Timeout(Duration(seconds: 30)));
+
+    test('refuses a payload without an .app at the zip root', () async {
+      if (Platform.isWindows) return;
+      // A zip of loose files (per-file-copy shape) hitting the
+      // bundle-swap strategy must fail loudly, not guess.
+      final staging = Directory(p.join(workDir.path, 'staging'))
+        ..createSync();
+      final archive = Archive()
+        ..addFile(ArchiveFile.string('octodo.exe', 'loose'));
+      final zipFile = File(p.join(staging.path, 'octodo-v1.2.3-macos-arm64.zip'));
+      await zipFile.writeAsBytes(ZipEncoder().encode(archive)!);
+
+      final paths = await buildPaths(zipFile);
+      await expectLater(
+        StagedApply.run(
+          paths: paths,
+          pidToIgnore: 0,
+          initialDelay: Duration.zero,
+          pidTimeout: const Duration(milliseconds: 100),
+          relaunchAfter: false,
+        ),
+        throwsA(isA<StagedApplyException>()),
+      );
+
+      // Old bundle untouched.
+      final bin = File(p.join(
+          appsDir.path, 'Octodo.app', 'Contents', 'MacOS', 'Octodo'));
+      expect(await bin.readAsString(), 'old-bin-contents');
+      final entries = appsDir.listSync(followLinks: false).map(
+          (e) => p.basename(e.path));
+      expect(entries, equals(['Octodo.app']),
+          reason: 'rollback must leave no aside behind');
+    }, timeout: const Timeout(Duration(seconds: 30)));
+
+    test('relaunches the swapped bundle via Launch Services (open)',
+        () async {
+      if (Platform.isWindows) return;
+      // A stub .app whose "binary" is a shell script that drops
+      // marker files. relaunchBundleForTest must hand the bundle to
+      // Launch Services with a scrubbed environment — modern macOS
+      // `open` forwards the CALLER's env to the launched app, so
+      // the scrub (includeParentEnvironment: false) is what keeps
+      // the helper's OCTODO_UPDATE_* vars out of the relaunched
+      // process (the polluted-caller case is additionally covered
+      // by an `env -i open` shell check at implementation time).
+      final stub = Directory(p.join(workDir.path, 'Stub.app'));
+      final macosDir = Directory(p.join(stub.path, 'Contents', 'MacOS'));
+      await macosDir.create(recursive: true);
+      final marker = File(p.join(workDir.path, 'launched.marker'));
+      final envMarker = File(p.join(workDir.path, 'env.marker'));
+      final script = File(p.join(macosDir.path, 'Stub'));
+      await script.writeAsString('''
+#!/bin/sh
+echo launched > "${marker.path}"
+env | grep -c '^OCTODO_UPDATE' > "${envMarker.path}" || echo 0 > "${envMarker.path}"
+''');
+      final r = await Process.run('chmod', ['+x', script.path]);
+      if (r.exitCode != 0) throw StateError('chmod failed');
+      await File(p.join(stub.path, 'Contents', 'Info.plist'))
+          .writeAsString('''
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>Stub</string>
+  <key>CFBundleIdentifier</key><string>com.octodo.stub</string>
+  <key>CFBundleName</key><string>Stub</string>
+</dict>
+</plist>
+''');
+
+      await StagedApply.relaunchBundleForTest(stub.path);
+
+      var appeared = false;
+      for (var i = 0; i < 50; i++) {
+        if (await marker.exists()) {
+          appeared = true;
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+      expect(appeared, isTrue,
+          reason: 'stub bundle did not launch within 10 s');
+      expect((await envMarker.readAsString()).trim(), '0',
+          reason: 'helper env vars must not leak into the LS-launched app');
+    }, timeout: const Timeout(Duration(seconds: 60)));
+  });
 }

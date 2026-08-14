@@ -3,6 +3,8 @@
 // reference the app name without importing the entry point
 // (which would create a circular dependency).
 
+import 'dart:io';
+
 /// The display name of the application. Used for the window
 /// title, dialog titles, and the badge in the settings header.
 ///
@@ -35,6 +37,23 @@ const String kAppLogoAsset = 'assets/logo.png';
 /// not self-applied). Kept here so the update UI and any future
 /// diagnostics reference one source of truth.
 const String kAppStoreUrl = 'https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ';
+
+/// Mac App Store listing for Octodo. Empty until the manual MAS
+/// submission goes live — the update UI falls back to
+/// [kAppRepositoryReleases] (manual download) while it is blank.
+/// Once the listing exists, fill this with the `apps.apple.com`
+/// URL and the macOS Store build's "Update" button routes there.
+const String kMacAppStoreUrl = '';
+
+/// The URL the update UI should open for a Store-distribution
+/// build on the CURRENT platform: the platform's store listing
+/// when published, else the GitHub releases page as the manual
+/// upgrade path.
+String get kPlatformStoreUrl => Platform.isMacOS
+    ? (kMacAppStoreUrl.isNotEmpty
+        ? kMacAppStoreUrl
+        : kAppRepositoryReleases)
+    : kAppStoreUrl;
 
 /// Windows AppUserModelID — the "package namespace" Win32 uses to
 /// group taskbar icons, route toast notifications, and populate

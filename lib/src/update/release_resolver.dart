@@ -7,9 +7,15 @@
 //     pre-releases, so this is the strict-stable case in practice).
 //   * `published_at` (display only).
 //   * `html_url` (release notes page).
-//   * The asset matching `^octodo-v<ver>-windows-x64\.zip$` (zip).
-//   * Sibling asset matching `^octodo-v<ver>-windows-x64\.zip\.sha256$`
+//   * The asset matching `^octodo-v<ver>-<assetToken>\.zip$` (zip).
+//   * Sibling asset matching `^octodo-v<ver>-<assetToken>\.zip\.sha256$`
 //     (digest sidecar, optional — older releases may lack it).
+//
+// [assetToken] selects the platform build ("windows-x64",
+// "macos-arm64", "macos-x64"). The default is [kDefaultAssetToken]
+// ("windows-x64") so pre-existing callers and tests keep their
+// behavior; production feeds pass [currentAssetToken] for the
+// running platform.
 //
 // We re-derive the version from each asset filename and require it
 // to match `tag_name` — guards against an asset uploaded under the
@@ -19,19 +25,50 @@
 // (separate file) fetches the body; this file parses it.
 
 import 'dart:convert';
+import 'dart:ffi';
+import 'dart:io';
+
+/// The asset token the Windows x64 build publishes under. Kept as
+/// the default everywhere so historical callers (and the whole
+/// pre-macOS test suite) resolve the same assets they always did.
+const String kDefaultAssetToken = 'windows-x64';
+
+/// Strict regex matching the install asset filename for [token].
+/// Captures the "X.Y.Z" or "X.Y.Z-prerelease" version portion for
+/// cross-checking against the release tag.
+RegExp assetPatternFor(String token) => RegExp(
+      '^octodo-v(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?)-$token\\.zip\$',
+    );
+
+/// Strict regex matching the digest sidecar asset for [token].
+/// Captures the same version portion.
+RegExp assetSha256PatternFor(String token) => RegExp(
+      '^octodo-v(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?)-$token\\.zip\\.sha256\$',
+    );
+
+/// The platform token the *running* app should resolve assets for.
+/// Used by the production feed wiring only — the resolver itself
+/// stays pure via the [assetToken] parameter.
+///
+/// Windows → "windows-x64" (the only Windows build published).
+/// macOS → "macos-arm64" on Apple Silicon, "macos-x64" on Intel —
+/// matching the asset naming contract the release workflow emits.
+String currentAssetToken() {
+  if (Platform.isMacOS) {
+    return Abi.current() == Abi.macosArm64 ? 'macos-arm64' : 'macos-x64';
+  }
+  return kDefaultAssetToken;
+}
 
 /// Strict regex matching the install asset filename. Captures the
 /// "X.Y.Z" or "X.Y.Z-prerelease" version portion for cross-checking
 /// against the release tag.
-final RegExp kWindowsAssetPattern = RegExp(
-  r'^octodo-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-windows-x64\.zip$',
-);
+final RegExp kWindowsAssetPattern = assetPatternFor(kDefaultAssetToken);
 
 /// Strict regex matching the digest sidecar asset. Captures the same
 /// version portion.
-final RegExp kWindowsAssetSha256Pattern = RegExp(
-  r'^octodo-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-windows-x64\.zip\.sha256$',
-);
+final RegExp kWindowsAssetSha256Pattern =
+    assetSha256PatternFor(kDefaultAssetToken);
 
 /// Conservative semver-shape check. Accepts the same shape the
 /// release workflow accepts: "X.Y.Z" or "X.Y.Z-prerelease".
@@ -50,7 +87,7 @@ class ResolverException implements Exception {
       : 'ResolverException: $message ($cause)';
 }
 
-/// A resolved GitHub release with the matching Windows build asset
+/// A resolved GitHub release with the matching platform build asset
 /// identified, ready to be downloaded and verified. Constructed by
 /// [resolveReleaseJson]; never mutated after construction.
 class ReleaseInfo {
@@ -102,21 +139,27 @@ class ReleaseInfo {
 
 /// Parse a GitHub release JSON body into a [ReleaseInfo]. Throws
 /// [ResolverException] on any structural problem — a release without
-/// a matching Windows asset surfaces a clear error to the controller
+/// a matching asset surfaces a clear error to the controller
 /// instead of being silently dropped.
-ReleaseInfo resolveReleaseJson(String body) {
+ReleaseInfo resolveReleaseJson(
+  String body, {
+  String assetToken = kDefaultAssetToken,
+}) {
   final decoded = jsonDecode(body);
   if (decoded is! Map<String, dynamic>) {
     throw ResolverException(
       'Expected JSON object at root, got ${decoded.runtimeType}',
     );
   }
-  return resolveReleaseMap(decoded);
+  return resolveReleaseMap(decoded, assetToken: assetToken);
 }
 
 /// Like [resolveReleaseJson] but takes the already-decoded Map. Useful
 /// for tests that bypass JSON encoding.
-ReleaseInfo resolveReleaseMap(Map<String, dynamic> json) {
+ReleaseInfo resolveReleaseMap(
+  Map<String, dynamic> json, {
+  String assetToken = kDefaultAssetToken,
+}) {
   final tagName = json['tag_name'];
   if (tagName is! String || tagName.isEmpty) {
     throw const ResolverException('Missing or empty "tag_name"');
@@ -161,19 +204,22 @@ ReleaseInfo resolveReleaseMap(Map<String, dynamic> json) {
   int? zipSize;
   Uri? digestUrl;
 
+  final zipPattern = assetPatternFor(assetToken);
+  final shaPattern = assetSha256PatternFor(assetToken);
+
   for (final entry in assetsRaw) {
     if (entry is! Map<String, dynamic>) continue;
     final name = entry['name'];
     if (name is! String) continue;
 
-    final shaMatch = kWindowsAssetSha256Pattern.firstMatch(name);
+    final shaMatch = shaPattern.firstMatch(name);
     if (shaMatch != null) {
       if (shaMatch.group(1) != version) continue;
       digestUrl = _assetDownloadUrl(entry, hint: 'digest asset');
       continue;
     }
 
-    final zipMatch = kWindowsAssetPattern.firstMatch(name);
+    final zipMatch = zipPattern.firstMatch(name);
     if (zipMatch != null) {
       if (zipMatch.group(1) != version) continue;
       zipUrl = _assetDownloadUrl(entry, hint: 'zip asset');
@@ -185,7 +231,7 @@ ReleaseInfo resolveReleaseMap(Map<String, dynamic> json) {
 
   if (zipUrl == null) {
     throw ResolverException(
-      'Release $tagName has no asset matching ${kWindowsAssetPattern.pattern}',
+      'Release $tagName has no asset matching ${zipPattern.pattern}',
     );
   }
 

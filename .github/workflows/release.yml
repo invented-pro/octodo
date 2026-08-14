@@ -1,11 +1,14 @@
 name: release
 
-# Triggered by pushing a tag like v1.2.3. The runner reads
-# github.ref_name (always includes the "v" prefix) and turns it into:
+# Triggered by pushing a tag like v1.2.3. The runners read
+# github.ref_name (always includes the "v" prefix) and turn it into:
 #   - --build-name=1.2.3  (semver, no "v" — what package_info_plus reports)
-#   - octodo-v1.2.3-windows-x64.zip      (asset on GitHub + R2 mirror)
-#   - octodo-v1.2.3-windows-x64.zip.sha256 (sidecar)
-#   - manifest.json                      (R2 mirror only)
+#   - octodo-v1.2.3-windows-x64.zip       + .sha256   (Windows assets)
+#   - octodo-v1.2.3-macos-arm64.zip       + .sha256   (macOS assets)
+#   - Octodo-v1.2.3-macos-arm64.dmg                   (macOS first-install)
+#   - manifest.json                      (R2 mirror only — built by the
+#     publish-manifest job AFTER both platform jobs finish, so a single
+#     multi-platform manifest describes the release; no per-job races)
 on:
   push:
     tags: ['v*']
@@ -137,79 +140,14 @@ jobs:
 
           Write-Host "Wrote $zip ($hash)"
 
-      # ---------------------------------------------------------------
-      # Synthesize manifest.json — a static JSON describing the current
-      # release, mirrored byte-for-byte from the shape GitHub's
-      # /releases/latest returns so the in-app R2UpdateFeed can reuse
-      # resolveReleaseJson() with zero changes.
-      #
-      # browser_download_url on each asset is rewritten to point at the
-      # R2 PUBLIC base (R2_PUBLIC_BASE) so the in-app download path
-      # pulls the bytes from R2, not from GitHub.
-      #
-      # One manifest per release, overwritten in place at
-      #   cf1/octodo/manifest.json
-      # so the in-app R2UpdateFeed always sees a single, "what's
-      # latest" pointer.
-      # ---------------------------------------------------------------
-      - name: Synthesize R2 manifest.json
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ver  = "${{ steps.build.outputs.ver }}"
-          $tag  = "${{ github.ref_name }}"
-          $base = "$env:R2_PUBLIC_BASE"
-          $zip  = "octodo-v$ver-windows-x64.zip"
-          $sha  = "$zip.sha256"
-          $now  = (Get-Date).ToUniversalTime().ToString('o')
+      # NOTE: this job no longer synthesizes/uploads manifest.json.
+      # The publish-manifest job below builds ONE multi-platform
+      # manifest after both platform jobs land their assets,
+      # eliminating the race where the last uploader would clobber
+      # the other platform's entries.
 
-          $zipSize = (Get-Item $zip).Length
-          $shaSize = (Get-Item $sha).Length
-
-          # Construct in `[ordered]@{}` order so the JSON keys appear
-          # in the same order GitHub emits — handy for diffing the
-          # byte-level structure against a real GitHub response when
-          # debugging the R2UpdateFeed. `convertto-json -Depth 10`
-          # handles the nested assets array; `ConvertTo-Json` would
-          # emit `Microsoft.PowerShell.Commands.WebResponseObject`
-          # placeholders for anything unquoted by default.
-          $manifest = [ordered]@{
-            tag_name      = $tag
-            name          = $tag
-            prerelease    = $tag.Contains('-')
-            published_at  = $now
-            html_url      = "https://github.com/invented-pro/octodo/releases/tag/$tag"
-            body          = ""
-            assets        = @(
-              [ordered]@{
-                name                 = $zip
-                size                 = $zipSize
-                browser_download_url = "$base/$zip"
-                content_type         = "application/zip"
-              }
-              [ordered]@{
-                name                 = $sha
-                size                 = $shaSize
-                browser_download_url = "$base/$sha"
-                content_type         = "text/plain; charset=utf-8"
-              }
-            )
-          } | ConvertTo-Json -Depth 10
-
-          $manifest | Out-File -Encoding utf8 -FilePath manifest.json
-          Write-Host "Wrote manifest.json:"
-          Get-Content manifest.json
-
-      # Push the zip, the .sha256 sidecar, and manifest.json to R2.
-      # Uses R2's S3-compatible endpoint with the bucket-scoped
-      # access key pair (`CLOUDFLARE_ACCESS_ID` / `CLOUDFLARE_ACCESS_KEY`).
-      # Those keys are R2-only by construction, which sidesteps the
-      # auth-scope gotchas that the API-token / wrangler path hit.
-      #
-      # `CLOUDFLARE_ACCOUNT_ID` is the account-scoped id used to build
-      # the endpoint URL `<account>.r2.cloudflarestorage.com`. The
-      # R2 access keys themselves encode the bucket scope, so the
-      # `--endpoint-url` is just routing.
+      # Push the zip + .sha256 sidecar to R2 (manifest.json is
+      # uploaded later by publish-manifest).
       - name: Upload to Cloudflare R2 (S3-compatible)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_ACCESS_ID }}
@@ -245,11 +183,6 @@ jobs:
               file = $sha
               type = "text/plain; charset=utf-8"
             }
-            @{
-              key  = "octodo/manifest.json"
-              file = "manifest.json"
-              type = "application/json; charset=utf-8"
-            }
           )
 
           foreach ($u in $uploads) {
@@ -264,7 +197,7 @@ jobs:
               throw "aws s3 cp failed for $target (exit=$LASTEXITCODE)"
             }
           }
-          Write-Host "R2 mirror complete: s3://$bucket/octodo/{$zip,$sha,manifest.json}"
+          Write-Host "R2 mirror complete: s3://$bucket/octodo/{$zip,$sha}"
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -278,3 +211,354 @@ jobs:
           files: |
             octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip
             octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
+
+  build-macos:
+    runs-on: macos-14   # arm64 (Apple Silicon) runner
+    env:
+      R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      # Optional real signing: set these secrets and the job switches
+      # from ad-hoc to Developer ID + notarization automatically.
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.4'
+          channel: stable
+          cache: true
+
+      # Same rationale as the Windows job: flutter_alacritty's Rust
+      # cdylib is compiled by cargo during `flutter build macos`
+      # (aarch64-apple-darwin).
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify toolchain
+        run: |
+          echo "--- Flutter ---"
+          flutter --version
+          echo "--- Rust ---"
+          rustc --version
+          cargo --version
+
+      - name: Build, zip, sidecar SHA-256
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ github.ref_name }}"
+          ver="${tag#v}"
+
+          if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Tag '$tag' is not semver-shaped (expected vX.Y.Z or vX.Y.Z-prerelease)" >&2
+            exit 1
+          fi
+
+          echo "Building octodo $ver (build $GITHUB_RUN_NUMBER)"
+
+          flutter pub get
+          flutter build macos --release \
+            --build-name="$ver" \
+            --build-number="$GITHUB_RUN_NUMBER"
+
+          # Compile the standalone update helper into the .app bundle
+          # (Contents/MacOS/octodo_helper). Same rationale as Windows:
+          # the helper performs the bundle swap while the GUI process
+          # is gone. dart compile exe produces a self-contained
+          # binary; no runtime deps to worry about.
+          dart run tool/build_helper.dart
+
+          APP="build/macos/Build/Products/Release/Octodo.app"
+          ZIP="octodo-v$ver-macos-arm64.zip"
+          SHA="$ZIP.sha256"
+          DMG="Octodo-v$ver-macos-arm64.dmg"
+
+          if [[ ! -d "$APP" ]]; then
+            echo "Build output not found at $APP" >&2
+            exit 1
+          fi
+
+          # ----------------------------------------------------------
+          # Release guards (always on). A green build with the wrong
+          # version or a broken signature is worse than a red build.
+          # ----------------------------------------------------------
+
+          # 1. The bundle's marketed version must match the tag.
+          bundle_ver="$(/usr/libexec/PlistBuddy -c \
+            'Print :CFBundleShortVersionString' \
+            "$APP/Contents/Info.plist")"
+          if [[ "$bundle_ver" != "$ver" ]]; then
+            echo "Bundle CFBundleShortVersionString ('$bundle_ver') " \
+                 "does not match tag ($ver)" >&2
+            exit 1
+          fi
+
+          # 2. Signature must verify AFTER the helper lands inside the
+          #    bundle (resign happens next; this verifies the final
+          #    state once signing completes below — see post-sign check).
+          #    (Signature validity is asserted after the signing step.)
+
+          # ----------------------------------------------------------
+          # Codesign. Inside-out order (nested content first, main
+          # bundle last, --deep ONLY on nested frameworks — a --deep
+          # pass over the main bundle would overwrite the nested
+          # signatures). With Developer ID secrets present we sign for
+          # real and notarize; otherwise ad-hoc ("-"), which runs fine
+          # and keeps the self-update path fully functional (Gatekeeper
+          # only assesses quarantined first downloads, and the in-app
+          # update path never quarantines).
+          # ----------------------------------------------------------
+          if [[ -n "$MACOS_SIGNING_IDENTITY" ]]; then
+            IDENTITY="$MACOS_SIGNING_IDENTITY"
+            TS=(--timestamp)
+          else
+            IDENTITY="-"
+            TS=(--timestamp=none)
+            echo "::notice::No MACOS_SIGNING_IDENTITY secret — signing ad-hoc (self-update OK, first-run Gatekeeper dialog expected)."
+          fi
+
+          sign_frameworks() {
+            if [[ -d "$APP/Contents/Frameworks" ]]; then
+              while IFS= read -r -d '' fw; do
+                echo "==> signing framework $(basename "$fw")"
+                /usr/bin/codesign --force --options runtime \
+                  "${TS[@]}" --sign "$IDENTITY" --deep "$fw"
+              done < <(find "$APP/Contents/Frameworks" \
+                -mindepth 1 -maxdepth 1 -print0)
+            fi
+          }
+          sign_frameworks
+
+          echo "==> signing main bundle"
+          /usr/bin/codesign --force --options runtime \
+            "${TS[@]}" --sign "$IDENTITY" \
+            "$APP"
+
+          echo "==> verifying signature"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
+
+          # ----------------------------------------------------------
+          # Notarize (only possible with a real identity). We zip the
+          # app with ditto for the notary upload (preserves
+          # symlinks/modes), staple the ticket back onto the app, and
+          # only then build the DMG from the stapled app.
+          # ----------------------------------------------------------
+          if [[ -n "$MACOS_SIGNING_IDENTITY" ]]; then
+            echo "==> notarizing app"
+            ditto -c -k --sequesterRsrc --keepParent "$APP" notary-app.zip
+            xcrun notarytool submit notary-app.zip \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --wait
+            xcrun stapler staple "$APP"
+            xcrun stapler validate "$APP"
+            rm -f notary-app.zip
+          fi
+
+          # ----------------------------------------------------------
+          # Payload zip (the in-app updater downloads exactly this).
+          # ditto preserves the framework symlinks (Versions/Current,
+          # Resources) and unix modes — the extraction side
+          # (StagedApply) recreates both.
+          # ----------------------------------------------------------
+          echo "==> zipping payload"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          shasum -a 256 "$ZIP" | awk '{print $1}' > "$SHA"
+
+          # ----------------------------------------------------------
+          # DMG for first install (drag into Applications).
+          # ----------------------------------------------------------
+          echo "==> creating DMG"
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/Octodo.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname Octodo \
+            -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          rm -rf "$STAGE"
+
+          if [[ -n "$MACOS_SIGNING_IDENTITY" ]]; then
+            echo "==> signing + notarizing DMG"
+            /usr/bin/codesign --force "${TS[@]}" \
+              --sign "$IDENTITY" "$DMG"
+            xcrun notarytool submit "$DMG" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --wait
+            xcrun stapler staple "$DMG"
+            xcrun stapler validate "$DMG"
+          fi
+
+          # ----------------------------------------------------------
+          # Launch smoke test: the built app must actually come up.
+          # `open` launches via LaunchServices on the runner's GUI
+          # session; we poll pgrep for a few seconds and quit cleanly.
+          # ----------------------------------------------------------
+          echo "==> launch smoke test"
+          open "$APP"
+          alive=0
+          for i in $(seq 1 20); do
+            if pgrep -x Octodo >/dev/null 2>&1; then alive=1; break; fi
+            sleep 1
+          done
+          if [[ "$alive" != "1" ]]; then
+            echo "Smoke test failed: Octodo did not stay up after open" >&2
+            exit 1
+          fi
+          osascript -e 'quit app "Octodo"' || true
+          sleep 2
+          pkill -x Octodo 2>/dev/null || true
+
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          echo "Wrote $ZIP and $DMG"
+
+      - name: Upload to Cloudflare R2 (S3-compatible)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_ACCESS_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ steps.build.outputs.ver }}"
+          zip="${{ steps.build.outputs.zip }}"
+          sha="${{ steps.build.outputs.sha }}"
+          endpoint="https://$R2_ACCOUNT.r2.cloudflarestorage.com"
+          bucket="$R2_BUCKET"
+
+          for u in "$zip:application/zip" "$sha:text/plain; charset=utf-8"; do
+            file="${u%%:*}"; type="${u#*:}"
+            echo ">> aws s3 cp $file s3://$bucket/octodo/$file ($type)"
+            aws s3 cp "$file" "s3://$bucket/octodo/$file" \
+              --endpoint-url "$endpoint" \
+              --content-type "$type" \
+              --no-progress --only-show-errors
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip
+            octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip.sha256
+            Octodo-v${{ steps.build.outputs.ver }}-macos-arm64.dmg
+
+  # ---------------------------------------------------------------
+  # Fan-in: build ONE multi-platform manifest.json for R2 after both
+  # platform jobs have uploaded their assets. Reads the release's
+  # real asset list from GitHub (source of truth — no hand-built
+  # filename lists to drift), keeps only the naming-contract assets
+  # (octodo-v<ver>-<platform>.zip[.sha256]), rewrites the download
+  # URLs to the R2 public base, and uploads to the fixed key
+  #   octodo/manifest.json
+  # the in-app R2UpdateFeed polls. Running it as a separate job:
+  #   * no race between the two build jobs overwriting each other's
+  #     manifest,
+  #   * the manifest reflects the actual published release,
+  #   * a failed platform job fails the whole release before a
+  #     half-baked manifest ships.
+  # ---------------------------------------------------------------
+  publish-manifest:
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos]
+    env:
+      R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+    steps:
+      - name: Synthesize and upload multi-platform manifest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_ACCESS_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          ver="${tag#v}"
+          base="$R2_PUBLIC_BASE"
+
+          # Pull the release's published assets (name + size) as JSON.
+          gh release view "$tag" --repo "${{ github.repository }}" \
+            --json assets,tagName,url,publishedAt,isPrerelease \
+            > release.json
+
+          # NOTE: bare `release.json` below — "$release.json" would
+          # expand the unset `release` shell var and, under `set -u`,
+          # abort the step.
+          python3 - release.json "$tag" "$ver" "$base" <<'PY'
+          import json, sys, urllib.parse
+
+          release_path, tag, ver, base = sys.argv[1:5]
+          with open(release_path) as f:
+              rel = json.load(f)
+
+          wanted = []
+          for a in rel["assets"]:
+              name = a["name"]
+              # Naming contract: octodo-v<ver>-<platform>.zip[.sha256]
+              # (DMGs and anything else on the release are skipped —
+              # the in-app updater only consumes zips).
+              for platform in ("windows-x64", "macos-arm64", "macos-x64"):
+                  for suffix, ctype in ((".zip", "application/zip"),
+                                        (".zip.sha256", "text/plain; charset=utf-8")):
+                      expected = f"octodo-v{ver}-{platform}{suffix}"
+                      if name == expected:
+                          wanted.append({
+                              "name": name,
+                              "size": a["size"],
+                              "browser_download_url": f"{base}/{urllib.parse.quote(name)}",
+                              "content_type": ctype,
+                          })
+
+          # Every platform we ship must be present with both zip and
+          # sidecar, or the release is half-baked — refuse to publish.
+          got = {w["name"] for w in wanted}
+          missing = []
+          if f"octodo-v{ver}-windows-x64.zip" not in got:
+              missing.append("windows-x64 zip")
+          if f"octodo-v{ver}-windows-x64.zip.sha256" not in got:
+              missing.append("windows-x64 sha256")
+          if f"octodo-v{ver}-macos-arm64.zip" not in got:
+              missing.append("macos-arm64 zip")
+          if f"octodo-v{ver}-macos-arm64.zip.sha256" not in got:
+              missing.append("macos-arm64 sha256")
+          if missing:
+              sys.exit("manifest incomplete, missing: " + ", ".join(missing))
+
+          manifest = {
+              "tag_name": tag,
+              "name": tag,
+              "prerelease": rel["isPrerelease"],
+              "published_at": rel["publishedAt"],
+              "html_url": rel["url"],
+              "body": "",
+              "assets": wanted,
+          }
+          with open("manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+          print("Wrote manifest.json:")
+          print(json.dumps(manifest, indent=2))
+          PY
+
+          endpoint="https://$R2_ACCOUNT.r2.cloudflarestorage.com"
+          aws s3 cp manifest.json "s3://$R2_BUCKET/octodo/manifest.json" \
+            --endpoint-url "$endpoint" \
+            --content-type "application/json; charset=utf-8" \
+            --no-progress --only-show-errors
+          echo "manifest.json published."

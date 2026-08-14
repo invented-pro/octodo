@@ -1,7 +1,12 @@
 // Widget tests for the store-distribution branch of the update
 // popover (`_AvailableBody`). The portable body shows Download +
 // Skip; the store body shows a plain "Update" button that opens
-// the Store URL in the browser and drops the Skip affordance.
+// the platform's Store URL in the browser and drops the Skip
+// affordance. The explanatory copy is platform-dependent
+// (Microsoft Store on Windows, Mac App Store on macOS), so the
+// assertions branch on the host the test runs on.
+
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -55,7 +60,11 @@ void main() {
     expect(find.text('Skip this version'), findsNothing);
     expect(find.textContaining('Download'), findsNothing);
     // The Store explanatory copy replaces the GitHub/SHA-256 one.
-    expect(find.textContaining('Microsoft Store'), findsOneWidget);
+    if (Platform.isMacOS) {
+      expect(find.textContaining('Mac App Store'), findsOneWidget);
+    } else {
+      expect(find.textContaining('Microsoft Store'), findsOneWidget);
+    }
     expect(find.textContaining('SHA-256'), findsNothing);
 
     controller.dispose();

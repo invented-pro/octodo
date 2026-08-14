@@ -1,19 +1,25 @@
-// Detects whether the running app is the MSIX / Microsoft Store
-// build or the portable (unzipped) build. The in-app updater uses
-// this to decide between the self-applied GitHub-zip flow
-// (portable) and the "open the Store" flow (store).
+// Detects whether the running app is an OS-store build (MSIX /
+// Microsoft Store on Windows, Mac App Store receipt on macOS) or a
+// portable / direct-download build. The in-app updater uses this to
+// decide between the self-applied GitHub-zip flow (portable) and
+// the "open the Store" flow (store).
 //
 // Why we need this: MSIX/Store installs land under
 // `C:\Program Files\WindowsApps\…`, which is ACL-locked. The
 // portable updater's `octodo_helper.exe` can't overwrite files
 // there, so the download + staged-apply path is a no-op for
 // Store users. Instead we route them to the Store, which owns
-// the install and the update lifecycle.
+// the install and the update lifecycle. The Mac App Store is the
+// same story: a MAS install carries `Contents/_MASReceipt/receipt`
+// inside the .app bundle and its install location is
+// SIP-protected, so Store builds route to the MAS listing while
+// direct-download builds self-apply.
 
 import 'dart:ffi';
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:path/path.dart' as p;
 
 /// The app's published MSIX identity name (from pubspec.yaml's
 /// `msix_config.identity_name`). Used to confirm the package we're
@@ -44,6 +50,31 @@ enum InstallDistribution {
 /// inject a stub to pin the outcome.
 typedef PackageFullNameProbe = String? Function();
 
+/// Functional type for the macOS MAS-receipt existence probe.
+/// Production wires a `File.existsSync` closure; tests inject a
+/// stub so the receipt path can be pinned without touching disk.
+typedef MasReceiptProbe = bool Function(String path);
+
+/// Resolve the .app bundle root from an executable path, or null
+/// when the path isn't inside a `.app` bundle.
+///
+/// Walks the path segments upward looking for a directory named
+/// `*.app`; e.g. `/Applications/Octodo.app/Contents/MacOS/Octodo`
+/// → `/Applications/Octodo.app`. Pure string operation — safe on
+/// any host, and a Windows-style path never has a `.app` segment.
+String? macAppBundleRoot(String executablePath) {
+  final dir = p.dirname(executablePath);
+  var current = dir;
+  for (var i = 0; i < 10; i++) {
+    final base = p.basename(current);
+    if (base.endsWith('.app')) return current;
+    final parent = p.dirname(current);
+    if (parent == current) return null;
+    current = parent;
+  }
+  return null;
+}
+
 /// Resolve the running app's distribution. Decides in priority
 /// order:
 ///   1. [override] — tests pin the answer without hitting Win32.
@@ -57,11 +88,17 @@ typedef PackageFullNameProbe = String? Function();
 ///      `Program Files\WindowsApps\` (the ACL-locked MSIX install
 ///      root) → store. Belt-and-braces in case the Win32 call is
 ///      unavailable.
-///   4. Default: portable.
+///   4. macOS heuristic — [resolvedExecutable] lives inside a
+///      `.app` bundle carrying `Contents/_MASReceipt/receipt` →
+///      store. That receipt is what Apple's installer staples
+///      into every MAS purchase; direct-download builds never
+///      have one.
+///   5. Default: portable.
 InstallDistribution resolveInstallDistribution({
   InstallDistribution? override,
   String? resolvedExecutable,
   PackageFullNameProbe? probe,
+  MasReceiptProbe? masReceiptExists,
 }) {
   if (override != null) return override;
   // The probe defaults to the Win32 call on Windows; anywhere else the
@@ -80,9 +117,17 @@ InstallDistribution resolveInstallDistribution({
       fullName.startsWith(kMsixIdentityName)) {
     return InstallDistribution.store;
   }
-  final exe = (resolvedExecutable ?? Platform.resolvedExecutable).toLowerCase();
-  if (exe.contains(r'\windowsapps\')) {
+  final exe = resolvedExecutable ?? Platform.resolvedExecutable;
+  if (exe.toLowerCase().contains(r'\windowsapps\')) {
     return InstallDistribution.store;
+  }
+  final bundleRoot = macAppBundleRoot(exe);
+  if (bundleRoot != null) {
+    final receipt = p.join(bundleRoot, 'Contents', '_MASReceipt', 'receipt');
+    final exists = masReceiptExists ?? ((path) => File(path).existsSync());
+    if (exists(receipt)) {
+      return InstallDistribution.store;
+    }
   }
   return InstallDistribution.portable;
 }

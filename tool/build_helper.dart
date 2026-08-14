@@ -1,10 +1,11 @@
-// Builds octodo_helper.exe and places it next to octodo.exe in the
-// Windows Release output dir, so the in-app updater can spawn it on
-// apply.
+// Builds the octodo_helper binary and places it next to the app
+// executable in the release output dir, so the in-app updater can
+// spawn it on apply.
 //
-// Run AFTER `flutter build windows --release` (the Release dir must
-// already exist). For `flutter run -d windows` dev sessions, invoke
-// once before triggering the in-app upgrade flow.
+// Run AFTER `flutter build windows --release` /
+// `flutter build macos --release` (the output dir must already
+// exist). For `flutter run` dev sessions, invoke once before
+// triggering the in-app upgrade flow.
 //
 // Usage:
 //   dart run tool/build_helper.dart
@@ -13,9 +14,8 @@
 // keeping a single source of truth for output path + post-build
 // existence check so the dev and release paths can't drift.
 //
-// Implemented in Dart (not PowerShell) so it runs regardless of the
-// system's ExecutionPolicy, which on Windows client SKUs defaults to
-// `Restricted` and blocks bare `.\tool\build_helper.ps1` invocation.
+// Implemented in Dart (not shell) so it runs regardless of the
+// system's ExecutionPolicy / shell defaults.
 
 import 'dart:io';
 
@@ -26,14 +26,29 @@ Future<void> main(List<String> args) async {
   final scriptPath = Platform.script.toFilePath();
   final projectRoot = File(scriptPath).parent.parent.path;
   final src = '$projectRoot/tool/update_helper.dart';
-  final dstDir = '$projectRoot/build/windows/x64/runner/Release';
-  final dst = '$dstDir/octodo_helper.exe';
+
+  // Windows: the portable-zip layout — everything sits next to
+  // octodo.exe. macOS: the .app bundle layout — the helper ships
+  // inside Contents/MacOS/ so it travels with the bundle through
+  // the zip → download → bundle-swap pipeline (and gets covered by
+  // the bundle's code signature).
+  final String dstDir;
+  final String dst;
+  if (Platform.isMacOS) {
+    dstDir = '$projectRoot/build/macos/Build/Products/Release/Octodo.app'
+        '/Contents/MacOS';
+    dst = '$dstDir/octodo_helper';
+  } else {
+    dstDir = '$projectRoot/build/windows/x64/runner/Release';
+    dst = '$dstDir/octodo_helper.exe';
+  }
 
   final dstDirExists = await Directory(dstDir).exists();
   if (!dstDirExists) {
     stderr.writeln(
       'Release dir does not exist yet: $dstDir\n'
-      "Run 'flutter build windows --release' first.",
+      "Run 'flutter build ${Platform.isMacOS ? 'macos' : 'windows'} "
+      "--release' first.",
     );
     exit(1);
   }

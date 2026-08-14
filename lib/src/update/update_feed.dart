@@ -87,6 +87,13 @@ class UpdateFeed implements UpdateFeedSource {
   /// from the `update.repositoryOverride` setting by
   /// [UpdateController]; defaults to the public octodo repo.
   final String repository;
+
+  /// Which platform build's asset to match when resolving the
+  /// release (see [assetPatternFor]). Defaults to
+  /// [kDefaultAssetToken] so historical callers keep resolving the
+  /// Windows zip; production wiring passes [currentAssetToken].
+  final String assetToken;
+
   final http.Client _client;
   final Duration _timeout;
 
@@ -99,6 +106,7 @@ class UpdateFeed implements UpdateFeedSource {
   UpdateFeed({
     required this.repository,
     required this.userAgentVersion,
+    this.assetToken = kDefaultAssetToken,
     http.Client? client,
     Duration timeout = const Duration(seconds: 5),
   })  : _client = client ?? http.Client(),
@@ -177,6 +185,7 @@ class UpdateFeed implements UpdateFeedSource {
       // surfaces the same shape regardless.
       return resolveReleaseJson(
         utf8.decode(response.bodyBytes, allowMalformed: true),
+        assetToken: assetToken,
       );
     } on UpdateFeedException {
       rethrow;

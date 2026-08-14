@@ -77,5 +77,88 @@ void main() {
       );
       expect(result, InstallDistribution.store);
     });
+
+    group('macOS MAS receipt heuristic', () {
+      const bundleExe = '/Applications/Octodo.app/Contents/MacOS/Octodo';
+
+      test('store when the bundle carries an MAS receipt', () {
+        final result = resolveInstallDistribution(
+          resolvedExecutable: bundleExe,
+          probe: () => null,
+          masReceiptExists: (path) => path.endsWith('_MASReceipt/receipt'),
+        );
+        expect(result, InstallDistribution.store);
+      });
+
+      test('portable when the bundle has no receipt', () {
+        final result = resolveInstallDistribution(
+          resolvedExecutable: bundleExe,
+          probe: () => null,
+          masReceiptExists: (_) => false,
+        );
+        expect(result, InstallDistribution.portable);
+      });
+
+      test('receipt probe only consulted for paths inside a bundle', () {
+        var probed = false;
+        final result = resolveInstallDistribution(
+          resolvedExecutable: '/opt/octodo/bin/octodo',
+          probe: () => null,
+          masReceiptExists: (_) {
+            probed = true;
+            return true;
+          },
+        );
+        expect(result, InstallDistribution.portable);
+        expect(probed, isFalse,
+            reason: 'non-bundle executables never carry a receipt');
+      });
+
+      test('receipt path is built inside the detected bundle root', () {
+        late String seen;
+        resolveInstallDistribution(
+          resolvedExecutable: bundleExe,
+          probe: () => null,
+          masReceiptExists: (path) {
+            seen = path;
+            return false;
+          },
+        );
+        expect(seen, '/Applications/Octodo.app/Contents/_MASReceipt/receipt');
+      });
+
+      test('nested .app-looking filenames do not confuse the walk', () {
+        // A directory named like a bundle *below* the executable
+        // must not be picked as the root — we walk UP only.
+        final result = resolveInstallDistribution(
+          resolvedExecutable:
+              '/Users/me/applications/Octodo.app-dmg/Octodo.app/Contents/MacOS/Octodo',
+          probe: () => null,
+          masReceiptExists: (_) => false,
+        );
+        expect(result, InstallDistribution.portable);
+      });
+    });
+
+    group('macAppBundleRoot', () {
+      test('resolves the innermost .app ancestor', () {
+        expect(
+          macAppBundleRoot('/Applications/Octodo.app/Contents/MacOS/Octodo'),
+          '/Applications/Octodo.app',
+        );
+      });
+
+      test('null for non-bundle paths', () {
+        expect(macAppBundleRoot('/opt/octodo/octodo'), isNull);
+        expect(macAppBundleRoot('/usr/local/bin/dart'), isNull);
+      });
+
+      test('null for a bare .app path itself', () {
+        // The executable can't BE the bundle dir; dirname is
+        // Contents/MacOS — walking up from there must find the
+        // bundle only when one truly encloses it.
+        expect(macAppBundleRoot('/Applications/Octodo.app'), isNull);
+      });
+    });
   });
 }

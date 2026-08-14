@@ -15,6 +15,7 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:retry/retry.dart';
 
+import '../app_info.dart';
 import '../log.dart';
 import '../settings/settings_catalog.dart';
 import '../settings/settings_runtime.dart';
@@ -52,11 +53,13 @@ const Duration _kSidecarTimeout = Duration(seconds: 5);
 /// blip stays under ~5 s in the worst case.
 const int _kMaxAttemptsPerSource = 3;
 
-/// Filename of the standalone helper exe spawned by [applyDownloaded].
-/// Lives next to `octodo.exe` in the install dir. Compiled from
-/// `tool/update_helper.dart`. See [_spawnHelper] for why a separate
-/// binary is required.
-const String _kHelperExeName = 'octodo_helper.exe';
+/// Filename of the standalone helper binary spawned by
+/// [applyDownloaded]. Lives next to the running executable
+/// (`octodo.exe`'s dir on Windows; `Octodo.app/Contents/MacOS/` on
+/// macOS). Compiled from `tool/update_helper.dart`. See
+/// [_spawnHelper] for why a separate binary is required.
+String get _kHelperExeName =>
+    Platform.isWindows ? 'octodo_helper.exe' : 'octodo_helper';
 
 class UpdateController {
   final UpdateStateModel model;
@@ -152,6 +155,20 @@ class UpdateController {
   /// when 6+ attempts run sequentially (3 primary + 3 fallback).
   final Duration retryDelayFactor;
 
+  /// Minimum time the manual-check UI stays in the `checking`
+  /// state before a result is surfaced. A sub-100 ms GitHub
+  /// response otherwise flashes the "Checking…" pill for a frame,
+  /// which reads as a glitch rather than a completed check.
+  /// Background probes ignore this. Tests pass [Duration.zero].
+  final Duration minCheckDisplay;
+
+  /// Wall-clock budget for one probe's whole primary+fallback
+  /// chain. Without it, 3 retries × 5 s timeout on each of the two
+  /// sources can legitimately stretch a manual check past 30 s on
+  /// a hostile network; past this budget the probe surfaces a
+  /// timeout error instead of leaving the user on a spinner.
+  final Duration probeTimeout;
+
   UpdateController({
     required this.model,
     required this.settings,
@@ -162,6 +179,8 @@ class UpdateController {
     this.skipListFileFactory,
     this.downloadClientFactory,
     this.retryDelayFactor = const Duration(milliseconds: 200),
+    this.minCheckDisplay = const Duration(milliseconds: 600),
+    this.probeTimeout = const Duration(seconds: 20),
   });
 
   /// The default (and recommended) GitHub repo. Visible so the
@@ -286,6 +305,12 @@ class UpdateController {
     return UpdateFeed(
       repository: _resolveRepository(),
       userAgentVersion: userAgentVersion,
+      // Match the running platform's release asset
+      // (windows-x64 / macos-arm64 / macos-x64). Injected
+      // factories (tests) construct their own feeds with the
+      // resolver default, which is why this lives here and not in
+      // the feed constructor's default.
+      assetToken: currentAssetToken(),
     );
   }
 
@@ -299,6 +324,7 @@ class UpdateController {
     return R2UpdateFeed(
       manifestUrl: url,
       userAgentVersion: userAgentVersion,
+      assetToken: currentAssetToken(),
     );
   }
 
@@ -368,8 +394,35 @@ class UpdateController {
   /// spinner because of a dropped click.
   Future<void> checkForUpdates() async {
     if (_primaryFeed == null || _probeInFlight) return;
+    _manualCheckStartedAt = DateTime.now();
     model.setState(UpdateState.checking);
-    await _runProbe(showNotFound: true);
+    try {
+      await _runProbe(showNotFound: true);
+    } finally {
+      // Reset even if an unexpected exception type escapes the
+      // probe — a stale timestamp would wrongly apply the display
+      // floor to the NEXT manual check.
+      _manualCheckStartedAt = null;
+    }
+  }
+
+  /// Timestamp of the in-flight manual "Check now" click, used to
+  /// enforce the [minCheckDisplay] floor. Null for background
+  /// probes.
+  DateTime? _manualCheckStartedAt;
+
+  /// Hold the `checking` state for at least [minCheckDisplay] after
+  /// a manual check began, so a fast probe result doesn't flash the
+  /// spinner for a single frame. No-op for background probes and
+  /// when the floor is already elapsed.
+  Future<void> _holdCheckingFloor() async {
+    final start = _manualCheckStartedAt;
+    if (start == null) return;
+    final elapsed = DateTime.now().difference(start);
+    final remaining = minCheckDisplay - elapsed;
+    if (remaining > Duration.zero) {
+      await Future<void>.delayed(remaining);
+    }
   }
 
   /// Download the asset the model currently has as [detected].
@@ -495,11 +548,13 @@ class UpdateController {
       final fallbackKind = _fallbackFeed?.kind;
       final technicalDetails = fallbackKind == null
           ? 'Primary: ${primarySource?.kind ?? "?"} '
-              '($_kMaxAttemptsPerSource attempts); no fallback configured.'
+              '($_kMaxAttemptsPerSource attempts); no fallback configured.\n'
+              '${_feedDiagnostics()}'
           : 'Primary: ${primarySource?.kind ?? "?"} '
               '($_kMaxAttemptsPerSource attempts); '
               'fallback: $fallbackKind '
-              '($_kMaxAttemptsPerSource attempts each).';
+              '($_kMaxAttemptsPerSource attempts each).\n'
+              '${_feedDiagnostics()}';
       model.setError(UpdateErrorPayload(
         message: headline,
         technicalDetails: technicalDetails,
@@ -737,11 +792,15 @@ class UpdateController {
   /// install dir.
   ///
   /// Sequence:
-  ///   1. setInstalling() — UI shows "Restarting to apply update…".
-  ///   2. spawn helper detached with env vars + current PID.
-  ///   3. wait ~2s so the helper begins and notices it's in helper
+  ///   1. pre-apply checks — everything that can fail WITHOUT
+  ///      quitting must fail HERE, while the UI can still show an
+  ///      error (staged zip still present; on macOS: running from
+  ///      a .app bundle and its parent dir writable).
+  ///   2. setInstalling() — UI shows "Restarting to apply update…".
+  ///   3. spawn helper detached with env vars + current PID.
+  ///   4. wait ~2s so the helper begins and notices it's in helper
   ///      mode (pre-empts file-lock collisions while we're alive).
-  ///   4. exit(0) — the helper then extracts + copies + relaunches.
+  ///   5. exit(0) — the helper then extracts + applies + relaunches.
   Future<void> applyDownloaded() async {
     if (distribution == InstallDistribution.store) {
       _log.warning('applyDownloaded() called on a Store distribution; '
@@ -750,6 +809,13 @@ class UpdateController {
     }
     final d = model.downloaded;
     if (d == null) return;
+
+    final preCheckError = _preApplyCheck(d);
+    if (preCheckError != null) {
+      model.setError(preCheckError);
+      return;
+    }
+
     model.setInstalling();
 
     final spawned = await _spawnHelper(version: d.version, pid: pid);
@@ -760,10 +826,87 @@ class UpdateController {
     exit(0);
   }
 
-  /// Resolve the standalone helper exe path next to the running
-  /// `octodo.exe`. Returns null if the file is absent — the caller
-  /// surfaces a clear error in that case so the user knows to
-  /// reinstall rather than retry blindly.
+  /// Everything that must be verified BEFORE the app quits. Each
+  /// failure returns an [UpdateErrorPayload] the UI can surface
+  /// while the app is still alive; a null return means "safe to
+  /// proceed". Once the process exits there is no UI left, so any
+  /// predictable failure mode belongs here instead of in the
+  /// helper.
+  ///
+  /// All platforms: the staged zip still exists at the path
+  /// recorded at download time — a cleaned temp dir would
+  /// otherwise quit the app and silently do nothing.
+  ///
+  /// macOS only: the running executable lives inside a `.app`
+  /// bundle (the bundle-swap apply is undefined otherwise), and the
+  /// bundle's parent directory is writable (a read-only install
+  /// location can't be swapped into; the user needs the manual
+  /// download instead).
+  UpdateErrorPayload? _preApplyCheck(DownloadedPayload d) {
+    if (!d.zipPath.existsSync()) {
+      return UpdateErrorPayload(
+        message: 'The downloaded update file is missing. '
+            'Download it again to update.',
+        technicalDetails: 'Staged zip no longer present at '
+            '${d.zipPath.path}.\n'
+            'Manual download: $kAppRepositoryReleases',
+        onRetry: () => model.reset(),
+        onDismiss: () => model.reset(),
+      );
+    }
+    if (!Platform.isMacOS) return null;
+
+    final bundleRoot = macAppBundleRoot(Platform.resolvedExecutable);
+    if (bundleRoot == null) {
+      return UpdateErrorPayload(
+        message: 'Octodo must run from its Octodo.app bundle to '
+            'self-update. Reinstall from the download page.',
+        technicalDetails: 'Running executable is not inside a .app '
+            'bundle: ${Platform.resolvedExecutable}\n'
+            'Manual download: $kAppRepositoryReleases',
+        onRetry: () => model.reset(),
+        onDismiss: () => model.reset(),
+      );
+    }
+
+    final installDir = File(bundleRoot).parent.path;
+    if (!_isDirectoryWritable(installDir)) {
+      return UpdateErrorPayload(
+        message: 'Octodo cannot update automatically — the folder '
+            'holding Octodo.app is not writable. Download the new '
+            'version manually.',
+        technicalDetails: 'Install dir not writable: $installDir\n'
+            'Manual download: $kAppRepositoryReleases',
+        onRetry: applyDownloaded,
+        onDismiss: () => model.reset(),
+      );
+    }
+    return null;
+  }
+
+  /// Best-effort writability probe: create + delete a uniquely
+  /// named temp file in [dir]. Directory mode bits can mislead on
+  /// ACL-mounted volumes, so an actual write is the only
+  /// trustworthy answer.
+  bool _isDirectoryWritable(String dir) {
+    try {
+      final probe = File(p.join(
+        dir,
+        '.octodo_write_probe_${DateTime.now().millisecondsSinceEpoch}',
+      ));
+      probe.writeAsStringSync('');
+      probe.deleteSync();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Resolve the standalone helper binary path next to the running
+  /// executable (Windows: install dir; macOS:
+  /// `Octodo.app/Contents/MacOS/`). Returns null if the file is
+  /// absent — the caller surfaces a clear error in that case so
+  /// the user knows to reinstall rather than retry blindly.
   File? _resolveHelperExe() {
     final installDir = p.dirname(Platform.resolvedExecutable);
     final helperPath = p.join(installDir, _kHelperExeName);
@@ -786,8 +929,9 @@ class UpdateController {
       model.setError(UpdateErrorPayload(
         message: 'Update helper is missing. Reinstall Octodo '
             'to apply this update.',
-        technicalDetails:
-            'Expected $_kHelperExeName next to octodo.exe at $installDir.',
+        technicalDetails: 'Expected $_kHelperExeName next to the '
+            'running executable at $installDir.\n'
+            'Manual download: $kAppRepositoryReleases',
         onDismiss: () => model.reset(),
       ));
       return false;
@@ -800,6 +944,10 @@ class UpdateController {
           'OCTODO_UPDATE_HELPER': '1',
           'OCTODO_UPDATE_PAYLOAD': version,
           'OCTODO_UPDATE_PID': pid.toString(),
+          // macOS bundle swap: the GUI binary's name inside the new
+          // bundle (the helper's own basename is `octodo_helper`,
+          // useless for relaunching the app). Ignored on Windows.
+          'OCTODO_UPDATE_APP_EXE': p.basename(Platform.resolvedExecutable),
         },
         mode: ProcessStartMode.detached,
       );
@@ -846,14 +994,27 @@ class UpdateController {
           SettingsRuntime.instance.store.get(settings.autoCheck);
       if (!autoCheck && !showNotFound) return;
       try {
-        final release = await _fetchWithFallback();
+        // Bound the whole primary+fallback chain: without this the
+        // 3+3 retry budget × 5 s HTTP timeouts can hold a manual
+        // check (and the startup probe) past 30 s on a hostile
+        // network. `.timeout` completes the await early; the
+        // abandoned retry chain settles harmlessly into the void.
+        final release = await _fetchWithFallback().timeout(
+              probeTimeout,
+              onTimeout: () => throw UpdateFeedException(
+                'Update check timed out after '
+                '${probeTimeout.inSeconds}s.',
+              ),
+            );
         if (_isNewer(release.version, model.currentVersion) &&
             !_skipList.contains(release.version)) {
+          if (showNotFound) await _holdCheckingFloor();
           model.setAvailable(release);
         } else {
           // No newer release available. Mark the persistent
           // "Latest" flag regardless of whether this was a
           // manual or background probe — the result is the same.
+          if (showNotFound) await _holdCheckingFloor();
           model.markUpToDate();
           if (showNotFound) {
             _scheduleNotFoundFlash();
@@ -866,17 +1027,33 @@ class UpdateController {
         // the same outcome as "you're up to date", just earlier in
         // the repo's life. Fall back to the idle / About view
         // rather than surface a confusing 'Update Failed' pill.
+        if (showNotFound) await _holdCheckingFloor();
         model.markUpToDate();
         if (showNotFound) {
           _scheduleNotFoundFlash();
         } else {
           model.reset();
         }
+      } on TimeoutException {
+        // The `.timeout` wrapper above throws its own
+        // UpdateFeedException, but an unconverted TimeoutException
+        // could still escape a feed implementation — treat it the
+        // same so it never leaks to the caller as an unhandled
+        // async error.
+        if (showNotFound) await _holdCheckingFloor();
+        model.setError(UpdateErrorPayload(
+          message: 'Update check timed out.',
+          technicalDetails:
+              'Timed out after ${probeTimeout.inSeconds}s.\n${_feedDiagnostics()}',
+          onRetry: checkForUpdates,
+          onDismiss: () => model.reset(),
+        ));
       } on UpdateFeedException catch (e) {
+        if (showNotFound) await _holdCheckingFloor();
         if (showNotFound) {
           model.setError(UpdateErrorPayload(
             message: _userFacingMessageForProbe(e),
-            technicalDetails: e.toString(),
+            technicalDetails: '$e\n${_feedDiagnostics()}',
             onRetry: checkForUpdates,
             onDismiss: () => model.reset(),
           ));
@@ -893,6 +1070,21 @@ class UpdateController {
     } finally {
       _probeInFlight = false;
     }
+  }
+
+  /// One-line summary of the configured feeds for error payloads —
+  /// when a release feed is mispublished (the class of failure
+  /// cmux's Sparkle 4005 incident made famous), the source + repo
+  /// in the "Copy details" text is the difference between a
+  /// fixable report and a shrug.
+  String _feedDiagnostics() {
+    final primary = _primaryFeed;
+    final fallback = _fallbackFeed;
+    final parts = <String>[
+      if (primary != null) 'primary=${primary.kind} (${_resolveRepository()})',
+      if (fallback != null) 'fallback=${fallback.kind}',
+    ];
+    return parts.isEmpty ? 'no feeds configured' : parts.join(', ');
   }
 
   /// Show the "you're up to date" state for [_kNotFoundFlash] and
@@ -994,8 +1186,8 @@ class UpdateController {
     _probeInFlight = false;
   }
 
-  // -- staging paths (Windows-friendly; mac/Linux paths are
-  // best-effort because we don't auto-update those platforms) --
+  // -- staging paths (Windows: %LOCALAPPDATA%; macOS: ~/Library/
+  // Application Support; other POSIX: ~/.octodo best-effort) --
 
   Directory _resolveStagingDir(String version) {
     final base = _resolveAppLocalDir();
@@ -1009,6 +1201,14 @@ class UpdateController {
 
   Directory _resolveAppLocalDir() {
     final env = Platform.environment;
+    if (Platform.isMacOS) {
+      final home = env['HOME'];
+      if (home != null && home.isNotEmpty) {
+        return Directory(
+          p.join(home, 'Library', 'Application Support', 'Octodo'),
+        );
+      }
+    }
     if (Platform.isWindows) {
       final local = env['LOCALAPPDATA'];
       if (local != null && local.isNotEmpty) {
@@ -1024,6 +1224,14 @@ class UpdateController {
 
   Directory _resolveAppRoamingDir() {
     final env = Platform.environment;
+    if (Platform.isMacOS) {
+      final home = env['HOME'];
+      if (home != null && home.isNotEmpty) {
+        return Directory(
+          p.join(home, 'Library', 'Application Support', 'Octodo'),
+        );
+      }
+    }
     if (Platform.isWindows) {
       final roaming = env['APPDATA'];
       if (roaming != null && roaming.isNotEmpty) {
@@ -1041,7 +1249,7 @@ class UpdateController {
     final uri = Uri.parse(release.zipUrl.toString());
     final last = uri.pathSegments.isNotEmpty
         ? uri.pathSegments.last
-        : 'octodo-${release.version}-windows-x64.zip';
+        : 'octodo-${release.version}-${currentAssetToken()}.zip';
     return last;
   }
 

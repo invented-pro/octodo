@@ -23,10 +23,24 @@ import 'dart:io';
 import 'crash_sentinel.dart';
 import 'install_paths.dart';
 import 'staged_apply.dart';
+import '../release_resolver.dart';
 
 const String kHelperFlagEnv = 'OCTODO_UPDATE_HELPER';
 const String kHelperPayloadEnv = 'OCTODO_UPDATE_PAYLOAD';
 const String kHelperPidEnv = 'OCTODO_UPDATE_PID';
+
+/// Basename of the GUI executable inside the running .app bundle
+/// (macOS bundle-swap flow only). The controller forwards the
+/// original app's executable name because the helper's own
+/// `Platform.resolvedExecutable` basename is `octodo_helper` —
+/// after the swap there is no way to derive the app binary's name
+/// from the helper's path.
+const String kHelperAppExeEnv = 'OCTODO_UPDATE_APP_EXE';
+
+/// Fallback GUI binary name when [kHelperAppExeEnv] is absent
+/// (older controller builds). Matches PRODUCT_NAME in
+/// macos/Runner/Configs/AppInfo.xcconfig.
+const String kDefaultAppBundleExecutable = 'Octodo';
 
 /// True when the current process was started in helper mode. The
 /// `main()` entry checks this BEFORE doing any Flutter init.
@@ -47,10 +61,21 @@ Future<int> runUpdateHelper() async {
   }
   final pidStr = env[kHelperPidEnv];
   final pidToIgnore = int.tryParse(pidStr ?? '') ?? 0;
+  final appExeName =
+      env[kHelperAppExeEnv]?.isNotEmpty == true
+          ? env[kHelperAppExeEnv]
+          : kDefaultAppBundleExecutable;
 
   try {
-    final paths = InstallerPaths.fromVersion(version: payloadVersion);
-    await StagedApply.run(paths: paths, pidToIgnore: pidToIgnore);
+    final paths = InstallerPaths.fromVersion(
+      version: payloadVersion,
+      assetToken: currentAssetToken(),
+    );
+    await StagedApply.run(
+      paths: paths,
+      pidToIgnore: pidToIgnore,
+      appExecutableName: appExeName,
+    );
     return 0;
   } catch (e) {
     await writeHelperCrashSentinel(

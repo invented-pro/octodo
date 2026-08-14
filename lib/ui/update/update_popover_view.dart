@@ -6,6 +6,8 @@
 // One body per [UpdateState]. Click handlers call back into the
 // [UpdateController] passed in at show time.
 
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -230,8 +232,11 @@ class _AvailableBody extends StatelessWidget {
               const SizedBox(height: 14),
               Text(
                 isStore
-                    ? 'Updates for the Store version are delivered '
-                        'by Microsoft Store.'
+                    ? (Platform.isMacOS
+                        ? 'Updates for the Mac App Store version are '
+                            'delivered by the Mac App Store.'
+                        : 'Updates for the Store version are delivered '
+                            'by Microsoft Store.')
                     : 'The download is fetched from GitHub. The SHA-256 of '
                         'the zip is checked against the sidecar before the '
                         'running app is replaced.',
@@ -270,15 +275,17 @@ class _AvailableBody extends StatelessWidget {
                 // user can retry or read the Store URL.
                 onPressed: () async {
                   final ok = await launchUrl(
-                    Uri.parse(kAppStoreUrl),
+                    Uri.parse(kPlatformStoreUrl),
                     mode: LaunchMode.externalApplication,
                   );
                   if (!ok) {
                     if (!context.mounted) return;
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
-                        content: const Text(
-                            'Could not open the Microsoft Store.'),
+                        content: Text(
+                            Platform.isMacOS
+                                ? 'Could not open the Mac App Store page.'
+                                : 'Could not open the Microsoft Store.'),
                         backgroundColor: palette.accentPink,
                         duration: const Duration(seconds: 3),
                       ),

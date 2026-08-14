@@ -79,4 +79,78 @@ void main() {
       }
     });
   });
+
+  group('InstallerPaths.fromVersion (macOS bundle layout)', () {
+    const bundleExe =
+        '/Applications/Octodo.app/Contents/MacOS/Octodo';
+
+    test('derives bundleSwap strategy + install dir above the bundle', () {
+      final paths = InstallerPaths.fromVersion(
+        version: '1.2.3',
+        resolvedExecutable: bundleExe,
+        overrideLocalAppData: Directory('/tmp'),
+        assetToken: 'macos-arm64',
+      );
+
+      expect(paths.applyStrategy, ApplyStrategy.bundleSwap);
+      expect(p.basename(paths.appBundleRoot!.path), 'Octodo.app');
+      // The swap target is the directory HOLDING the bundle.
+      expect(paths.installDir.path, '/Applications');
+    });
+
+    test('names the zip after the asset token', () {
+      final paths = InstallerPaths.fromVersion(
+        version: '1.2.3',
+        resolvedExecutable: bundleExe,
+        overrideLocalAppData: Directory('/tmp'),
+        assetToken: 'macos-arm64',
+      );
+      expect(paths.zipFile.path,
+          endsWith('octodo-v1.2.3-macos-arm64.zip'));
+    });
+
+    test('non-bundle executable keeps the per-file-copy layout', () {
+      final paths = InstallerPaths.fromVersion(
+        version: '1.2.3',
+        resolvedExecutable: '/opt/Octodo/octodo',
+        overrideLocalAppData: Directory('/tmp'),
+      );
+      expect(paths.applyStrategy, ApplyStrategy.perFileCopy);
+      expect(paths.appBundleRoot, isNull);
+      expect(p.basename(paths.installDir.path), 'Octodo');
+    });
+
+    test('explicit bundleSwap without a bundle root is rejected', () {
+      expect(
+        () => InstallerPaths.fromVersion(
+          version: '1.2.3',
+          resolvedExecutable: '/opt/Octodo/octodo',
+          applyStrategy: ApplyStrategy.bundleSwap,
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('macOS staging prefers ~/Library/Application Support', () {
+      if (!Platform.isMacOS) return; // HOME-layout check is mac-only
+      final home = Platform.environment['HOME'];
+      if (home == null || home.isEmpty) return;
+      final paths = InstallerPaths.fromVersion(
+        version: '1.2.3',
+        resolvedExecutable: bundleExe,
+        assetToken: 'macos-arm64',
+      );
+      expect(
+        paths.stagingDir.path,
+        p.join(
+          home,
+          'Library',
+          'Application Support',
+          'Octodo',
+          'updates',
+          '1.2.3',
+        ),
+      );
+    });
+  });
 }
