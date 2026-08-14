@@ -374,15 +374,12 @@ jobs:
           shasum -a 256 "$ZIP" | awk '{print $1}' > "$SHA"
 
           # ----------------------------------------------------------
-          # DMG for first install (drag into Applications).
+          # DMG for first install (styled drag-to-Install window:
+          # background + icon layout are baked by tool/make_dmg.sh).
           # ----------------------------------------------------------
           echo "==> creating DMG"
-          STAGE=$(mktemp -d)
-          cp -R "$APP" "$STAGE/Octodo.app"
-          ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname Octodo \
-            -srcfolder "$STAGE" -ov -format UDZO "$DMG"
-          rm -rf "$STAGE"
+          swift tool/dmg_background.swift background.png
+          tool/make_dmg.sh "$APP" "$DMG" background.png
 
           if [[ -n "$MACOS_SIGNING_IDENTITY" ]]; then
             echo "==> signing + notarizing DMG"
