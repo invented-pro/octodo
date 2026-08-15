@@ -288,12 +288,6 @@ jobs:
           echo "Available signing identities:"
           security find-identity -v -p codesigning "$KEYCHAIN"
 
-      - name: Clean up CI keychain
-        if: always() && env.MACOS_SIGNING_IDENTITY != ''
-        run: |
-          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
-          security delete-keychain "$KEYCHAIN" || true
-
       - name: Build, zip, sidecar SHA-256
         id: build
         shell: bash
@@ -512,6 +506,17 @@ jobs:
             octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip
             octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip.sha256
             Octodo-v${{ steps.build.outputs.ver }}-macos-arm64.dmg
+
+      # Must be the LAST step of the job: `if: always()` on a normal
+      # step runs it as soon as its turn arrives, so placing it right
+      # after the import step deleted the keychain before codesign
+      # ever ran ("no identity found"). Here it only fires after every
+      # signing/notarization/upload step has finished.
+      - name: Clean up CI keychain
+        if: always() && env.MACOS_SIGNING_IDENTITY != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          security delete-keychain "$KEYCHAIN" || true
 
   # ---------------------------------------------------------------
   # Fan-in: build ONE multi-platform manifest.json for R2 after both
