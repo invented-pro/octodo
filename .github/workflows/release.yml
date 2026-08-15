@@ -389,6 +389,17 @@ jobs:
           }
           sign_frameworks
 
+          # Nested executables in Contents/MacOS are NOT re-signed by
+          # the main bundle signing pass — octodo_helper keeps its
+          # Dart-ad-hoc signature and notarization rejects it. Sign it
+          # explicitly, inside-out, before the main bundle.
+          if [[ -f "$APP/Contents/MacOS/octodo_helper" ]]; then
+            echo "==> signing octodo_helper"
+            /usr/bin/codesign --force $HR \
+              "${TS[@]}" --sign "$IDENTITY" \
+              "$APP/Contents/MacOS/octodo_helper"
+          fi
+
           echo "==> signing main bundle"
           /usr/bin/codesign --force $HR \
             "${TS[@]}" --sign "$IDENTITY" \
