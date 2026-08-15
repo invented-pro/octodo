@@ -123,7 +123,13 @@ InstallDistribution resolveInstallDistribution({
   }
   final bundleRoot = macAppBundleRoot(exe);
   if (bundleRoot != null) {
-    final receipt = p.join(bundleRoot, 'Contents', '_MASReceipt', 'receipt');
+    // Apple-defined POSIX segments, joined with literal '/' so the
+    // built path is host-independent: the receipt only exists inside
+    // a macOS bundle (POSIX path), and a host `p.join` would emit
+    // backslashes when a POSIX bundle path is examined on Windows.
+    // File.existsSync accepts '/' on Windows too, so the degenerate
+    // Windows-host `.app`-named-directory case still probes fine.
+    final receipt = '$bundleRoot/Contents/_MASReceipt/receipt';
     final exists = masReceiptExists ?? ((path) => File(path).existsSync());
     if (exists(receipt)) {
       return InstallDistribution.store;

@@ -252,6 +252,10 @@ class StagedApply {
     for (final entry in archive) {
       final name = entry.name;
       if (entry.isSymbolicLink) {
+        // Validate on EVERY platform — a hostile link (absolute /
+        // escaping target) is a malformed payload even where we
+        // skip creation below.
+        _validateSymlinkPayload(target, name, entry.nameOfLinkedFile);
         // POSIX: recreate the link (ditto zips from the macOS
         // release workflow carry framework-layout symlinks like
         // `Versions/Current -> A`). Windows: skip — Flutter
@@ -283,17 +287,18 @@ class StagedApply {
     }
   }
 
-  /// Recreate a relative symlink [linkName] -> [linkTarget] under
-  /// [root], refusing targets that resolve outside the extract
-  /// root. Real .app bundles only ever contain relative,
-  /// inside-bundle links (`Versions/Current`, `Resources ->
-  /// Versions/Current/Resources`), so anything else is treated as
-  /// a hostile payload.
-  static Future<void> _createSymlink(
+  /// Validate a zip symlink entry against the extract-root
+  /// contract: relative targets only, resolving inside [root].
+  /// Real .app bundles only ever contain relative, inside-bundle
+  /// links (`Versions/Current`, `Resources -> Versions/Current/
+  /// Resources`), so anything else is treated as a hostile
+  /// payload. Runs on every platform — Windows skips link
+  /// creation but must still refuse a malformed payload.
+  static void _validateSymlinkPayload(
     Directory root,
     String linkName,
     String linkTarget,
-  ) async {
+  ) {
     if (p.isAbsolute(linkTarget)) {
       throw StagedApplyException(
         'Refusing absolute symlink target: $linkName -> $linkTarget',
@@ -309,6 +314,17 @@ class StagedApply {
         '$linkName -> $linkTarget',
       );
     }
+  }
+
+  /// Recreate the validated relative symlink [linkName] ->
+  /// [linkTarget] under [root]. Callers must run
+  /// [_validateSymlinkPayload] first.
+  static Future<void> _createSymlink(
+    Directory root,
+    String linkName,
+    String linkTarget,
+  ) async {
+    final linkPath = resolveTargetPath(root.path, linkName).path;
     final link = Link(linkPath);
     if (await link.exists()) {
       await link.delete();
