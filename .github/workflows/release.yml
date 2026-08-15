@@ -213,7 +213,11 @@ jobs:
             octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
 
   build-macos:
-    runs-on: macos-14   # arm64 (Apple Silicon) runner
+    # arm64 (Apple Silicon) runner. Newer image than macos-14 so the
+    # launch smoke test enforces code-signing rules like modern user
+    # macOS does (a macos-14 runner happily launched a build that
+    # crashed at dyld launch on macOS 26).
+    runs-on: macos-latest
     env:
       R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
       R2_BUCKET: ${{ vars.R2_BUCKET }}
@@ -310,25 +314,37 @@ jobs:
           # bundle last, --deep ONLY on nested frameworks — a --deep
           # pass over the main bundle would overwrite the nested
           # signatures). With Developer ID secrets present we sign for
-          # real and notarize; otherwise ad-hoc ("-"), which runs fine
-          # and keeps the self-update path fully functional (Gatekeeper
-          # only assesses quarantined first downloads, and the in-app
+          # real and notarize; otherwise ad-hoc ("-") WITHOUT Hardened
+          # Runtime (see the HR note below), which runs fine and keeps
+          # the self-update path fully functional (Gatekeeper only
+          # assesses quarantined first downloads, and the in-app
           # update path never quarantines).
           # ----------------------------------------------------------
+          # HR (Hardened Runtime) is ONLY enabled with a real identity.
+          # Hardened Runtime implies Library Validation: every loaded
+          # image must share the main executable's Team ID. Ad-hoc
+          # signatures carry no Team ID — each is its own identity — so
+          # runtime + ad-hoc makes dyld abort at launch with "different
+          # Team IDs" for the embedded frameworks. Verified crashing on
+          # macOS 26; the macos-14 runner smoke test did NOT catch it.
+          # Ad-hoc builds are never notarized, so skipping runtime
+          # costs nothing.
           if [[ -n "$MACOS_SIGNING_IDENTITY" ]]; then
             IDENTITY="$MACOS_SIGNING_IDENTITY"
             TS=(--timestamp)
+            HR="--options=runtime"
           else
             IDENTITY="-"
             TS=(--timestamp=none)
-            echo "::notice::No MACOS_SIGNING_IDENTITY secret — signing ad-hoc (self-update OK, first-run Gatekeeper dialog expected)."
+            HR=""
+            echo "::notice::No MACOS_SIGNING_IDENTITY secret — signing ad-hoc without Hardened Runtime (self-update OK, first-run Gatekeeper dialog expected)."
           fi
 
           sign_frameworks() {
             if [[ -d "$APP/Contents/Frameworks" ]]; then
               while IFS= read -r -d '' fw; do
                 echo "==> signing framework $(basename "$fw")"
-                /usr/bin/codesign --force --options runtime \
+                /usr/bin/codesign --force $HR \
                   "${TS[@]}" --sign "$IDENTITY" --deep "$fw"
               done < <(find "$APP/Contents/Frameworks" \
                 -mindepth 1 -maxdepth 1 -print0)
@@ -337,7 +353,7 @@ jobs:
           sign_frameworks
 
           echo "==> signing main bundle"
-          /usr/bin/codesign --force --options runtime \
+          /usr/bin/codesign --force $HR \
             "${TS[@]}" --sign "$IDENTITY" \
             "$APP"
 
