@@ -2,7 +2,7 @@
 
 **A Terminal Complex for CLI-Maxing Developers.**
 
-A multi-workspace terminal complex built natively on Rust + Flutter for Windows and macOS. Not a bloated web wrapper, because RAM is too expensive, same as your time and attention.
+A multi-workspace terminal complex built natively on Rust + Flutter for Windows and macOS. Not a bloated web wrapper—RAM is too expensive, same as your time and attention.
 
 English | [中文简体](./README.zh-CN.md)
 
@@ -12,18 +12,33 @@ English | [中文简体](./README.zh-CN.md)
 
 ## Overview
 
-`Octodo` packs multi terminals right into a single window as workspace. Each workspace  runs its own shell sessions, tabs, and split panes—so you can pretend you know exactly what is happening in all of them at once. 
+`Octodo` packs multi-terminals right into a single window as workspace. Each workspace  runs its own shell sessions, tabs, and split panes—so you can pretend you know exactly what is happening in all of them at once. 
 
 <img src="docs/images/Screenshot1.png" alt="Octodo Interface" align="center" width="100%" />
 
+---
+
 ## Highlights
 
-* **Rust-Fueled Speed:** Powered by the **Alacritty** GPU renderer. Sub-millisecond keystroke rendering, zero stutter.
-* **Flutter-Native UI:** Fluid, multi-pane-tab layouts built natively for **Windows** and **macOS**. 
-* **Keyboard First, Mouse Matters:** Driven by keyboard shortcuts, and also equipped with mouse **select-to-copy** and **right-click-to-paste** for when your left hand is busy holding coffee.
-* **Auto-Discovery:** Instantly detects all available local shells and **WSL** distributions out of the box.
-* **Multilingual Support:** Full **IME support** for seamless multi-language typing.
-* **Self-Maintaining:** Silent, in-app **auto-upgrades** for both OS ecosystems. No manual fetching required.
+- **Rust-Fueled Speed**
+  - Powered by **Alacritty** GPU renderer.
+  - Sub-millisecond keystroke rendering, zero stutter.
+- **Flutter-Native UI**
+  - Fluid, multi-pane-tab layouts. 
+  - Natively built for **Windows** and **macOS**.
+- **Keyboard First, Mouse Matters**
+  - Keyboard shortcuts driven.
+  - Mouse **select-to-copy** and **right-click-to-paste** for when your left hand is busy holding coffee.
+- **Auto-Discovery**
+  - Auto detects all available local shells.
+  - Friendly with **WSL** distributions out of box.
+- **Multilingual Support**
+  - Full **IME support** for multi-language typing.
+- **Self-Maintaining**
+  - Silent, in-app **auto-upgrade**. 
+  - No manual fetching required.
+
+---
 
 ## Platform Support
 
@@ -32,6 +47,8 @@ English | [中文简体](./README.zh-CN.md)
 | 1   | Windows               | ✅             |
 | 2   | macOS (Apple Silicon) | ✅             |
 | 3   | Linux                 | ⏳ Coming Soon |
+
+---
 
 ## Usage & Installation
 
