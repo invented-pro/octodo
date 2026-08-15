@@ -251,6 +251,49 @@ jobs:
           rustc --version
           cargo --version
 
+      # Import the Developer ID Application certificate (exported as
+      # .p12, base64-encoded) into a throwaway keychain so codesign can
+      # use it. Only runs when MACOS_SIGNING_IDENTITY is configured;
+      # ad-hoc builds skip this entirely.
+      - name: Import signing certificate into CI keychain
+        if: env.MACOS_SIGNING_IDENTITY != ''
+        env:
+          MACOS_CERT_BASE64: ${{ secrets.MACOS_CERT_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          # Random per-run password; the keychain dies with the runner.
+          KC_PWD="$(uuidgen)"
+
+          security create-keychain -p "$KC_PWD" "$KEYCHAIN"
+          # Belts and suspenders for headless codesign access:
+          # -A lets any binary use the key, set-key-partition-list
+          # marks it accessible without a GUI prompt.
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PWD" "$KEYCHAIN"
+
+          printf '%s' "$MACOS_CERT_BASE64" | base64 --decode > cert.p12
+          security import cert.p12 \
+            -P "$MACOS_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm -f cert.p12
+
+          # Put the build keychain at the front of the search list
+          # (keeping login.keychain-db available).
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          security set-key-partition-list \
+            -S apple-tool:,apple: -s -k "$KC_PWD" "$KEYCHAIN"
+
+          echo "Available signing identities:"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Clean up CI keychain
+        if: always() && env.MACOS_SIGNING_IDENTITY != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          security delete-keychain "$KEYCHAIN" || true
+
       - name: Build, zip, sidecar SHA-256
         id: build
         shell: bash
