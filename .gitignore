@@ -12,7 +12,9 @@
 .swiftpm/
 .opencode/
 migrate_working_dir/
-installer/
+# Project-root scratch dir only — the leading slash stops the rule
+# from also matching source dirs like lib/src/update/installer/.
+/installer/
 
 # IntelliJ related
 *.iml
