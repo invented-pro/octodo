@@ -22,6 +22,16 @@ name: msstore-publish
 #      a tenant app, signInAudience = AzureADMyOrg, associated with the
 #      Partner Center account). Must be fixed in the Azure portal /
 #      Partner Center, not in this file.
+#      CONFIRMED 2026-08-21 (run 32477720889): app 'Octodo.4e08105e2a31'
+#      rejected with "configured for use by Microsoft Account users
+#      only. Please use the /consumers endpoint." A valid secret on a
+#      personal-audience app still fails here. Fix: register a NEW app
+#      in an Entra tenant associated with Partner Center (Account
+#      settings > Tenant management), signInAudience = My org only,
+#      add its client secret, then add the app under Partner Center >
+#      Account settings > Users (Developer role) and point the
+#      AZURE_AD_TENANT_ID / AZURE_AD_APPLICATION_CLIENT_ID /
+#      AZURE_AD_APPLICATION_SECRET secrets at it.
 #   3. `msstore publish` was invoked with a nonexistent `--package`
 #      flag — the CLI takes the .msix path as the positional argument
 #      (or -i/--inputDirectory) plus -id/--appId.
