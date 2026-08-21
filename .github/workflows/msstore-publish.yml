@@ -1,200 +1,232 @@
-# ============================================================================
-# THIS WORKFLOW IS DISABLED.
-#
-# The MSIX build step, the MSStore CLI setup, and the publish steps are all
-# commented out below. No job runs when this file is pushed.
-#
-# To re-enable (the previous attempt failed because the Azure AD app
-# registration for Store submission is configured as PersonalMicrosoftAccount
-# with a 'windows' property, which the Ingestion API's token endpoint rejects
-# with AADSTS9002331; the fix is a new Azure AD tenant app with
-# signInAudience=AzureADMyOrg, linked in Partner Center):
-#
-#   1. Restore the file from the last commit before this disable:
-#        git log --oneline -- .github/workflows/msstore-publish.yml
-#        git show <commit>:.github/workflows/msstore-publish.yml \
-#          > .github/workflows/msstore-publish.yml
-#   2. Update GitHub secrets (AZURE_AD_APPLICATION_CLIENT_ID,
-#      AZURE_AD_APPLICATION_SECRET) for the new AAD tenant app.
-#   3. Delete + re-push the v* tag to re-trigger.
-# ============================================================================
+name: msstore-publish
 
-# name: msstore-publish
+# Publishes the MSIX build of the tagged release to the Microsoft
+# Store. Intentionally a SEPARATE workflow from release.yml: both
+# trigger on the same `v*` tag and run concurrently, so the slow
+# Store submission (baseline validation blocks in-job; full
+# certification takes hours/days) can never delay or fail the
+# zip / SHA-256 / R2 mirror / GitHub-Release assets that release.yml
+# produces. Wall-clock is max(build, publish), not the sum.
 #
-# # Publishes the MSIX build of the tagged release to the Microsoft
-# # Store. Intentionally a SEPARATE workflow from release.yml: both
-# # trigger on the same `v*` tag and run concurrently, so the slow
-# # Store submission (baseline validation blocks in-job; full
-# # certification takes hours/days) can never delay or fail the
-# # zip / SHA-256 / R2 mirror / GitHub-Release assets that release.yml
-# # produces. Wall-clock is max(build, publish), not the sum.
-# on:
-#   push:
-#     tags: ['v*']
+# workflow_dispatch (with a version input) allows testing the whole
+# pipeline without cutting a release tag.
 #
-# # This workflow only reads the repo (checkout) and calls the Store
-# # API; it creates no releases and pushes nothing back, so the default
-# # write scopes of GITHUB_TOKEN are narrowed to read-only.
-# permissions:
-#   contents: read
-#
-# jobs:
-#   publish-msstore:
-#     runs-on: windows-latest
-#     # Skip the Store path for prerelease tags (e.g. v1.5.2-rc.1). The
-#     # Store has no prerelease channel — a submission that clears
-#     # certification goes live to ALL Store users, so RC builds must
-#     # stay on the GitHub/R2 side only (release.yml still ships them,
-#     # marked as GitHub prereleases).
-#     if: ${{ !contains(github.ref_name, '-') }}
-#     steps:
-#       - uses: actions/checkout@v4
-#
-#       # Pin to the same Flutter version as release.yml / mise.toml for
-#       # reproducible builds. cache: true preserves ~/.pub-cache across
-#       # runs of the same Flutter version.
-#       - uses: subosito/flutter-action@v2
-#         with:
-#           flutter-version: '3.44.4'
-#           channel: stable
-#           cache: true
-#
-#       # Required because flutter_alacritty pulls in a Rust cdylib
-#       # (rust_lib_flutter_alacritty) — that plugin declares
-#       # ffiPlugin: true, so Flutter invokes
-#       # `cargo build --target x86_64-pc-windows-msvc` during
-#       # `flutter build windows`. Without rustc + cargo on PATH the
-#       # build fails at the plugin-build step. Same rationale as
-#       # release.yml.
-#       - name: Install Rust toolchain
-#         uses: dtolnay/rust-toolchain@stable
-#
-#       - name: Verify toolchain
-#         shell: pwsh
-#         run: |
-#           Write-Host "--- Flutter ---"
-#           flutter --version
-#           Write-Host "--- Rust ---"
-#           rustc --version
-#           cargo --version
-#
-#       - name: Build MSIX
-#         id: build
-#         shell: pwsh
-#         run: |
-#           $ErrorActionPreference = 'Stop'
-#
-#           # github.ref_name is e.g. "v1.2.3". Strip the leading "v".
-#           # Prerelease tags were already skipped at the job level, so
-#           # $ver is always a clean X.Y.Z here.
-#           $tag = "${{ github.ref_name }}"
-#           $ver = $tag -replace '^v',''
-#
-#           if ($ver -notmatch '^\d+\.\d+\.\d+$') {
-#             throw "Tag '$tag' is not semver-shaped (expected vX.Y.Z)"
-#           }
-#
-#           # MSIX Identity Version is a STRICT 4-part numeric
-#           # (major.minor.build.revision; each part is a 16-bit uint,
-#           # 0-65535) and the Store requires each submission to be
-#           # strictly greater than the last. Map the tag to
-#           # major.minor.patch and use GITHUB_RUN_NUMBER as the revision.
-#           #
-#           # Uniqueness caveat: GITHUB_RUN_NUMBER is stable across
-#           # re-runs of the SAME run (only GITHUB_RUN_ATTEMPT increments),
-#           # so clicking "Re-run" after a publish that already registered
-#           # this version with the Store will be rejected as a duplicate.
-#           # The 16-bit-per-part constraint prevents encoding both run and
-#           # attempt into the single revision field, so recovery for a
-#           # Store-rejected re-run is to delete + re-push the tag (which
-#           # allocates a fresh run number), NOT to click Re-run.
-#           $msixVersion = "$ver.$env:GITHUB_RUN_NUMBER"
-#           Write-Host "Building octodo $ver (msix version $msixVersion)"
-#
-#           flutter pub get
-#           flutter build windows --release `
-#             --build-name=$ver `
-#             --build-number=$env:GITHUB_RUN_NUMBER
-#
-#           # Bundle the standalone update helper into the Release dir
-#           # so it ships inside the MSIX too — same rationale as
-#           # release.yml: octodo.exe statically imports plugin DLLs
-#           # that Windows locks into the process address space, so the
-#           # in-place self-update needs a separate binary. Delegates to
-#           # tool/build_helper.dart so the dev and CI paths can't drift.
-#           dart run tool/build_helper.dart
-#
-#           # --build-windows false is MANDATORY. msix:create defaults
-#           # to re-running `flutter build windows` itself (see msix
-#           # package lib/msix.dart _buildMsixFiles), which would (a)
-#           # discard the --build-name/--build-number override above and
-#           # (b) regenerate the Release dir, wiping octodo_helper.exe we
-#           # just placed. With it off, msix packages the Release dir we
-#           # built, verbatim.
-#           #
-#           # --version injects the 4-part version. Everything else is
-#           # read directly from the msix_config block in pubspec.yaml
-#           # (identity_name, output_path=installer/, output_name=Octodo,
-#           # store=true) — keeping pubspec.yaml the single source of
-#           # truth, per project convention.
-#           dart run msix:create --build-windows false --version $msixVersion
-#
-#           $msix = 'installer\Octodo.msix'
-#           if (-not (Test-Path $msix)) {
-#             throw "MSIX not found at $msix"
-#           }
-#           "msix=$msix" | Out-File -Append -Encoding ascii -FilePath $env:GITHUB_OUTPUT
-#           Write-Host "Built $msix"
-#
-#       # Sets up the MSStore Developer CLI (the `msstore` command) on
-#       # PATH. NOTE: the action repo is `microsoft-store-apppublisher`
-#       # (one word) — the hyphenated `microsoft-store-app-publisher`
-#       # does not exist and 404s.
-#       #
-#       # version is pinned (not left at the action's default `latest`)
-#       # because the CLI is pre-1.0 (v0.3.x), where breaking changes to
-#       # the publish/reconfigure flag shape are allowed between minor
-#       # versions. A breaking change would fail a release tag push, so
-#       # this step is pinned like Flutter and bumped deliberately.
-#       - name: Setup MSStore Developer CLI
-#         uses: microsoft/microsoft-store-apppublisher@v1.4
-#         with:
-#           version: 'v0.3.9'
-#
-#       - name: Configure Store Credentials
-#         shell: pwsh
-#         run: |
-#           msstore reconfigure `
-#             --tenantId ${{ secrets.AZURE_AD_TENANT_ID }} `
-#             --sellerId ${{ secrets.SELLER_ID }} `
-#             --clientId ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }} `
-#             --clientSecret ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
-#
-#       # Publish the MSIX. By default `msstore publish` blocks until
-#       # the submission's baseline validation passes (minutes); full
-#       # Store certification completes asynchronously afterward
-#       # (hours/days). Because this is its own workflow, that wait
-#       # never affects release.yml's assets.
-#       #
-#       # -id is the repo variable Store_Product_ID (43D421A8.Octodo).
-#       # If the CLI ever rejects it as not-a-Store-Product-ID, drop the
-#       # -id flag — `msstore publish` can also auto-resolve the product
-#       # from the MSIX identity_name embedded in the package.
-#       - name: Publish MSIX Package
-#         shell: pwsh
-#         run: |
-#           msstore publish `
-#             --package "${{ steps.build.outputs.msix }}" `
-#             -id ${{ vars.Store_Product_ID }}
-#
-#       # ---------------------------------------------------------------
-#       # Post-Publication Custom Callback System (disabled).
-#       # Kept for future use; would run only if the Publish step above
-#       # passed. Commented out so no external endpoint is required today.
-#       # ---------------------------------------------------------------
-#       # - name: Trigger Webhook Callback
-#       #   shell: pwsh
-#       #   run: |
-#       #     curl -X POST https://your-server.com `
-#       #       -H "Content-Type: application/json" `
-#       #       -d "{\"status\": \"published\", \"repository\": \"${{ github.repository }}\", \"tag\": \"${{ github.ref_name }}\"}"
+# History / root causes of the Aug-12 failures (fixed here):
+#   1. `msstore reconfigure` crashed with System.FormatException in
+#      Convert.ToInt32(sellerId) — SELLER_ID was not numeric. Fixed by
+#      re-setting the secret to the numeric Seller ID (Partner Center >
+#      Account settings > Organization profile > Legal info).
+#   2. AADSTS9002331: the Entra app registration used for Store
+#      submission had signInAudience = PersonalMicrosoftAccount, which
+#      the ingestion token endpoint rejects (client credentials require
+#      a tenant app, signInAudience = AzureADMyOrg, associated with the
+#      Partner Center account). Must be fixed in the Azure portal /
+#      Partner Center, not in this file.
+#   3. `msstore publish` was invoked with a nonexistent `--package`
+#      flag — the CLI takes the .msix path as the positional argument
+#      (or -i/--inputDirectory) plus -id/--appId.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (X.Y.Z) to build and submit — manual runs have no tag'
+        required: true
+        type: string
+
+# This workflow only reads the repo (checkout) and calls the Store
+# API; it creates no releases and pushes nothing back, so the default
+# write scopes of GITHUB_TOKEN are narrowed to read-only.
+permissions:
+  contents: read
+
+jobs:
+  publish-msstore:
+    runs-on: windows-latest
+    # Skip the Store path for prerelease tags (e.g. v1.5.2-rc.1). The
+    # Store has no prerelease channel — a submission that clears
+    # certification goes live to ALL Store users, so RC builds must
+    # stay on the GitHub/R2 side only (release.yml still ships them,
+    # marked as GitHub prereleases). Manual dispatch always runs.
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to the same Flutter version as release.yml / mise.toml for
+      # reproducible builds. cache: true preserves ~/.pub-cache across
+      # runs of the same Flutter version.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.4'
+          channel: stable
+          cache: true
+
+      # Required because flutter_alacritty pulls in a Rust cdylib
+      # (rust_lib_flutter_alacritty) — that plugin declares
+      # ffiPlugin: true, so Flutter invokes
+      # `cargo build --target x86_64-pc-windows-msvc` during
+      # `flutter build windows`. Without rustc + cargo on PATH the
+      # build fails at the plugin-build step. Same rationale as
+      # release.yml.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify toolchain
+        shell: pwsh
+        run: |
+          Write-Host "--- Flutter ---"
+          flutter --version
+          Write-Host "--- Rust ---"
+          rustc --version
+          cargo --version
+
+      # Fail fast with a human-readable annotation when a secret is
+      # malformed, instead of a cryptic CLI stack trace mid-run.
+      # Validates SHAPE ONLY — values are never printed.
+      - name: Validate Store credentials
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $guidRx  = '^[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}$'
+          $tenant  = '${{ secrets.AZURE_AD_TENANT_ID }}'.Trim()
+          $client  = '${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}'.Trim()
+          $secret  = '${{ secrets.AZURE_AD_APPLICATION_SECRET }}'.Trim()
+          $seller  = '${{ secrets.SELLER_ID }}'.Trim()
+          $product = '${{ vars.STORE_PRODUCT_ID }}'.Trim()
+
+          $ok = $true
+          if ($tenant -notmatch $guidRx) {
+            Write-Host '::error title=AZURE_AD_TENANT_ID::Secret is not a GUID. Expected the Entra ID Tenant ID (portal.azure.com > Microsoft Entra ID > Overview > Tenant ID).'
+            $ok = $false
+          }
+          if ($client -notmatch $guidRx) {
+            Write-Host '::error title=AZURE_AD_APPLICATION_CLIENT_ID::Secret is not a GUID. Expected the Application (client) ID of the Entra app registration used for Store submission.'
+            $ok = $false
+          }
+          if ([string]::IsNullOrWhiteSpace($secret)) {
+            Write-Host '::error title=AZURE_AD_APPLICATION_SECRET::Secret is empty. Expected the client secret value (not the secret ID) of the Entra app registration.'
+            $ok = $false
+          }
+          if ($seller -notmatch '^\d+$') {
+            Write-Host '::error title=SELLER_ID::Secret is not numeric. Expected the Seller ID from Partner Center > Account settings > Organization profile > Legal info (digits only). A non-numeric value is what crashed the Aug-12 run with System.FormatException.'
+            $ok = $false
+          }
+          if ($product -notmatch '^[0-9A-Z]{13}\.[A-Za-z0-9]+$') {
+            Write-Host '::error title=STORE_PRODUCT_ID::Variable is malformed. Expected the Store product ID like 43D421A8.Octodo.'
+            $ok = $false
+          }
+          if (-not $ok) { exit 1 }
+          Write-Host 'Credential shapes OK.'
+
+      - name: Build MSIX
+        id: build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Tag pushes: github.ref_name is e.g. "v1.2.3" (strip the
+          # "v"). Manual dispatch: take the version from the input.
+          $ver = "${{ inputs.version }}"
+          if (-not $ver) { $ver = "${{ github.ref_name }}" -replace '^v','' }
+
+          if ($ver -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version '$ver' is not semver-shaped (expected X.Y.Z)"
+          }
+
+          # MSIX Identity Version is a STRICT 4-part numeric
+          # (major.minor.build.revision; each part is a 16-bit uint,
+          # 0-65535) and the Store requires each submission to be
+          # strictly greater than the last. Map the tag to
+          # major.minor.patch and use GITHUB_RUN_NUMBER as the revision.
+          #
+          # Uniqueness caveat: GITHUB_RUN_NUMBER is stable across
+          # re-runs of the SAME run (only GITHUB_RUN_ATTEMPT increments),
+          # so clicking "Re-run" after a publish that already registered
+          # this version with the Store will be rejected as a duplicate.
+          # The 16-bit-per-part constraint prevents encoding both run and
+          # attempt into the single revision field, so recovery for a
+          # Store-rejected re-run is to delete + re-push the tag (which
+          # allocates a fresh run number), NOT to click Re-run.
+          $msixVersion = "$ver.$env:GITHUB_RUN_NUMBER"
+          Write-Host "Building octodo $ver (msix version $msixVersion)"
+
+          flutter pub get
+          flutter build windows --release `
+            --build-name=$ver `
+            --build-number=$env:GITHUB_RUN_NUMBER
+
+          # Bundle the standalone update helper into the Release dir
+          # so it ships inside the MSIX too — same rationale as
+          # release.yml: octodo.exe statically imports plugin DLLs
+          # that Windows locks into the process address space, so the
+          # in-place self-update needs a separate binary. Delegates to
+          # tool/build_helper.dart so the dev and CI paths can't drift.
+          dart run tool/build_helper.dart
+
+          # --build-windows false is MANDATORY. msix:create defaults
+          # to re-running `flutter build windows` itself (see msix
+          # package lib/msix.dart _buildMsixFiles), which would (a)
+          # discard the --build-name/--build-number override above and
+          # (b) regenerate the Release dir, wiping octodo_helper.exe we
+          # just placed. With it off, msix packages the Release dir we
+          # built, verbatim.
+          #
+          # --version injects the 4-part version. Everything else is
+          # read directly from the msix_config block in pubspec.yaml
+          # (identity_name, output_path=installer/, output_name=Octodo,
+          # store=true) — keeping pubspec.yaml the single source of
+          # truth, per project convention.
+          dart run msix:create --build-windows false --version $msixVersion
+
+          $msix = 'installer\Octodo.msix'
+          if (-not (Test-Path $msix)) {
+            throw "MSIX not found at $msix"
+          }
+          "msix=$msix" | Out-File -Append -Encoding ascii -FilePath $env:GITHUB_OUTPUT
+          Write-Host "Built $msix"
+
+      # Sets up the MSStore Developer CLI (the `msstore` command) on
+      # PATH. NOTE: the action repo is `microsoft-store-apppublisher`
+      # (one word) — the hyphenated `microsoft-store-app-publisher`
+      # does not exist and 404s. (The setup-msstore-cli action from
+      # the user reference does not exist under microsoft/.)
+      #
+      # version is pinned (not left at the action's default `latest`)
+      # because the CLI is pre-1.0 (v0.3.x/v0.4.x), where breaking
+      # changes to the publish/reconfigure flag shape are allowed
+      # between minor versions. A breaking change would fail a release
+      # tag push, so this step is pinned like Flutter and bumped
+      # deliberately. v0.4.x additionally moved to .NET 10 native AOT.
+      - name: Setup MSStore Developer CLI
+        uses: microsoft/microsoft-store-apppublisher@v1.4
+        with:
+          version: 'v0.3.9'
+
+      - name: Configure Store Credentials
+        shell: pwsh
+        run: |
+          msstore reconfigure `
+            --tenantId ${{ secrets.AZURE_AD_TENANT_ID }} `
+            --sellerId ${{ secrets.SELLER_ID }} `
+            --clientId ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }} `
+            --clientSecret ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+
+      # Publish the MSIX. The .msix path is the POSITIONAL argument
+      # (MSStore.CLI routes it to the MSIX project publisher, which
+      # extracts AppxManifest.xml to resolve identity); -id is the
+      # Store product ID. `publish` also COMMITS the submission
+      # (omit -nc/--noCommit), so no separate `msstore submission
+      # publish` step is needed.
+      #
+      # By default `msstore publish` blocks until the submission's
+      # baseline validation passes (minutes); full Store certification
+      # completes asynchronously afterward (hours/days). Because this
+      # is its own workflow, that wait never affects release.yml's
+      # assets.
+      - name: Publish MSIX Package
+        shell: pwsh
+        run: |
+          msstore publish `
+            "${{ steps.build.outputs.msix }}" `
+            -id ${{ vars.STORE_PRODUCT_ID }}
