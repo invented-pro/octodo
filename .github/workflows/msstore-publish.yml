@@ -210,7 +210,8 @@ jobs:
             --tenantId ${{ secrets.AZURE_AD_TENANT_ID }} `
             --sellerId ${{ secrets.SELLER_ID }} `
             --clientId ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }} `
-            --clientSecret ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+            --clientSecret ${{ secrets.AZURE_AD_APPLICATION_SECRET }} `
+            --verbose
 
       # Publish the MSIX. The .msix path is the POSITIONAL argument
       # (MSStore.CLI routes it to the MSIX project publisher, which
