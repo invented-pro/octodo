@@ -64,6 +64,17 @@ dev_dependencies:
   flutter_launcher_icons: "^0.14.4"
   msix: ^3.18.0
 
+# Root cause of the override below (app crashed on launch, 2026-08-25):
+# flutter_alacritty declares `flutter_rust_bridge: ^2.12.0`, so pub resolves the
+# Dart package to 2.13.0. But the plugin's prebuilt rust_lib_flutter_alacritty.dll
+# has FRB codegen 2.12.0 baked in, and FRB requires runtime and codegen versions to
+# match exactly. The startup sanity check in RustLib.init() then throws
+# "codegen version (2.12.0) should be the same as runtime version (2.13.0)" and the
+# app exits immediately. Pinning the Dart side to 2.12.0 keeps them in sync.
+# Remove this override only after flutter_alacritty ships a 2.13.0-generated DLL.
+dependency_overrides:
+  flutter_rust_bridge: 2.12.0
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
