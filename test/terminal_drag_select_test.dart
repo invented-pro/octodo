@@ -73,6 +73,100 @@ void main() {
     });
   });
 
+  group('terminalAltScreenModeFlag', () {
+    test('is 1 << 12 (kModeAltScreen)', () {
+      expect(
+        TerminalViewState.terminalAltScreenModeFlag,
+        equals(1 << 12),
+        reason:
+            'Bitmask must mirror flutter_alacritty\'s '
+            'input/term_mode.dart::kModeAltScreen (= 1 << 12 = 0x1000). '
+            'The drag-select auto-scroll gates itself off in alt-screen '
+            'apps (vim/less); if alacritty\'s TermMode bits shift, that '
+            'gate breaks silently.',
+      );
+    });
+  });
+
+  group('terminalAutoscroll constants', () {
+    test('edge zone and max speed are sane positive values', () {
+      expect(TerminalViewState.terminalAutoscrollEdgeZoneCells,
+          greaterThan(0));
+      expect(TerminalViewState.terminalAutoscrollMaxSpeedCellsPerSec,
+          greaterThan(0));
+      // Pin the shipped defaults so behavior changes are deliberate.
+      expect(TerminalViewState.terminalAutoscrollEdgeZoneCells, equals(2.5));
+      expect(TerminalViewState.terminalAutoscrollMaxSpeedCellsPerSec,
+          equals(20.0));
+    });
+  });
+
+  group('terminalAutoscrollSpeedCellsPerSec', () {
+    // Viewport 400px tall, edge zone 50px (top zone [0,50], bottom [350,400]).
+    const h = 400.0;
+    const zone = 50.0;
+    final max = TerminalViewState.terminalAutoscrollMaxSpeedCellsPerSec;
+
+    test('zero in the middle of the viewport', () {
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(200, h, zone),
+          equals(0.0));
+    });
+
+    test('zero at the exact zone boundaries', () {
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(50, h, zone),
+          equals(0.0));
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(350, h, zone),
+          equals(0.0));
+    });
+
+    test('positive (up into history) inside the top zone, ramping', () {
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(0, h, zone),
+          closeTo(max, 1e-9));
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(25, h, zone),
+          closeTo(max / 2, 1e-9));
+    });
+
+    test('negative (toward live edge) inside the bottom zone, ramping', () {
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(400, h, zone),
+          closeTo(-max, 1e-9));
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(375, h, zone),
+          closeTo(-max / 2, 1e-9));
+    });
+
+    test('past-edge positions clamp to full speed', () {
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(-100, h, zone),
+          closeTo(max, 1e-9));
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(500, h, zone),
+          closeTo(-max, 1e-9));
+    });
+
+    test('dominant side wins when zones overlap (tiny viewport)', () {
+      // Viewport 60px, zone 50px: zones overlap; the deeper penetration
+      // wins. dy=20 → top ratio 0.6 vs bottom 0.2 → up.
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(20, 60, zone),
+          closeTo(0.6 * max, 1e-9));
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(40, 60, zone),
+          closeTo(-0.6 * max, 1e-9));
+    });
+
+    test('degenerate zone is inert', () {
+      expect(
+          TerminalViewState.terminalAutoscrollSpeedCellsPerSec(0, h, 0),
+          equals(0.0));
+    });
+  });
+
   group('constants are exposed @visibleForTesting', () {
     test('terminalAnyMouseModeFlag is a non-zero int', () {
       expect(TerminalViewState.terminalAnyMouseModeFlag, isA<int>());

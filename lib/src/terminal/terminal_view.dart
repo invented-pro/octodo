@@ -5,6 +5,7 @@ import 'dart:typed_data' show BytesBuilder;
 
 import 'package:flutter/gestures.dart' show kPrimaryButton, PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter/services.dart';
 import 'package:flutter_alacritty/flutter_alacritty.dart' as fa;
 // `defaultTerminalShortcuts` is exported from the package barrel; we
@@ -448,6 +449,17 @@ class TerminalViewState extends State<TerminalView> {
   @visibleForTesting
   static const int bracketedPasteModeFlag = 1 << 4;
 
+  /// Alt-screen mode bit read from `grid.modeFlags`. Mirrors
+  /// `kModeAltScreen = 1 << 12` (DECSET 1049/47/1047 — the alternate
+  /// screen buffer vim/less switch to) in flutter_alacritty's
+  /// package-internal `input/term_mode.dart`, pinned as a literal for the
+  /// same regression-guard reason as [bracketedPasteModeFlag]. The
+  /// drag-select edge auto-scroll disables itself when this bit is set —
+  /// the alt screen has no scrollback, so scrolling during a selection
+  /// drag is meaningless there.
+  @visibleForTesting
+  static const int terminalAltScreenModeFlag = 1 << 12;
+
   /// Test seam for the file-private [_pasteBytes], so tests can pin the
   /// bracketed-wrap contract and the non-bracketed raw-passthrough contract
   /// (ConPTY handles line endings; we deliberately do NOT normalize). Not for
@@ -472,6 +484,45 @@ class TerminalViewState extends State<TerminalView> {
   /// drags.
   @visibleForTesting
   static const double terminalDragSelectThresholdPx = 4.0;
+
+  /// Vertical edge zone, in cell heights, at the top/bottom of the
+  /// terminal viewport where an armed drag-select auto-scrolls. Scroll
+  /// speed ramps linearly with penetration depth: 0 at the zone boundary,
+  /// [terminalAutoscrollMaxSpeedCellsPerSec] at (and past) the edge
+  /// itself. Cell-height units make the zone scale with the user's font
+  /// size instead of a fixed pixel count.
+  @visibleForTesting
+  static const double terminalAutoscrollEdgeZoneCells = 2.5;
+
+  /// Peak drag-select auto-scroll speed in cell heights per second,
+  /// reached when the pointer sits at (or beyond) the viewport edge.
+  @visibleForTesting
+  static const double terminalAutoscrollMaxSpeedCellsPerSec = 20.0;
+
+  /// Signed auto-scroll speed for a drag-select pointer at vertical
+  /// position [dy] (Listener-local px) inside a viewport [viewportHeight]
+  /// px tall with an edge zone of [zonePx] px. Returns cells/sec:
+  /// positive = scroll up into history (pointer near the top edge),
+  /// negative = scroll down toward the live edge (pointer near the
+  /// bottom), 0 = pointer outside both zones. Penetration past an edge
+  /// clamps to full speed. Pure function, extracted `@visibleForTesting`
+  /// so the ramp/clamp curve is unit-testable without a live engine.
+  @visibleForTesting
+  static double terminalAutoscrollSpeedCellsPerSec(
+    double dy,
+    double viewportHeight,
+    double zonePx,
+  ) {
+    if (zonePx <= 0) return 0;
+    final top = (zonePx - dy) / zonePx;
+    final bottom = (dy - (viewportHeight - zonePx)) / zonePx;
+    if (top <= 0 && bottom <= 0) return 0;
+    if (top > bottom) {
+      return (top > 1.0 ? 1.0 : top) * terminalAutoscrollMaxSpeedCellsPerSec;
+    }
+    final down = bottom > 1.0 ? 1.0 : bottom;
+    return -down * terminalAutoscrollMaxSpeedCellsPerSec;
+  }
 
   /// Module-level cache: does [family] have a usable Latin 'W'
   /// advance? Keyed by the raw family string. The result is a
@@ -2038,11 +2089,36 @@ class _TerminalDragSelector extends StatefulWidget {
   State<_TerminalDragSelector> createState() => _TerminalDragSelectorState();
 }
 
-class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
+class _TerminalDragSelectorState extends State<_TerminalDragSelector>
+    with SingleTickerProviderStateMixin {
   Offset? _downAt;
   bool _dragging = false;
   double _cellWidth = 0;
   double _cellHeight = 0;
+
+  /// Last pointer position in Listener-local coordinates, refreshed on
+  /// every move. The auto-scroll ticker reads it to re-extend the
+  /// selection head while the pointer is stationary inside an edge zone
+  /// (Flutter delivers no PointerMoveEvents for a still pointer, so
+  /// without this the highlight would freeze at the edge while content
+  /// scrolls underneath it).
+  Offset _lastLocal = Offset.zero;
+
+  /// Set once the drag has traveled [TerminalViewState.terminalDragSelectThresholdPx]
+  /// from the down point; sticky for the rest of the gesture. Autoscroll
+  /// only runs for armed drags so a stationary click-and-hold near an
+  /// edge never scrolls. Unlike [_dragging], this also arms for gestures
+  /// the inner `fa.TerminalView` owns (mouse reporting off / Shift held)
+  /// — the inner starts its own selection, and our ticker extends it via
+  /// the shared controller.
+  bool _dragArmed = false;
+
+  /// Frame-aligned ticker driving edge auto-scroll while armed + in-zone.
+  /// Matches the engine client's per-frame scroll coalescing: one tick
+  /// per frame, one `scrollByPixels` per frame.
+  Ticker? _autoscrollTicker;
+  Duration _lastTickElapsed = Duration.zero;
+  double _autoscrollSpeedCellsPerSec = 0;
 
   @override
   void didUpdateWidget(covariant _TerminalDragSelector oldWidget) {
@@ -2065,6 +2141,22 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
       _cellWidth = 0;
       _cellHeight = 0;
     }
+    // A swapped engine/controller means our cached grid/selection state
+    // belongs to a dead terminal — drop the gesture entirely.
+    if (oldWidget.engine != widget.engine ||
+        oldWidget.controller != widget.controller) {
+      _dragArmed = false;
+      _dragging = false;
+      _downAt = null;
+      _stopAutoscroll();
+    }
+  }
+
+  @override
+  void dispose() {
+    _autoscrollTicker?.dispose();
+    _autoscrollTicker = null;
+    super.dispose();
   }
 
   /// Lazily measure the cell dimensions used to convert hit-test pixels
@@ -2153,6 +2245,8 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
     // cell for the eventual selection start.
     _ensureMetrics();
     _downAt = e.localPosition;
+    _lastLocal = e.localPosition;
+    _dragArmed = false;
   }
 
   void _onPointerMove(PointerMoveEvent e) {
@@ -2162,6 +2256,17 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
     if ((e.buttons & kPrimaryButton) == 0) return;
 
     final delta = (e.localPosition - downAt).distance;
+    _lastLocal = e.localPosition;
+    // Arm (stickily) once the gesture qualifies as a drag, and keep the
+    // auto-scroll zone evaluation fresh on every move — including moves
+    // below the threshold after the drag already armed. This runs before
+    // the mouse-reporting bail below on purpose: the inner view owns the
+    // selection when reporting is off, but OUR ticker still drives the
+    // edge auto-scroll for it (both layers share the controller).
+    if (delta >= TerminalViewState.terminalDragSelectThresholdPx) {
+      _dragArmed = true;
+    }
+    _updateAutoscroll();
     if (delta < TerminalViewState.terminalDragSelectThresholdPx) return;
 
     // Skip intervention if the inner `fa.TerminalView` is already happy:
@@ -2249,6 +2354,8 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
       widget.controller.clearSelection();
     }
     _downAt = null;
+    _dragArmed = false;
+    _stopAutoscroll();
   }
 
   void _onPointerCancel(PointerCancelEvent e) {
@@ -2263,6 +2370,106 @@ class _TerminalDragSelectorState extends State<_TerminalDragSelector> {
       widget.controller.clearSelection();
     }
     _downAt = null;
+    _dragArmed = false;
+    _stopAutoscroll();
+  }
+
+  /// Re-evaluate edge auto-scroll for the current pointer position.
+  /// Starts the ticker when the (armed, primary-button) pointer sits in
+  /// the top/bottom edge zone of a scrollable viewport, updates the ramp
+  /// speed as it moves, and stops it everywhere else. Cheap enough to
+  /// call on every pointer move.
+  void _updateAutoscroll() {
+    if (!_dragArmed || _downAt == null) {
+      _stopAutoscroll();
+      return;
+    }
+    _ensureMetrics();
+    final height = context.size?.height ?? 0;
+    if (height <= 0 || _cellHeight <= 0) {
+      _stopAutoscroll();
+      return;
+    }
+    final grid = widget.engine.grid;
+    // Alt screen (vim/less): no scrollback, nothing to auto-scroll.
+    if (grid.modeFlags & TerminalViewState.terminalAltScreenModeFlag != 0) {
+      _stopAutoscroll();
+      return;
+    }
+    final speed = TerminalViewState.terminalAutoscrollSpeedCellsPerSec(
+      _lastLocal.dy,
+      height,
+      TerminalViewState.terminalAutoscrollEdgeZoneCells * _cellHeight,
+    );
+    if (speed == 0) {
+      _stopAutoscroll();
+      return;
+    }
+    // Bottom-directed scroll is a no-op when we're already pinned at the
+    // live edge (displayOffset/scrollFraction both 0) — never start for
+    // it. The stationary-pointer mid-gesture case (edge reached while the
+    // pointer holds still in the zone) is re-checked inside
+    // `_onAutoscrollTick`. The top-directed case can't be cheaply bounded
+    // in Dart (history depth isn't mirrored), so it relies on the
+    // engine's clamp.
+    if (speed < 0 && grid.displayOffset == 0 && grid.scrollFraction == 0) {
+      _stopAutoscroll();
+      return;
+    }
+    _autoscrollSpeedCellsPerSec = speed;
+    final ticker = _autoscrollTicker;
+    if (ticker == null || !ticker.isActive) {
+      _lastTickElapsed = Duration.zero;
+      _startAutoscroll();
+    }
+  }
+
+  void _startAutoscroll() {
+    _autoscrollTicker ??= createTicker(_onAutoscrollTick);
+    _autoscrollTicker!.start();
+  }
+
+  void _stopAutoscroll() {
+    _autoscrollSpeedCellsPerSec = 0;
+    _autoscrollTicker?.stop();
+  }
+
+  /// One frame of edge auto-scroll: scroll by speed*dt (the engine
+  /// client coalesces this with any wheel/trackpad scroll of the same
+  /// frame; the Rust core clamps at the scrollback bounds), then
+  /// re-extend the selection head to the stationary pointer's cell.
+  ///
+  /// The head is computed from the grid mirror as of the last applied
+  /// snapshot, which lags the just-scheduled scroll by ~1 frame — at max
+  /// speed that's ≤ ~0.33 cell of highlight lag, self-correcting on the
+  /// next tick. The wheel path has the same visual lag.
+  void _onAutoscrollTick(Duration elapsed) {
+    // Bottom-directed scroll re-check: the pointer can be stationary when
+    // the viewport reaches the live edge (displayOffset/scrollFraction
+    // both 0), so `_updateAutoscroll`'s stop condition may never re-fire.
+    // Without this, the ticker would keep spinning clamped-away FFI
+    // calls for the rest of the gesture. The mirror lags ~1 frame, so
+    // stopping here is one frame conservative — harmless.
+    final grid = widget.engine.grid;
+    if (_autoscrollSpeedCellsPerSec < 0 &&
+        grid.displayOffset == 0 &&
+        grid.scrollFraction == 0) {
+      _stopAutoscroll();
+      return;
+    }
+    final dt = (elapsed - _lastTickElapsed).inMicroseconds / 1e6;
+    _lastTickElapsed = elapsed;
+    if (dt <= 0 || _cellHeight <= 0) return;
+    // Clamp long gaps (window drag-resize stalls, debugger pauses) so a
+    // single tick can't jump the viewport by pages.
+    final clampedDt = dt > 0.05 ? 0.05 : dt;
+    widget.engine.scrollByPixels(
+      _autoscrollSpeedCellsPerSec * _cellHeight * clampedDt,
+    );
+    if (widget.controller.selectionActive) {
+      final cur = _pixelToCell(_lastLocal);
+      widget.controller.selectionUpdate(cur.$1, cur.$2, cur.$3);
+    }
   }
 
   @override
