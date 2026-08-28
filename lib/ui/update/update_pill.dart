@@ -189,7 +189,13 @@ class _CollapsedPill extends StatelessWidget {
             : palette.rowSurface;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(6, 4, 6, 2),
+      // 4px horizontal inset matches the collapsed rail's footer buttons
+      // (New Workspace / Settings margins in main.dart), so the pill's
+      // border box spans the same 36px width. The 6px inset used before
+      // made it 32px — visibly narrower than the Settings button it
+      // sits directly above. (The workspace tiles above the footer do
+      // use 6px, but the footer group reads as one visual unit.)
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 2),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
