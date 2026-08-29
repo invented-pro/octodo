@@ -1093,6 +1093,189 @@ void main() {
     });
   });
 
+  group('download single-flight', () {
+    test('second downloadLatest while one is in flight is skipped', () async {
+      final realZip = _buildStubZip();
+
+      // Hold each zip request open via its own completer so the
+      // first download chain stays in flight while a second
+      // downloadLatest() is issued (mirrors the probe
+      // single-flight test above).
+      final zipCompleters = <Completer<http.Response>>[];
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+        }
+        if (req.url.host == 'example.com') {
+          final c = Completer<http.Response>();
+          zipCompleters.add(c);
+          return c.future;
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      // First call enters the chain and hangs on zipCompleters[0].
+      final f1 = c.downloadLatest();
+      await _waitFor(() => zipCompleters.isNotEmpty);
+      expect(model.state, UpdateState.downloading);
+
+      // Second call must collapse into the first — no additional
+      // zip request (a second chain would race the first for the
+      // shared stream/sink/cancel handles and reset the progress
+      // bar to 0 mid-flight).
+      await c.downloadLatest();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(zipCompleters.length, 1);
+
+      // Let the first chain finish; it should surface `downloaded`.
+      zipCompleters[0].complete(http.Response.bytes(realZip, 200));
+      await f1;
+      await _waitFor(() => model.state == UpdateState.downloaded);
+
+      expect(zipCompleters.length, 1);
+      expect(model.state, UpdateState.downloaded);
+      c.dispose();
+    });
+
+    test('cancel during connect releases the guard; retry downloads',
+        () async {
+      final realZip = _buildStubZip();
+
+      // First zip request hangs forever (simulates a stalled
+      // connect the user aborts); the second completes.
+      final zipCompleters = <Completer<http.Response>>[];
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+        }
+        if (req.url.host == 'example.com') {
+          final c = Completer<http.Response>();
+          zipCompleters.add(c);
+          return c.future;
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      // Chain 1: enters the download and hangs while connecting
+      // (the mock's response future never resolves).
+      final f1 = c.downloadLatest();
+      await _waitFor(() => zipCompleters.isNotEmpty);
+      expect(model.state, UpdateState.downloading);
+
+      // User cancels. The chain must unwind (f1 settles) rather
+      // than hang on the never-resolving send — otherwise the
+      // single-flight guard stays latched and every later
+      // downloadLatest() silently no-ops.
+      await c.cancelDownload();
+      expect(model.state, UpdateState.updateAvailable);
+      await f1.timeout(const Duration(seconds: 2));
+
+      // Chain 2: the retry the cancel just re-enabled must run —
+      // it issues a fresh zip request (zipCompleters[1]).
+      final f2 = c.downloadLatest();
+      await _waitFor(() => zipCompleters.length >= 2);
+      zipCompleters[1].complete(http.Response.bytes(realZip, 200));
+      await f2.timeout(const Duration(seconds: 2));
+      await _waitFor(() => model.state == UpdateState.downloaded);
+
+      expect(zipCompleters.length, 2);
+      expect(model.state, UpdateState.downloaded);
+      c.dispose();
+    });
+
+    test('cancel mid-stream releases the guard; retry downloads', () async {
+      final realZip = _buildStubZip();
+
+      // Streaming mock: the first zip request delivers headers +
+      // one chunk, then never completes (a stalled download body);
+      // the second completes immediately.
+      var zipCalls = 0;
+      final hangCtrl = StreamController<List<int>>();
+      addTearDown(() => hangCtrl.close());
+      final mock = MockClient.streaming((req, body) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.StreamedResponse(
+            Stream.value(utf8.encode(_releaseBody(tagName: 'v9.9.9'))),
+            200,
+          );
+        }
+        zipCalls += 1;
+        if (zipCalls == 1) {
+          return http.StreamedResponse(hangCtrl.stream, 200);
+        }
+        return http.StreamedResponse(Stream.value(realZip), 200);
+      });
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      // Chain 1: connect, receive one chunk, then stall.
+      final f1 = c.downloadLatest();
+      await _waitFor(() => zipCalls == 1);
+      hangCtrl.add(List<int>.filled(1024, 7));
+      await _waitFor(() => (model.progress?.receivedBytes ?? 0) > 0);
+      expect(model.state, UpdateState.downloading);
+
+      // User cancels mid-stream. The chain's `asFuture()` will
+      // never complete (the subscription was cancelled from the
+      // outside), so the cancel token's future must unwind it.
+      await c.cancelDownload();
+      expect(model.state, UpdateState.updateAvailable);
+      await f1.timeout(const Duration(seconds: 2));
+
+      // Chain 2: fresh request, completes, digest checks out.
+      final f2 = c.downloadLatest();
+      await f2.timeout(const Duration(seconds: 2));
+      await _waitFor(() => model.state == UpdateState.downloaded);
+
+      expect(zipCalls, 2);
+      expect(model.state, UpdateState.downloaded);
+      c.dispose();
+    });
+  });
+
   group('store distribution', () {
     // The Store build can't self-apply (its install dir is
     // ACL-locked), so the apply path must short-circuit even if

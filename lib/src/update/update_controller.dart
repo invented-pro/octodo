@@ -116,6 +116,18 @@ class UpdateController {
   /// the same model.
   bool _probeInFlight = false;
 
+  /// Single-flight download guard. Set true while a download
+  /// chain is in flight; cleared in the finally block of
+  /// [downloadLatest]. Concurrent calls (a double-click before
+  /// the popover swaps to the progress body, error-payload retry
+  /// callbacks) see the flag and skip rather than racing two
+  /// chains through the same model — concurrent chains would
+  /// clobber the shared [_downloadSub] / [_downloadSink] /
+  /// [_downloadClient] / [_downloadCancel] handles and interleave
+  /// progress resets (each attempt restarts the bar at 0), which
+  /// reads in the UI as multiple progress bars spinning in turn.
+  bool _downloadInFlight = false;
+
   /// Best-effort handle to the in-flight HTTP download. Used by
   /// [cancelDownload] so the user can abort a running download.
   StreamSubscription<List<int>>? _downloadSub;
@@ -429,6 +441,10 @@ class UpdateController {
   /// Transitions: updateAvailable → downloading → downloaded (or
   /// → error).
   ///
+  /// Skips if a download chain is already in flight (concurrent
+  /// calls collapse into one), mirroring the probe path's
+  /// [_probeInFlight] guard.
+  ///
   /// Reliability chain (per request): try the primary URL
   /// ([_kMaxAttemptsPerSource] attempts via [package:retry]); if
   /// all 3 fail, fetch the fallback feed's manifest (also 3
@@ -451,6 +467,18 @@ class UpdateController {
           'the UI should open the Store URL instead.');
       return;
     }
+    if (_downloadInFlight) return;
+    _downloadInFlight = true;
+    try {
+      await _runDownloadChain();
+    } finally {
+      _downloadInFlight = false;
+    }
+  }
+
+  /// The primary-then-fallback download chain behind
+  /// [downloadLatest]'s single-flight guard.
+  Future<void> _runDownloadChain() async {
     final release = model.detected;
     if (release == null) return;
 
@@ -628,8 +656,21 @@ class UpdateController {
         'User-Agent': 'octodo/$userAgentVersion',
       });
     final http.StreamedResponse resp;
+    final connectToken = _downloadCancel;
     try {
-      resp = await client.send(req);
+      // Race the connect against cancellation too: `client.close()`
+      // aborts pending sends on the real `http.Client`, but not on
+      // every client (e.g. test mocks) — without this race a Cancel
+      // issued while the request is still connecting would leave the
+      // chain suspended here forever.
+      resp = await (connectToken == null
+          ? client.send(req)
+          : Future.any<http.StreamedResponse>([
+              client.send(req),
+              connectToken.whenCancelled.then(
+                (_) => throw const _DownloadCancelledException(),
+              ),
+            ]));
     } catch (e) {
       client.close();
       _downloadClient = null;
@@ -675,7 +716,21 @@ class UpdateController {
     );
 
     try {
-      await _downloadSub!.asFuture<void>();
+      // Race the stream against cancellation: `asFuture()` never
+      // completes on an externally-cancelled subscription, so a
+      // mid-stream Cancel must arrive via the token's future for
+      // this await to ever return. Throwing the sentinel here
+      // routes through the catch below, which cleans up the
+      // partial sink/client and re-throws it for the retry
+      // wrapper to short-circuit on.
+      final token = _downloadCancel;
+      final streamDone = _downloadSub!.asFuture<void>();
+      await (token == null
+          ? streamDone
+          : Future.any<void>([streamDone, token.whenCancelled]));
+      if (token?.cancelled ?? false) {
+        throw const _DownloadCancelledException();
+      }
     } on Exception catch (e) {
       // Best-effort cleanup of the partial stream/sink. Rethrow so
       // the outer retry budget can take over (unless the user
@@ -752,7 +807,10 @@ class UpdateController {
     final cancel = _downloadCancel;
     if (cancel == null || cancel.cancelled) return;
 
-    cancel.cancelled = true;
+    // Complete the token's future FIRST so the suspended download
+    // chain (racing its stream future against `whenCancelled`)
+    // unwinds and releases the single-flight guard.
+    cancel.cancel();
     await _downloadSub?.cancel();
     await _downloadSink?.close();
     _downloadClient?.close();
@@ -1171,7 +1229,9 @@ class UpdateController {
     // Tear down any in-flight download so a half-written staging
     // file isn't leaked past dispose. We don't await the cancel —
     // dispose is called from widget teardown, which doesn't have
-    // a future for us to await.
+    // a future for us to await. Cancelling the token also wakes
+    // the suspended chain so it can unwind into its cleanup path.
+    _downloadCancel?.cancel();
     unawaited(_downloadSub?.cancel());
     try {
       _downloadSink?.close();
@@ -1184,6 +1244,7 @@ class UpdateController {
     _downloadClient = null;
     _downloadCancel = null;
     _probeInFlight = false;
+    _downloadInFlight = false;
   }
 
   // -- staging paths (Windows: %LOCALAPPDATA%; macOS: ~/Library/
@@ -1351,8 +1412,26 @@ class _ResolvedRelease {
   });
 }
 
+/// Cancellation handle shared across one download chain. Besides
+/// the flag the retry logic polls, [cancel] completes an internal
+/// future — required because `StreamSubscription.asFuture()` never
+/// completes on an externally-cancelled subscription, so the
+/// download chain races its stream future against [whenCancelled]
+/// to unwind after a mid-stream Cancel (otherwise the suspended
+/// `await` would hang forever and the single-flight guard would
+/// never release).
 class CancelToken {
   bool cancelled = false;
+  final Completer<void> _done = Completer<void>();
+
+  /// Future that completes when [cancel] is first called.
+  Future<void> get whenCancelled => _done.future;
+
+  void cancel() {
+    if (cancelled) return;
+    cancelled = true;
+    _done.complete();
+  }
 }
 
 /// Internal sentinel thrown by [_downloadAndVerify] when the user
