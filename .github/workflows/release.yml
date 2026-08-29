@@ -392,26 +392,40 @@ jobs:
           # Nested executables in Contents/MacOS are NOT re-signed by
           # the main bundle signing pass — octodo_helper keeps its
           # Dart-ad-hoc signature and notarization rejects it. Sign it
-          # explicitly, inside-out, before the main bundle — but
-          # WITHOUT Hardened Runtime ($HR deliberately dropped): the
-          # Dart AOT runtime writes to its own code pages while
-          # booting the embedded snapshot, and under HR the kernel
-          # enforces W^X on code pages and kills the helper ~50 ms
-          # after exec:
+          # explicitly, inside-out, before the main bundle.
+          #
+          # Hardened Runtime MUST stay on (notarization rejects any
+          # Developer-ID executable without it — observed as a
+          # submission status of Invalid on the first v2.1.2 attempt),
+          # but the Dart AOT runtime writes to its own code pages
+          # while booting the embedded snapshot, and plain HR's W^X
+          # enforcement kills the helper ~50 ms after exec:
           #   kernel: CODE SIGNING: process N[octodo_helper]:
           #   rejecting invalid page ... (signed:0 validated:0 wpmapped:1)
-          # That kill is why in-app updates from 2.0.x/2.1.x installs
-          # silently no-opped (app quit, nothing applied, manual
-          # relaunch showed the old version). No HR → no W^X
-          # enforcement → the helper runs. The current app code no
-          # longer exec's this helper on macOS (the apply runs via
-          # /bin/sh — see posix_apply_script.dart); shipping a
-          # runnable one is belt-and-braces for any path that does.
+          # The two JIT entitlements in tool/helper_entitlements.plist
+          # (allow-jit + allow-unsigned-executable-memory — the same
+          # pair Electron-class apps ship) permit exactly that;
+          # verified empirically: Dev-ID+HR → SIGKILL, HR+ents → runs.
           if [[ -f "$APP/Contents/MacOS/octodo_helper" ]]; then
-            echo "==> signing octodo_helper (no Hardened Runtime)"
-            /usr/bin/codesign --force \
+            echo "==> signing octodo_helper (HR + JIT entitlements)"
+            /usr/bin/codesign --force $HR \
               "${TS[@]}" --sign "$IDENTITY" \
+              --entitlements tool/helper_entitlements.plist \
               "$APP/Contents/MacOS/octodo_helper"
+            # Smoke-test the helper itself: with no env vars it must
+            # reach Dart's main and exit 1 ("invoked without
+            # OCTODO_UPDATE_PAYLOAD"). A code-signing kill shows up
+            # as exit 137 (SIGKILL) — fail the build rather than ship
+            # a helper macOS executes into the ground.
+            set +e
+            "$APP/Contents/MacOS/octodo_helper"
+            helper_rc=$?
+            set -e
+            if [[ "$helper_rc" != "1" ]]; then
+              echo "octodo_helper smoke test failed (exit $helper_rc; " \
+                "expected 1, 137 = killed by code signing)" >&2
+              exit 1
+            fi
           fi
 
           echo "==> signing main bundle"

@@ -7,13 +7,14 @@
 //
 // macOS: the CURRENT app code applies updates via /bin/sh instead
 // (see lib/src/update/installer/posix_apply_script.dart) because a
-// Dart AOT binary is killed by Hardened Runtime's W^X enforcement.
-// We still ship octodo_helper inside Contents/MacOS/ as belt-and-
-// braces (a fallback if the sh path is ever unavailable), and CI
-// signs it WITHOUT Hardened Runtime so the shipped binary is at
-// least runnable rather than a guaranteed kernel kill. NOTE: this
-// does NOT rescue 2.0.x/2.1.x installs — those exec their OWN
-// HR-signed helper and need one manual update to reach the sh-based
+// Dart AOT binary under plain Hardened Runtime is killed by the
+// kernel's W^X enforcement. We still ship octodo_helper inside
+// Contents/MacOS/ as belt-and-braces (a fallback if the sh path is
+// ever unavailable); CI signs it with HR + JIT entitlements (see
+// tool/helper_entitlements.plist) so it both notarizes AND runs,
+// with a post-sign smoke test enforcing the latter. NOTE: this
+// does not rescue 2.0.x/2.1.x installs — those exec their OWN
+// plain-HR helper and need one manual update to reach the sh-based
 // updater.
 //
 // Run AFTER `flutter build windows --release` /

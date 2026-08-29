@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- octodo_helper entitlements (used by .github/workflows/release.yml).
+         Notarization REQUIRES Hardened Runtime on every Developer-ID
+         executable, but the Dart AOT runtime writes to its own code
+         pages while booting the embedded snapshot — under plain HR
+         the kernel kills the helper ~50 ms after exec:
+           CODE SIGNING: rejecting invalid page ... (wpmapped:1)
+         (verified empirically: Dev-ID+HR → SIGKILL 137; adding these
+         two entitlements → helper runs and exits normally).
+         allow-jit / allow-unsigned-executable-memory are the standard
+         CS entitlements Electron- and Chromium-class apps ship with;
+         the notary service accepts them. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>
