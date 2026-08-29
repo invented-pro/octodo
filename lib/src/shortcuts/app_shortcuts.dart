@@ -440,11 +440,32 @@ class WorkspaceBindings {
           shift: true,
         )] =
         previousTab;
+    // macOS tab-cycle aliases — README documents `Cmd+Option+→` /
+    // `Cmd+Option+←` for tab cycling on macOS. The Ctrl+Tab forms above
+    // keep working (external keyboards, existing muscle memory), but
+    // Tab-chords are awkward on Mac laptop keyboards; the ⌘⌥arrow
+    // aliases follow the same platform-conditional pattern as the
+    // braceLeft / braceRight workspace-cycle aliases in
+    // [AppShellBindings.build] — the Settings → Shortcuts manifest
+    // intentionally does not list them separately. Passthrough note:
+    // like the brace aliases, these chords are consumed by the app on
+    // macOS and never reach the PTY.
+    if (Platform.isMacOS) {
+      bindings[primary(LogicalKeyboardKey.arrowRight, alt: true)] = nextTab;
+      bindings[primary(LogicalKeyboardKey.arrowLeft, alt: true)] =
+          previousTab;
+    }
 
     for (var i = 0; i < _digitKeys.length; i++) {
       final idx = i;
       bindings[SingleActivator(_digitKeys[i], control: true)] = () =>
           jumpToTab(idx);
+      // macOS alias — README documents `Cmd+1` … `9` for tab jump on
+      // macOS (`Ctrl+1` … `9` everywhere else). Distinct from the
+      // app-scope `Cmd+Shift+1` … `9` workspace jump (Shift differs).
+      if (Platform.isMacOS) {
+        bindings[primary(_digitKeys[i])] = () => jumpToTab(idx);
+      }
     }
 
     // Split operations.

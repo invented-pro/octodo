@@ -244,6 +244,73 @@ void main() {
             'expected Ctrl/Cmd+Shift+{Up,Down,Left,Right} → focus pane in direction',
       );
     });
+
+    // README documents `Cmd+Option+→` / `Cmd+Option+←` (tab cycling) and
+    // `Cmd+1` … `9` (tab jump) for macOS, mirroring `Ctrl+Tab` /
+    // `Ctrl+Shift+Tab` / `Ctrl+1` … `9` on Windows / Linux. The base Ctrl
+    // forms must exist on every platform; the ⌘ aliases only on macOS.
+    test('macOS tab-cycle / tab-jump aliases (macOS only)', () {
+      String? fired;
+      int? jumped;
+      final bindings = WorkspaceBindings.build(
+        newTab: () {},
+        closeTab: () {},
+        nextTab: () => fired = 'next',
+        previousTab: () => fired = 'previous',
+        jumpToTab: (i) => jumped = i,
+        splitRight: () {},
+        splitDown: () {},
+        focusPaneInDirection: (_) {},
+        toggleMaximizePane: () {},
+      );
+
+      // Base Ctrl forms — every platform.
+      final ctrlTab = bindings.keys.whereType<SingleActivator>().where(
+            (a) =>
+                a.trigger == LogicalKeyboardKey.tab &&
+                a.control &&
+                !a.shift &&
+                !a.alt &&
+                !a.meta,
+          );
+      expect(ctrlTab, isNotEmpty, reason: 'Ctrl+Tab next-tab base binding');
+
+      // macOS-only ⌘ aliases (meta form, no control).
+      SingleActivator? metaAlias(
+        LogicalKeyboardKey key, {
+        bool alt = false,
+        bool shift = false,
+      }) {
+        final matches = bindings.keys.whereType<SingleActivator>().where(
+              (a) =>
+                  a.trigger == key &&
+                  a.meta &&
+                  !a.control &&
+                  a.alt == alt &&
+                  a.shift == shift,
+            );
+        return matches.isEmpty ? null : matches.first;
+      }
+
+      final nextAlias = metaAlias(LogicalKeyboardKey.arrowRight, alt: true);
+      final prevAlias = metaAlias(LogicalKeyboardKey.arrowLeft, alt: true);
+      final jumpAlias = metaAlias(LogicalKeyboardKey.digit1);
+      if (Platform.isMacOS) {
+        expect(nextAlias, isNotNull, reason: '⌘⌥→ next-tab alias missing');
+        expect(prevAlias, isNotNull, reason: '⌘⌥← previous-tab alias missing');
+        bindings[nextAlias!]!();
+        expect(fired, 'next');
+        bindings[prevAlias!]!();
+        expect(fired, 'previous');
+        expect(jumpAlias, isNotNull, reason: '⌘1 jump-to-tab alias missing');
+        bindings[jumpAlias!]!();
+        expect(jumped, 0);
+      } else {
+        expect(nextAlias, isNull, reason: 'no ⌘⌥arrow alias off-macOS');
+        expect(prevAlias, isNull, reason: 'no ⌘⌥arrow alias off-macOS');
+        expect(jumpAlias, isNull, reason: 'no bare-primary digit off-macOS');
+      }
+    });
   });
 
   group('TerminalBindings.build()', () {

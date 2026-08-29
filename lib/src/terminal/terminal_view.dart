@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection' show UnmodifiableMapView;
 import 'dart:convert' show utf8;
 import 'dart:io' show Platform;
 import 'dart:typed_data' show BytesBuilder;
@@ -1545,6 +1546,51 @@ class TerminalViewState extends State<TerminalView> {
   static final Map<ShortcutActivator, Intent>
   _alacrittyShortcutsWithShiftVariants = <ShortcutActivator, Intent>{
     ...defaultTerminalShortcuts,
+    // ── Platform-aware re-binds (the ⌘V-doesn't-paste bug) ──────────
+    //
+    // `defaultTerminalShortcuts` (spread above) and every explicit
+    // `control: true` entry below hardcode Ctrl as the modifier. On
+    // macOS the primary modifier is Cmd, and `SingleActivator.accepts`
+    // requires an EXACT modifier match — so ⌘V / ⌘⇧V / ⌘⇧C / ⌘= / ⌘- /
+    // ⌘0 all missed this map, fell through `_onKeyFallback` into
+    // `encodeKeyWithKitty`, and wrote kitty `super+v`-style bytes into
+    // the PTY instead of pasting / zooming. `primary(...)` builds the
+    // Cmd+… form on macOS and the identical Ctrl+… form on
+    // Windows/Linux. Note: `SingleActivator` uses IDENTITY equality as
+    // a map key (flutter_alacritty's own `key_bindings.dart` documents
+    // the same gotcha), so on Windows/Linux these entries COEXIST with
+    // the equivalent stock ones from the spread above rather than
+    // replacing them — harmless, because identical chords dispatch
+    // identical intents and `_onKeyFallback` picks the first match in
+    // insertion order.
+    //
+    // Passthrough note: on macOS these ⌘-chords are now consumed by
+    // the app and never reach the PTY as kitty `super+…` sequences.
+    primary(LogicalKeyboardKey.keyV): const fa.PasteIntent(),
+    primary(LogicalKeyboardKey.keyV, shift: true): const fa.PasteIntent(),
+    primary(LogicalKeyboardKey.keyC, shift: true): const fa.CopyIntent(),
+    primary(LogicalKeyboardKey.equal): const IncreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.numpadAdd): const IncreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.minus): const DecreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.numpadSubtract):
+        const DecreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.digit0): const ResetFontSizeIntent(),
+    primary(LogicalKeyboardKey.numpad0): const ResetFontSizeIntent(),
+    // Shift variants of the zoom bindings. The unshifted forms are
+    // covered by the `primary(...)` re-binds above; alacritty's stock
+    // map ships neither the shift variants nor their Cmd forms.
+    primary(LogicalKeyboardKey.equal, shift: true):
+        const IncreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.add, shift: true):
+        const IncreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.minus, shift: true):
+        const DecreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.numpadSubtract, shift: true):
+        const DecreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.digit0, shift: true):
+        const ResetFontSizeIntent(),
+    primary(LogicalKeyboardKey.numpad0, shift: true):
+        const ResetFontSizeIntent(),
     // Bare Ctrl+V and Shift+Insert → PasteIntent. FA's stock
     // `defaultTerminalShortcuts` only ships Ctrl+Shift+V; without these the
     // bare forms would fall through to `_onKeyFallback`'s `encodeKey` and
@@ -1553,6 +1599,8 @@ class TerminalViewState extends State<TerminalView> {
     // image-aware [_pasteFromClipboard] override in [_alacrittyActions]
     // (text → bracketed paste bytes; image-only clipboard → 0x16 so the
     // foreground app — opencode/MimoCode — can read the image itself).
+    // The Ctrl+V form is kept on macOS alongside the ⌘V re-bind above so
+    // existing muscle memory (and Ctrl+V-pasting TUI hosts) keep working.
     // These are deliberately NOT bound at the app level (TerminalBindings):
     // that delegation path through _AppShellState didn't deliver the image
     // trigger reliably, while this path calls _pasteFromClipboard directly
@@ -1575,25 +1623,16 @@ class TerminalViewState extends State<TerminalView> {
         const _ScrollFastIntent(true),
     SingleActivator(LogicalKeyboardKey.pageDown, shift: true):
         const _ScrollFastIntent(false),
-    // Shift variants of the zoom bindings. The unshifted forms are
-    // already in `defaultTerminalShortcuts` — we only need to add the
-    // shift variants alacritty doesn't ship.
-    SingleActivator(LogicalKeyboardKey.equal, control: true, shift: true):
-        const IncreaseFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.add, control: true, shift: true):
-        const IncreaseFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.minus, control: true, shift: true):
-        const DecreaseFontSizeIntent(),
-    SingleActivator(
-      LogicalKeyboardKey.numpadSubtract,
-      control: true,
-      shift: true,
-    ): const DecreaseFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.digit0, control: true, shift: true):
-        const ResetFontSizeIntent(),
-    SingleActivator(LogicalKeyboardKey.numpad0, control: true, shift: true):
-        const ResetFontSizeIntent(),
   };
+
+  /// Test-only view of the FA shortcut map handed to `fa.TerminalView`.
+  /// Pins the platform-aware paste / zoom activators so the
+  /// ⌘V-doesn't-paste regression (hardcoded `control: true`) can't
+  /// silently return. Read-only — a mutating test would pollute the
+  /// shared static map. See [_alacrittyShortcutsWithShiftVariants].
+  @visibleForTesting
+  static Map<ShortcutActivator, Intent> get alacrittyShortcutsForTest =>
+      UnmodifiableMapView(_alacrittyShortcutsWithShiftVariants);
 
   /// Custom intents dispatched by [_alacrittyShortcutsWithShiftVariants]
   /// whose action handlers don't come from `defaultTerminalActions`.
