@@ -1,5 +1,14 @@
 // Helper-mode entry point.
 //
+// NOTE (macOS): the production macOS apply no longer runs through
+// this Dart helper — UpdateController spawns /bin/sh with the
+// script in posix_apply_script.dart instead, because the Dart AOT
+// helper gets killed by macOS Hardened Runtime's W^X enforcement
+// (~50 ms after exec). This path remains the production apply on
+// Windows (octodo_helper.exe) and a compatibility path for older
+// installed builds whose updater still exec's their bundled
+// octodo_helper.
+//
 // When the running app wants to apply a downloaded update, it
 // spawns itself with `OCTODO_UPDATE_HELPER=1` set in the
 // environment, plus `OCTODO_UPDATE_PAYLOAD=<version>` and

@@ -1040,6 +1040,61 @@ void main() {
       c.dispose();
     });
 
+    test('truncated zip body → retried, then error (never `downloaded`)',
+        () async {
+      // Regression for the Aug 2026 macOS incident: a proxy closed
+      // the body stream cleanly at 88% of the asset, the stream's
+      // onDone fired without error, and the updater offered
+      // "Restart to install" on a corrupt zip. The truncation
+      // guard must reject a body shorter than the manifest's
+      // advertised size, spend the retry budget, and surface an
+      // error — never the downloaded state.
+      final realZip = _buildStubZip();
+
+      var zipCalls = 0;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          // Manifest advertises MORE than the body serves.
+          return http.Response(
+            _releaseBody(
+                tagName: 'v9.9.9', zipSize: realZip.length + 1000),
+            200,
+          );
+        }
+        if (req.url.host == 'example.com') {
+          zipCalls += 1;
+          // Clean 200 with a short body — no transport error.
+          return http.Response.bytes(realZip, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await c.downloadLatest();
+
+      // All 3 primary attempts saw the truncated body; no fallback
+      // is configured, so the chain terminates in the error state.
+      expect(zipCalls, _kMaxAttemptsPerSource);
+      expect(model.state, UpdateState.error);
+      expect(model.error?.message, contains('interrupted'));
+      expect(model.state, isNot(UpdateState.downloaded));
+      c.dispose();
+    });
+
     test('primary zip fails 3x → fallback zip fails 3x → error', () async {
       var primaryZipCalls = 0;
       var fallbackZipCalls = 0;
@@ -1105,7 +1160,11 @@ void main() {
       final mock = MockClient((req) async {
         if (req.url.host == 'api.github.com' &&
             req.url.path.contains('releases/latest')) {
-          return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+          // zipSize must equal the realZip body length below — the
+          // download path now rejects a body shorter than the
+          // manifest's advertised size (truncation guard).
+          return http.Response(
+              _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length), 200);
         }
         if (req.url.host == 'example.com') {
           final c = Completer<http.Response>();
@@ -1162,7 +1221,11 @@ void main() {
       final mock = MockClient((req) async {
         if (req.url.host == 'api.github.com' &&
             req.url.path.contains('releases/latest')) {
-          return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+          // zipSize must equal the realZip body length below — the
+          // download path now rejects a body shorter than the
+          // manifest's advertised size (truncation guard).
+          return http.Response(
+              _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length), 200);
         }
         if (req.url.host == 'example.com') {
           final c = Completer<http.Response>();
@@ -1225,8 +1288,12 @@ void main() {
       final mock = MockClient.streaming((req, body) async {
         if (req.url.host == 'api.github.com' &&
             req.url.path.contains('releases/latest')) {
+          // zipSize must equal the realZip body length below — the
+          // download path now rejects a body shorter than the
+          // manifest's advertised size (truncation guard).
           return http.StreamedResponse(
-            Stream.value(utf8.encode(_releaseBody(tagName: 'v9.9.9'))),
+            Stream.value(utf8.encode(
+                _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length))),
             200,
           );
         }

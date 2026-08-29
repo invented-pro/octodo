@@ -13,21 +13,33 @@
 //   * `staged_apply.dart` — partial-copy failure (install dir is
 //     in an inconsistent state) and a relaunched child that
 //     exits non-zero shortly after spawn.
+//   * the POSIX apply script (`posix_apply_script.dart`) appends
+//     to the same file from /bin/sh on macOS.
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
 const String kHelperCrashFileName = 'octodo_apply_crash.log';
 
+/// Resolve the crash-sentinel file location. Windows sets `TEMP`
+/// for every process; macOS GUI apps do NOT — they set `TMPDIR`
+/// (`/var/folders/…/T/`). The old `TEMP`-only resolution sent the
+/// macOS sentinel to `Directory.systemTemp` (which may or may not
+/// equal `$TMPDIR`), leaving applies undiagnosable. Order: TEMP →
+/// TMPDIR → systemTemp — identical behavior on Windows, correct
+/// per-user temp on macOS.
+File resolveHelperCrashSentinelFile() {
+  final temp = Platform.environment['TEMP'] ??
+      Platform.environment['TMPDIR'] ??
+      Directory.systemTemp.path;
+  return File(p.join(temp, kHelperCrashFileName));
+}
+
 /// Best-effort write of [message] to the helper crash sentinel.
-/// Uses `p.join` so the path is portable even though the auto-
-/// update flow itself is Windows-only for v1.
 Future<void> writeHelperCrashSentinel(String message) async {
   try {
-    final temp = Platform.environment['TEMP'] ?? Directory.systemTemp.path;
-    final f = File(p.join(temp, kHelperCrashFileName));
     final contents = '${DateTime.now().toIso8601String()}\n$message\n';
-    await f.writeAsString(contents, flush: true);
+    await resolveHelperCrashSentinelFile().writeAsString(contents, flush: true);
   } catch (_) {
     // Best effort; nothing more we can do from here.
   }

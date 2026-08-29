@@ -1,6 +1,17 @@
 // Self-apply: extract the staged payload and replace the current
 // install with it.
 //
+// Production apply paths:
+//   * Windows — this file, driven by the standalone
+//     octodo_helper.exe (per-file copy).
+//   * macOS — the /bin/sh orchestrator in posix_apply_script.dart
+//     (bundle swap via ditto + mv + open). The Dart bundleSwap
+//     below is kept as the legacy/compatibility path for older
+//     installed builds that still spawn their bundled
+//     octodo_helper; a `dart compile exe` binary under Hardened
+//     Runtime gets killed by the kernel's W^X enforcement, which
+//     is why production moved off it.
+//
 // Triggered by the helper process — `apply_main.dart` calls
 // [StagedApply.run] with paths read out of env vars. The original
 // process has already exited (or is exiting) by the time we run.

@@ -392,10 +392,24 @@ jobs:
           # Nested executables in Contents/MacOS are NOT re-signed by
           # the main bundle signing pass — octodo_helper keeps its
           # Dart-ad-hoc signature and notarization rejects it. Sign it
-          # explicitly, inside-out, before the main bundle.
+          # explicitly, inside-out, before the main bundle — but
+          # WITHOUT Hardened Runtime ($HR deliberately dropped): the
+          # Dart AOT runtime writes to its own code pages while
+          # booting the embedded snapshot, and under HR the kernel
+          # enforces W^X on code pages and kills the helper ~50 ms
+          # after exec:
+          #   kernel: CODE SIGNING: process N[octodo_helper]:
+          #   rejecting invalid page ... (signed:0 validated:0 wpmapped:1)
+          # That kill is why in-app updates from 2.0.x/2.1.x installs
+          # silently no-opped (app quit, nothing applied, manual
+          # relaunch showed the old version). No HR → no W^X
+          # enforcement → the helper runs. The current app code no
+          # longer exec's this helper on macOS (the apply runs via
+          # /bin/sh — see posix_apply_script.dart); shipping a
+          # runnable one is belt-and-braces for any path that does.
           if [[ -f "$APP/Contents/MacOS/octodo_helper" ]]; then
-            echo "==> signing octodo_helper"
-            /usr/bin/codesign --force $HR \
+            echo "==> signing octodo_helper (no Hardened Runtime)"
+            /usr/bin/codesign --force \
               "${TS[@]}" --sign "$IDENTITY" \
               "$APP/Contents/MacOS/octodo_helper"
           fi

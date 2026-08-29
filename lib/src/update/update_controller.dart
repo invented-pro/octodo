@@ -21,6 +21,8 @@ import '../settings/settings_catalog.dart';
 import '../settings/settings_runtime.dart';
 import 'digest.dart';
 import 'distribution.dart';
+import 'installer/crash_sentinel.dart';
+import 'installer/posix_apply_script.dart';
 import 'r2_update_feed.dart';
 import 'release_resolver.dart';
 import 'semver.dart';
@@ -54,12 +56,14 @@ const Duration _kSidecarTimeout = Duration(seconds: 5);
 const int _kMaxAttemptsPerSource = 3;
 
 /// Filename of the standalone helper binary spawned by
-/// [applyDownloaded]. Lives next to the running executable
-/// (`octodo.exe`'s dir on Windows; `Octodo.app/Contents/MacOS/` on
-/// macOS). Compiled from `tool/update_helper.dart`. See
-/// [_spawnHelper] for why a separate binary is required.
-String get _kHelperExeName =>
-    Platform.isWindows ? 'octodo_helper.exe' : 'octodo_helper';
+/// [applyDownloaded] on Windows (`octodo.exe`'s dir). Compiled from
+/// `tool/update_helper.dart`. See [_spawnHelper] for why a
+/// separate binary is required there.
+///
+/// macOS does NOT use it: the Dart AOT helper gets killed by the
+/// kernel under Hardened Runtime (see posix_apply_script.dart) —
+/// the macOS apply runs through /bin/sh instead.
+String get _kHelperExeName => 'octodo_helper.exe';
 
 class UpdateController {
   final UpdateStateModel model;
@@ -616,6 +620,14 @@ class UpdateController {
           'does not match the published SHA-256 — try again, and if '
           'it persists, report it.';
     }
+    // A cleanly-closed early stream (proxy timeout, flaky wifi)
+    // reads differently from a hard network failure — the bytes
+    // WERE arriving. Surfaced distinctly so the retry hint makes
+    // sense to the user.
+    if (error is UpdateFeedException && error.message.contains('truncated')) {
+      return 'Download was interrupted before it finished. '
+          'Check your network and try again.';
+    }
     final generic = fallbackConfigured
         ? 'Download failed on both sources. Check your network and try again.'
         : 'Download failed. Check your network and try again.';
@@ -767,6 +779,22 @@ class UpdateController {
     _downloadClient = null;
     _downloadSub = null;
 
+    // Truncation guard. A server (or an intercepting proxy) can
+    // close the body stream CLEANLY before all bytes arrive — the
+    // listen/onDone path above then completes without error and the
+    // UI would otherwise hand a short zip to the apply step. This
+    // exact failure shipped to a macOS host in Aug 2026: a 26.5 MB
+    // asset downloaded as 23.5 MB with no error surfaced, and the
+    // apply died in zip extraction. Only a STRICT deficit fails —
+    // receiving more than declared is legal (e.g. a transport
+    // decoding gzip) and must not break a good download.
+    if (declaredTotal > 0 && received < declaredTotal) {
+      throw UpdateFeedException(
+        'Download truncated: received $received of '
+        '$declaredTotal bytes from ${release.zipUrl}',
+      );
+    }
+
     // Verify SHA-256 against the .sha256 sidecar if one was
     // advertised. A missing sidecar is allowed (older releases
     // may not have one); we trust TLS + the asset URL comes
@@ -830,24 +858,17 @@ class UpdateController {
     }
   }
 
-  /// Spawns the standalone helper executable (`octodo_helper.exe`)
-  /// with the right env vars, then exits the original process. The
-  /// helper reads its env vars at the top of its `main()`, applies
-  /// the staged payload over the install dir, and relaunches the
-  /// freshly-replaced `octodo.exe`.
+  /// Spawns the apply orchestrator, then exits the original
+  /// process. The orchestrator waits for our exit, replaces the
+  /// install, and relaunches the new version.
   ///
-  /// Why a *separate* exe (not `octodo.exe` with env vars):
-  /// `octodo.exe` statically imports five plugin DLLs
-  /// (`desktop_drop_plugin.dll`, `flutter_windows.dll`,
-  /// `screen_retriever_windows_plugin.dll`,
-  /// `url_launcher_windows_plugin.dll`, `window_manager_plugin.dll`).
-  /// The Windows loader maps them into the process address space
-  /// *before* `main()` runs, so a helper-mode spawn of `octodo.exe`
-  /// cannot overwrite them — Windows returns `ERROR_ALREADY_EXISTS`
-  /// (errno 183) on every retry attempt. The standalone helper
-  /// (compiled from `tool/update_helper.dart`) doesn't link against
-  /// any of those DLLs, so it can freely overwrite every file in the
-  /// install dir.
+  ///   * Windows — `octodo_helper.exe` applies the staged payload
+  ///     per-file over the install dir (see [_spawnHelper] for why
+  ///     a separate binary is required).
+  ///   * macOS — `/bin/sh` + a generated script swaps the .app
+  ///     bundle (see [_spawnPosixApply] and
+  ///     posix_apply_script.dart for why the bundled Dart helper
+  ///     cannot be used there).
   ///
   /// Sequence:
   ///   1. pre-apply checks — everything that can fail WITHOUT
@@ -855,10 +876,11 @@ class UpdateController {
   ///      error (staged zip still present; on macOS: running from
   ///      a .app bundle and its parent dir writable).
   ///   2. setInstalling() — UI shows "Restarting to apply update…".
-  ///   3. spawn helper detached with env vars + current PID.
-  ///   4. wait ~2s so the helper begins and notices it's in helper
-  ///      mode (pre-empts file-lock collisions while we're alive).
-  ///   5. exit(0) — the helper then extracts + applies + relaunches.
+  ///   3. spawn the orchestrator detached (sh + script on macOS;
+  ///      helper exe with env vars + current PID on Windows).
+  ///   4. wait ~2s so the orchestrator begins (pre-empts file-lock
+  ///      collisions while we're alive).
+  ///   5. exit(0) — it then extracts + applies + relaunches.
   Future<void> applyDownloaded() async {
     if (distribution == InstallDistribution.store) {
       _log.warning('applyDownloaded() called on a Store distribution; '
@@ -961,9 +983,9 @@ class UpdateController {
   }
 
   /// Resolve the standalone helper binary path next to the running
-  /// executable (Windows: install dir; macOS:
-  /// `Octodo.app/Contents/MacOS/`). Returns null if the file is
-  /// absent — the caller surfaces a clear error in that case so
+  /// executable (Windows only — the macOS apply runs through
+  /// /bin/sh and needs no helper binary). Returns null if the file
+  /// is absent — the caller surfaces a clear error in that case so
   /// the user knows to reinstall rather than retry blindly.
   File? _resolveHelperExe() {
     final installDir = p.dirname(Platform.resolvedExecutable);
@@ -972,10 +994,35 @@ class UpdateController {
     return f.existsSync() ? f : null;
   }
 
+  /// Spawns the apply orchestrator, then the caller exits the
+  /// original process. The orchestrator waits for our exit,
+  /// replaces the install, and relaunches the new version.
+  ///
+  ///   * macOS — `/bin/sh` with a generated script (see
+  ///     [_spawnPosixApply]). The bundled Dart helper
+  ///     (`octodo_helper`) is NOT exec'd: the Dart AOT runtime
+  ///     writes its own code pages at boot, and macOS Hardened
+  ///     Runtime enforces W^X, so the kernel kills the helper ~50 ms
+  ///     after exec ("CODE SIGNING: rejecting invalid page",
+  ///     wpmapped:1) — the bug where the app quit, nothing was
+  ///     applied, and manual relaunch showed the old version.
+  ///     /bin/sh + ditto + open are all Apple-signed OS binaries,
+  ///     immune to Gatekeeper / HR kills (same property that makes
+  ///     cmux's Sparkle updater reliable).
+  ///
+  ///   * Windows — the standalone helper exe
+  ///     (`octodo_helper.exe`, compiled from tool/update_helper.dart):
+  ///     `octodo.exe` statically imports plugin DLLs that Windows
+  ///     locks into the process address space before `main()` runs,
+  ///     so the app cannot overwrite them in-place; the helper links
+  ///     against none of them and can.
   Future<bool> _spawnHelper({
     required String version,
     required int pid,
   }) async {
+    if (Platform.isMacOS) {
+      return _spawnPosixApply(pid: pid);
+    }
     final helper = _resolveHelperExe();
     if (helper == null) {
       // Without the standalone helper exe we cannot safely apply
@@ -1002,10 +1049,6 @@ class UpdateController {
           'OCTODO_UPDATE_HELPER': '1',
           'OCTODO_UPDATE_PAYLOAD': version,
           'OCTODO_UPDATE_PID': pid.toString(),
-          // macOS bundle swap: the GUI binary's name inside the new
-          // bundle (the helper's own basename is `octodo_helper`,
-          // useless for relaunching the app). Ignored on Windows.
-          'OCTODO_UPDATE_APP_EXE': p.basename(Platform.resolvedExecutable),
         },
         mode: ProcessStartMode.detached,
       );
@@ -1018,6 +1061,59 @@ class UpdateController {
         // body's Retry button is hidden (see update_popover_view),
         // and the user is stuck after pressing "Restart to
         // install" — clicking "Close" only resets the state.
+        onRetry: applyDownloaded,
+        onDismiss: () => model.reset(),
+      ));
+      return false;
+    }
+  }
+
+  /// macOS apply: write the POSIX apply script into the staging
+  /// dir and spawn `/bin/sh` detached with the runtime values as
+  /// argv. The script (see posix_apply_script.dart) waits for our
+  /// pid to exit, ditto-extracts the staged zip, swaps the .app
+  /// bundle, and relaunches it via Launch Services.
+  ///
+  /// Any failure here (script write, spawn) surfaces an error
+  /// payload while the GUI is still alive — same contract as the
+  /// Windows helper path.
+  Future<bool> _spawnPosixApply({required int pid}) async {
+    final d = model.downloaded;
+    if (d == null) return false;
+    final bundleRootPath = macAppBundleRoot(Platform.resolvedExecutable);
+    // Defensive: _preApplyCheck already refuses non-bundle macOS
+    // runs before we get here.
+    if (bundleRootPath == null) {
+      model.setError(UpdateErrorPayload(
+        message: 'Octodo must run from its Octodo.app bundle to '
+            'self-update. Reinstall from the download page.',
+        technicalDetails: 'Running executable is not inside a .app '
+            'bundle: ${Platform.resolvedExecutable}\n'
+            'Manual download: $kAppRepositoryReleases',
+        onRetry: () => model.reset(),
+        onDismiss: () => model.reset(),
+      ));
+      return false;
+    }
+    final stagingDir = d.zipPath.parent;
+    try {
+      await spawnPosixApply(
+        pid: pid,
+        zipFile: d.zipPath,
+        extractDir: Directory(p.join(stagingDir.path, 'extracted')),
+        bundleRoot: Directory(bundleRootPath),
+        scriptFile: File(p.join(stagingDir.path, 'apply.sh')),
+        sentinelFile: resolveHelperCrashSentinelFile(),
+        homeDir: Platform.environment['HOME'] ?? '/',
+      );
+      return true;
+    } catch (e) {
+      model.setError(UpdateErrorPayload(
+        message: 'Could not start the update helper.',
+        technicalDetails: e.toString(),
+        // Hand the user a way back — without `onRetry` the error
+        // body's Retry button is hidden and the user is stuck
+        // after pressing "Restart to install".
         onRetry: applyDownloaded,
         onDismiss: () => model.reset(),
       ));
