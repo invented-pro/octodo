@@ -114,9 +114,12 @@ void main() {
     test(
       'writes a .zshenv inside <tmp>/octodo_zsh_integration and returns the dir',
       () async {
-        final dirPath =
-            await TerminalWorkspaceState.writeZshIntegrationForTest();
-        expect(dirPath, endsWith('octodo_zsh_integration'));
+        final dirPath = await TerminalWorkspaceState
+            .writeZshIntegrationForTest(realZdotdir: '/Users/tester');
+        // One subdirectory per baked ZDOTDIR (WSL distros on a Windows
+        // host have different $HOMEs) — the leaf is the sanitised key.
+        expect(dirPath, contains('octodo_zsh_integration'));
+        expect(dirPath, endsWith('_Users_tester'));
         final zshenv = File('$dirPath/.zshenv');
         expect(
           zshenv.existsSync(),
@@ -125,16 +128,17 @@ void main() {
         );
         final content = zshenv.readAsStringSync();
         expect(content, contains('precmd_functions+=(_octodo_osc7)'));
-        expect(content, contains('export ZDOTDIR='));
+        expect(content, contains("export ZDOTDIR='/Users/tester'"));
       },
     );
 
     test(
       'cached dir path is returned on subsequent calls (idempotent)',
       () async {
-        final first = await TerminalWorkspaceState.writeZshIntegrationForTest();
-        final second =
-            await TerminalWorkspaceState.writeZshIntegrationForTest();
+        final first = await TerminalWorkspaceState
+            .writeZshIntegrationForTest(realZdotdir: '/Users/tester');
+        final second = await TerminalWorkspaceState
+            .writeZshIntegrationForTest(realZdotdir: '/Users/tester');
         expect(second, first);
       },
     );

@@ -599,17 +599,9 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     // path, but ConPTY's input-side translation can swallow the OSC
     // reply on Windows — so also set OpenTUI's documented authoritative
     // override. Harmless when the reply got through (same protocol).
+    // WSL surfaces additionally need it listed in WSLENV (flagless —
+    // see the WSLENV composition block below).
     env['OPENTUI_NOTIFICATION_PROTOCOL'] = 'osc99';
-    if (profile.isWsl) {
-      final existing = env['WSLENV'] ?? Platform.environment['WSLENV'] ?? '';
-      var wslenv = existing;
-      if (!wslenv.contains('OPENTUI_NOTIFICATION_PROTOCOL')) {
-        wslenv = wslenv.isEmpty
-            ? 'OPENTUI_NOTIFICATION_PROTOCOL/u'
-            : '$wslenv:OPENTUI_NOTIFICATION_PROTOCOL/u';
-      }
-      env['WSLENV'] = wslenv;
-    }
 
     // Inject our self-contained OSC 7 PROMPT_COMMAND where the shell family
     // uses one (WSL, Git Bash, POSIX bash — see
@@ -631,19 +623,6 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       // the C mark is silently absent there (D-only completions are
       // dropped downstream — no measurable duration).
       env['PS0'] = _osc133Ps0;
-      if (profile.isWsl) {
-        final existing = Platform.environment['WSLENV'] ?? '';
-        var wslenv = existing;
-        if (!wslenv.contains('PROMPT_COMMAND')) {
-          wslenv = wslenv.isEmpty
-              ? 'PROMPT_COMMAND/u'
-              : '$wslenv:PROMPT_COMMAND/u';
-        }
-        if (!wslenv.contains('PS0')) {
-          wslenv = wslenv.isEmpty ? 'PS0/u' : '$wslenv:PS0/u';
-        }
-        env['WSLENV'] = wslenv;
-      }
     } else if (!Platform.isWindows &&
         Platform.environment.containsKey('PROMPT_COMMAND')) {
       // Suppress any inherited PROMPT_COMMAND on POSIX (macOS / Linux)
@@ -695,6 +674,50 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       // `resolveShellSpec` does — that's the seam we patch here.)
       env['PROMPT_COMMAND'] = '';
     }
+
+    // WSL distros whose default shell is zsh (wsl.exe launches the
+    // login shell from /etc/passwd — e.g. a Debian where the user
+    // chsh'd to zsh) never read the bash-only PROMPT_COMMAND / PS0
+    // injected above: no OSC 7 cwd reporting, no OSC 133 marks, no
+    // command-completion notifications. zsh instead sources
+    // `$ZDOTDIR/.zshenv` before any other startup file — the same
+    // shim `_ensureZshOsc7Integration` writes for POSIX zsh tabs,
+    // except the dir must be handed to the distro as its WSL
+    // `/mnt/<drive>/…` view (WSLENV forwards values verbatim) and the
+    // shim restores ZDOTDIR to the distro's own $HOME dynamically
+    // (querying it upfront races cold-distro startup and would skip
+    // the integration on a slow first spawn). bash ignores ZDOTDIR
+    // entirely, so shipping it alongside the bash injections is
+    // safe.
+    if (profile.isWsl && profile.showCwdInTitle) {
+      final shimDir = await _ensureZshOsc7Integration();
+      final shimWslPath = _windowsPathToWslPath(shimDir);
+      if (shimWslPath != null) {
+        env['ZDOTDIR'] = shimWslPath;
+      }
+    }
+
+    // Single WSLENV composition for WSL surfaces. (This replaces two
+    // inline appends whose second one rebuilt the value from
+    // `Platform.environment` — clobbering the first block's
+    // OPENTUI_NOTIFICATION_PROTOCOL entry, so WSL sessions never saw
+    // the OpenTUI override at all.)
+    //
+    // OPENTUI_NOTIFICATION_PROTOCOL is listed FLAGLESS deliberately:
+    // WSLENV /u entries only travel Win32→WSL, but the common "run
+    // opencode in a WSL tab" setup resolves `opencode` to the
+    // WINDOWS install via PATH interop (the npm shim execs node.exe)
+    // — a Windows process that only receives WSLENV vars flagged /w
+    // or unflagged. Flagless covers both directions: native-Linux
+    // opencode (Win→WSL) and interop Windows opencode (WSL→Win).
+    if (profile.isWsl) {
+      env['WSLENV'] = _composeWslenv(
+        env['WSLENV'] ?? Platform.environment['WSLENV'] ?? '',
+        bashIntegration: injectOsc7PromptCommand,
+        zshIntegration: env.containsKey('ZDOTDIR'),
+      );
+    }
+
     // Resync `SHELL` to the program we're actually about to launch. The
     // user's login shell (per `chsh` / `/etc/passwd`) is propagated through
     // the parent env, so `echo $SHELL` inside a tab reflects the LOGIN
@@ -721,7 +744,11 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     // ZDOTDIR so the rest of their startup chain (.zprofile / .zshrc /
     // .zlogin) loads exactly as before. See `_ensureZshOsc7Integration`.
     if (!Platform.isWindows && profile.isPosixZsh && profile.showCwdInTitle) {
-      env['ZDOTDIR'] = await _ensureZshOsc7Integration();
+      env['ZDOTDIR'] = await _ensureZshOsc7Integration(
+        realZdotdir: Platform.environment['ZDOTDIR'] ??
+            Platform.environment['HOME'] ??
+            '/',
+      );
     }
 
     // POSIX fish: stock fish emits no OSC 7 on any platform and reads no
@@ -820,10 +847,16 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   ///
   /// The shim must do three things, in order:
   ///
-  /// 1. Restore the user's real ZDOTDIR (baked in by Dart at write time)
-  ///    so every later startup file — `.zprofile`, `.zshrc`, `.zlogin` —
-  ///    loads from its normal location, and so nested zsh processes
-  ///    inherit the real value instead of re-running this shim.
+  /// 1. Restore the user's real ZDOTDIR so every later startup file —
+  ///    `.zprofile`, `.zshrc`, `.zlogin` — loads from its normal
+  ///    location, and so nested zsh processes inherit the real value
+  ///    instead of re-running this shim. [realZdotdir] bakes the exact
+  ///    path when the host knows it (POSIX tabs); `null` emits a
+  ///    dynamic `export ZDOTDIR="$HOME"` instead — the WSL path, where
+  ///    querying the distro $HOME upfront (`wslpath -u ~`, capped at
+  ///    1 s) races cold-distro startup and would silently disable the
+  ///    whole integration on a slow first spawn. Inside the distro
+  ///    $HOME is always the right default, whatever the user name.
   /// 2. Register the OSC 7 `precmd` hook and the OSC 133 shell-
   ///    integration hooks (`_octodo_133c` on `preexec_functions` for
   ///    "command started", `_octodo_133d` at the HEAD of
@@ -843,10 +876,10 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// e.g. ghostty/kitty/VS Code hooks) are harmless: the engine just
   /// re-parses the same sequences, and the Dart-side 133 scanner is
   /// idempotent per mark.
-  static String _zshEnvShim(String realZdotdir) =>
+  static String _zshEnvShim(String? realZdotdir) =>
       '''
 # octodo shell integration (OSC 7 cwd reporting + OSC 133 marks)
-export ZDOTDIR='${_shellSingleQuote(realZdotdir)}'
+${realZdotdir == null ? 'export ZDOTDIR="\$HOME"' : "export ZDOTDIR='${_shellSingleQuote(realZdotdir)}'"}
 _octodo_osc7() { printf '\\033]7;file://%s%s\\033\\\\' "\$HOST" "\$PWD" }
 _octodo_133d() { printf '\\033]133;D;%s\\033\\\\' "\$?" }
 _octodo_133c() { printf '\\033]133;C\\033\\\\' }
@@ -862,31 +895,94 @@ typeset -ga preexec_functions
   /// shell script ('…' + `\'` + '…' concatenation).
   static String _shellSingleQuote(String s) => s.replaceAll("'", r"'\''");
 
-  /// Cached absolute path of the temp ZDOTDIR written by
-  /// [_ensureZshOsc7Integration]. Cleared between app runs; reused across
-  /// every zsh tab within a single run (the shim is idempotent and
-  /// content-identical).
-  static String? _zshIntegrationDirPath;
+  /// Compose the WSLENV value handed to a WSL surface from [existing]
+  /// (anything the user set themselves) plus the vars the injections
+  /// above need inside the distro.
+  ///
+  /// Entries are deduped by variable NAME — a user's own `FOO/flags`
+  /// entry must not be joined by a duplicate `FOO/u`, and a plain
+  /// substring check would conflate `X_PROMPT_COMMAND`-style names.
+  ///
+  /// Flags: `PROMPT_COMMAND` / `PS0` / `ZDOTDIR` get `/u` (they only
+  /// make sense inside the distro). `OPENTUI_NOTIFICATION_PROTOCOL`
+  /// is flagless so it also crosses back to Windows children launched
+  /// from WSL (the interop direction strips `/u`-only entries — see
+  /// the WSLENV composition block in `_makeSurface`).
+  static String _composeWslenv(
+    String existing, {
+    required bool bashIntegration,
+    required bool zshIntegration,
+  }) {
+    var wslenv = existing;
+    void add(String entry) {
+      final name = entry.split('/').first;
+      final taken = wslenv
+          .split(':')
+          .any((e) => e.split('/').first == name && e.isNotEmpty);
+      if (!taken) {
+        wslenv = wslenv.isEmpty ? entry : '$wslenv:$entry';
+      }
+    }
 
-  /// Write the zsh OSC 7 shim (see [_zshEnvShim]) into a temp directory
-  /// as `.zshenv` and return the directory path, which `_makeSurface`
-  /// exports as `ZDOTDIR` for zsh tabs. Called once per zsh spawn but
-  /// cached so subsequent spawns reuse the same directory.
-  static Future<String> _ensureZshOsc7Integration() async {
-    final cached = _zshIntegrationDirPath;
+    add('OPENTUI_NOTIFICATION_PROTOCOL');
+    if (bashIntegration) {
+      add('PROMPT_COMMAND/u');
+      add('PS0/u');
+    }
+    if (zshIntegration) add('ZDOTDIR/u');
+    return wslenv;
+  }
+
+  /// `C:\Users\…` → `/mnt/c/Users/…`, the drvfs path a WSL process
+  /// sees for a Windows-side file. null when [path] is not an absolute
+  /// drive-letter path (WSLENV forwards values verbatim, so the WSL
+  /// side needs the already-translated form; both separators are
+  /// accepted because `Directory.systemTemp` and cached paths have
+  /// historically shown up in both forms).
+  static String? _windowsPathToWslPath(String path) {
+    final m = RegExp(r'^([A-Za-z]):[\\/](.*)$').firstMatch(path);
+    if (m == null) return null;
+    return '/mnt/${m.group(1)!.toLowerCase()}/'
+        '${m.group(2)!.replaceAll('\\', '/')}';
+  }
+
+  /// Cached absolute paths of the temp ZDOTDIRs written by
+  /// [_ensureZshOsc7Integration], keyed by the real ZDOTDIR baked
+  /// into each shim (`null` — the dynamic `$HOME` restore used for
+  /// WSL — is one shared entry). Keyed (not a single path) because a
+  /// Windows host spawns WSL distros with DIFFERENT $HOMEs
+  /// (/home/alice vs /home/bob) alongside POSIX-host zsh tabs — a
+  /// shared cache would hand one distro another distro's restore
+  /// path. Cleared between app runs; reused across every zsh surface
+  /// within a single run (the shim is idempotent and
+  /// content-identical per key).
+  static final Map<String?, String> _zshIntegrationDirs = {};
+
+  /// Write the zsh OSC 7 shim (see [_zshEnvShim]) into a temp
+  /// directory as `.zshenv` and return the directory path, which
+  /// `_makeSurface` exports as `ZDOTDIR` for zsh tabs. [realZdotdir]
+  /// is the ZDOTDIR the shim restores — on POSIX hosts it defaults to
+  /// the user's own ZDOTDIR/HOME; WSL surfaces pass null for the
+  /// dynamic `$HOME` restore (see [_zshEnvShim]). Called per zsh
+  /// spawn but cached per realZdotdir. The file is written with LF
+  /// endings whatever the host checkout uses — a CRLF shim makes zsh
+  /// source lines ending in `$'\r'` and every hook silently fails.
+  static Future<String> _ensureZshOsc7Integration({String? realZdotdir}) async {
+    final cached = _zshIntegrationDirs[realZdotdir];
     if (cached != null) return cached;
-    // The user's real ZDOTDIR: normally unset (zsh then uses $HOME); when
-    // set (oh-my-zsh custom ZDOTDIR layouts, Nix etc.) restore THAT.
-    final realZdotdir =
-        Platform.environment['ZDOTDIR'] ?? Platform.environment['HOME'] ?? '/';
+    // One subdirectory per baked ZDOTDIR (sanitised): two distros —
+    // or a custom ZDOTDIR — must never share a shim file.
+    final slug = (realZdotdir ?? 'wsl-dynamic-home')
+        .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
     final dir = Directory(
-      '${Directory.systemTemp.path}/octodo_zsh_integration',
+      '${Directory.systemTemp.path}/octodo_zsh_integration/$slug',
     );
     await dir.create(recursive: true);
-    await File(
-      '${dir.path}/.zshenv',
-    ).writeAsString(_zshEnvShim(realZdotdir), flush: true);
-    _zshIntegrationDirPath = dir.path;
+    await File('${dir.path}/.zshenv').writeAsString(
+      _zshEnvShim(realZdotdir).replaceAll('\r\n', '\n'),
+      flush: true,
+    );
+    _zshIntegrationDirs[realZdotdir] = dir.path;
     return dir.path;
   }
 
@@ -895,8 +991,23 @@ typeset -ga preexec_functions
   /// fish snippet, and the temp-dir writer without spinning up real
   /// zsh / fish processes.
   @visibleForTesting
-  static String zshEnvShimForTest(String realZdotdir) =>
+  static String zshEnvShimForTest(String? realZdotdir) =>
       _zshEnvShim(realZdotdir);
+
+  @visibleForTesting
+  static String composeWslenvForTest(
+    String existing, {
+    required bool bashIntegration,
+    required bool zshIntegration,
+  }) => _composeWslenv(
+        existing,
+        bashIntegration: bashIntegration,
+        zshIntegration: zshIntegration,
+      );
+
+  @visibleForTesting
+  static String? windowsPathToWslPathForTest(String path) =>
+      _windowsPathToWslPath(path);
 
   @visibleForTesting
   static String get fishOsc7InitForTest => _fishOsc7Init;
@@ -908,8 +1019,8 @@ typeset -ga preexec_functions
   static String get osc133Ps0ForTest => _osc133Ps0;
 
   @visibleForTesting
-  static Future<String> writeZshIntegrationForTest() =>
-      _ensureZshOsc7Integration();
+  static Future<String> writeZshIntegrationForTest({String? realZdotdir}) =>
+      _ensureZshOsc7Integration(realZdotdir: realZdotdir);
 
   /// PowerShell init script that overrides `prompt` to emit OSC 2 with
   /// the cwd after each prompt (chained to the user's own prompt), plus
