@@ -143,7 +143,12 @@ Future<void> main() async {
     center: true,
     backgroundColor: backgroundColor,
   );
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
+  // Awaited so `setTitle(kAppName)` inside the callback completes before
+  // `runApp` — the post-frame `_applyBackdrop()` resolves the acrylic
+  // target window via `FindWindowW` on that exact title, and a fire-and-
+  // forget here races the first frame (window found with a stale/empty
+  // title → backdrop silently never applied → fully transparent window).
+  await windowManager.waitUntilReadyToShow(windowOptions, () async {
     await windowManager.show();
     await windowManager.focus();
     // Apply the localized title after the window is up — kAppName is
@@ -261,7 +266,9 @@ class _OctodoAppState extends State<OctodoApp> {
     final frostLevel = store.get<double>(catalog.general.frostLevel);
     final alpha = frosted ? frostLevel : opacity;
     if (frosted) {
-      enableAcrylic(title: kAppName, tint: palette.surface0, alpha: alpha);
+      // Fire-and-forget: enableAcrylic now retries its window lookup
+      // internally, so a late window title resolves itself.
+      unawaited(enableAcrylic(title: kAppName, tint: palette.surface0, alpha: alpha));
     } else {
       windowManager.setBackgroundColor(
         _windowBackground(palette, opacity, frosted),
