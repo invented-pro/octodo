@@ -239,23 +239,33 @@ class Surface extends ChangeNotifier {
   /// The full title to render in the tab chip. Tries the shell-set
   /// title first; if [_shortenTitle] reduces it to an empty string
   /// (e.g. ConPTY sent the raw process name `pwsh.exe` and the
-  /// `.exe` filter stripped it), falls back to [fallbackTitle] so
-  /// the chip never shows the literal "shell" placeholder.
+  /// `.exe` filter stripped it), falls back to [fallbackTitle] so the
+  /// chip never shows the literal "shell" placeholder.
   ///
-  /// For shells with `showCwdInTitle == true` (WSL, Git Bash), the
-  /// OSC 0 title is skipped entirely in favour of [fallbackTitle]
-  /// (OSC 7 based). ConPTY intermittently drops the OSC 0 sequence
-  /// emitted by the shell's PS1, which would leave the chip showing
-  /// a stale cwd. OSC 7 (emitted by our injected `PROMPT_COMMAND`)
-  /// is consistently passed through by ConPTY for WSL/Git Bash, so
-  /// [fallbackTitle] is the more reliable source.
+  /// The one shell-set title that is NOT shown is the synthetic
+  /// `PowerShell - <cwd>` string octodo's own pwsh init script emits
+  /// (it exists purely as the cwd channel — see
+  /// `TerminalWorkspace._pwshInitScript`), and only for
+  /// `showCwdInTitle` profiles whose cwd-tracking relies on it.
+  /// Anything else a program sets via OSC 0/2 — opencode's
+  /// `OC | <session topic>`, nvim's filename, tmux's window name —
+  /// is real information and wins over the derived fallback. When the
+  /// program exits the shell's prompt hook re-emits the synthetic
+  /// title and the chip falls back again.
   String get chipTitle {
-    if (_title.isNotEmpty && !(profile?.showCwdInTitle ?? false)) {
+    if (_title.isNotEmpty && !_isSyntheticCwdTitle) {
       final shortened = _shortenTitle(_title);
       if (shortened.isNotEmpty) return shortened;
     }
     return fallbackTitle;
   }
+
+  /// True when [_title] is octodo's own synthetic per-prompt
+  /// `PowerShell - <cwd>` OSC 2 title rather than a title an
+  /// application chose. Only checked for PowerShell profiles —
+  /// they're the ones whose init script writes that exact prefix.
+  bool get _isSyntheticCwdTitle =>
+      (profile?.isPowerShell ?? false) && _title.startsWith('PowerShell - ');
 
   /// True when [cwd] should be shown as `~` in the tab chip.
   ///

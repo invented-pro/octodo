@@ -592,6 +592,25 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
       }
     }
 
+    // OpenTUI-based TUIs (opencode et al.) only emit their kitty
+    // OSC 99 "attention" notifications (task done / needs input) when
+    // they believe the terminal supports the protocol. Octodo's probe
+    // reply (see Osc99ProbeReply) covers terminals with a clean input
+    // path, but ConPTY's input-side translation can swallow the OSC
+    // reply on Windows — so also set OpenTUI's documented authoritative
+    // override. Harmless when the reply got through (same protocol).
+    env['OPENTUI_NOTIFICATION_PROTOCOL'] = 'osc99';
+    if (profile.isWsl) {
+      final existing = env['WSLENV'] ?? Platform.environment['WSLENV'] ?? '';
+      var wslenv = existing;
+      if (!wslenv.contains('OPENTUI_NOTIFICATION_PROTOCOL')) {
+        wslenv = wslenv.isEmpty
+            ? 'OPENTUI_NOTIFICATION_PROTOCOL/u'
+            : '$wslenv:OPENTUI_NOTIFICATION_PROTOCOL/u';
+      }
+      env['WSLENV'] = wslenv;
+    }
+
     // Inject our self-contained OSC 7 PROMPT_COMMAND where the shell family
     // uses one (WSL, Git Bash, POSIX bash — see
     // `ShellProfile.needsPromptCommandForOsc7`). Stock POSIX bash emits no
@@ -906,12 +925,20 @@ typeset -ga preexec_functions
   ///     accepted rather than zeroing a variable user scripts own.
   ///     We deliberately do NOT read `$?` — its semantics after
   ///     assignment statements are version-dependent.
-  ///   * `C` (command started) — emitted from a wrapper around
-  ///     `PSConsoleHostReadConsole`, the function PSReadLine installs
-  ///     and the host calls to read each input line. Only wrapped when
-  ///     it already exists (PSReadLine loaded via the user's $PROFILE,
-  ///     which runs before this `-File` script); on hosts without it we
-  ///     skip the C mark rather than change the input path.
+  ///   * `C`/`D` (command started / finished) — BOTH emitted from the
+  ///     `prompt` wrapper, only when a new command entered the session
+  ///     history since the last prompt render (`Get-History -Count 1`
+  ///     id guard — prompt repaints fire with unchanged history). The
+  ///     earlier design hooked `PSConsoleHostReadConsole` for a live
+  ///     pre-execution C mark, but PSReadLine defines that function
+  ///     only when it loads — AFTER this `-File` script runs — so the
+  ///     hook never landed and every completion arrived duration-less
+  ///     (dropped by the hub). Instead the C mark carries the
+  ///     command's real start time as epoch milliseconds (from the
+  ///     history entry's `StartExecutionTime`, same source Windows
+  ///     Terminal's shell integration uses); the Dart side
+  ///     (`TerminalView._onOsc133Mark`) prefers it over wall-clock
+  ///     timing.
   ///
   /// Why OSC 2 (not OSC 7) for the cwd: ConPTY intercepts OSC 7 from
   /// PowerShell on Windows, so the Alacritty engine never sees the cwd
@@ -939,6 +966,7 @@ typeset -ga preexec_functions
   static const String _pwshInitScript = r'''
 $__Esc = [char]27
 $__Bel = [char]7
+$Global:__octodoLastHistoryId = -1
 if (-not (Test-Path Function:__octodo_original_prompt)) {
     if (Test-Path Function:prompt) {
         Set-Item -Path Function:__octodo_original_prompt -Value (Get-Item Function:prompt).ScriptBlock
@@ -948,24 +976,22 @@ if (-not (Test-Path Function:__octodo_original_prompt)) {
 }
 function prompt {
     $__code = 0
+    $__h = $null
     try {
         $__h = Get-History -Count 1 -ErrorAction SilentlyContinue
         if ($__h -and $__h.ExecutionStatus -ne [System.Management.Automation.Runspaces.PipelineState]::Completed) { $__code = 1 }
     } catch {}
     if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $__code = $LASTEXITCODE }
+    if ($null -ne $__h -and $__h.Id -ne $Global:__octodoLastHistoryId -and $null -ne $__h.StartExecutionTime) {
+        $Global:__octodoLastHistoryId = $__h.Id
+        $__startMs = [DateTimeOffset]::new($__h.StartExecutionTime.ToUniversalTime()).ToUnixTimeMilliseconds()
+        Write-Host -NoNewline "${__Esc}]133;C;${__startMs}${__Bel}"
+        Write-Host -NoNewline "${__Esc}]133;D;${__code}${__Bel}"
+    }
     $__path = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath
     $__result = & (Get-Item Function:__octodo_original_prompt)
     Write-Host -NoNewline "${__Esc}]2;PowerShell - ${__path}${__Bel}"
-    Write-Host -NoNewline "${__Esc}]133;D;${__code}${__Bel}"
     return $__result
-}
-if ((Test-Path Function:PSConsoleHostReadConsole) -and -not (Test-Path Function:__octodo_original_readconsole)) {
-    Set-Item -Path Function:__octodo_original_readconsole -Value (Get-Item Function:PSConsoleHostReadConsole).ScriptBlock
-    function global:PSConsoleHostReadConsole {
-        $__line = & (Get-Item Function:__octodo_original_readconsole)
-        Write-Host -NoNewline "${__Esc}]133;C${__Bel}"
-        $__line
-    }
 }
 ''';
 

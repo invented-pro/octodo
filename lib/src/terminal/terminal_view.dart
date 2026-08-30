@@ -1360,6 +1360,8 @@ class TerminalViewState extends State<TerminalView> {
         }
         _osc99Pending.remove(id);
         if (title.isEmpty && body.isEmpty) return;
+        _log.fine('OSC99 notify (title=${title.isEmpty ? "-" : title}'
+            ' body=${body.isEmpty ? "-" : body})');
         widget.onAttention?.call(
           TerminalAttention(
             kind: AttentionKind.oscNotify,
@@ -1398,7 +1400,15 @@ class TerminalViewState extends State<TerminalView> {
   /// `A` / `B` (prompt/input marks) are currently ignored.
   void _onOsc133Mark(String mark) {
     if (mark.startsWith('C')) {
-      _cmdStartedAt = DateTime.now();
+      // `C;<epoch-ms>` (pwsh integration): the command's real start
+      // time from the shell's own history timestamps — exact even
+      // though the mark arrives at prompt time. Bare `C` (bash PS0 /
+      // VS Code / WezTerm integrations) fires pre-execution, so
+      // wall-clock now() is right there.
+      final epochMs = int.tryParse(mark.length > 2 ? mark.substring(2) : '');
+      _cmdStartedAt = epochMs == null
+          ? DateTime.now()
+          : DateTime.fromMillisecondsSinceEpoch(epochMs);
       return;
     }
     if (mark.startsWith('D')) {

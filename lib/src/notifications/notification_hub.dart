@@ -448,7 +448,10 @@ class NotificationHub extends ChangeNotifier {
     }
     _SurfaceUnread? newest;
     for (final entry in _eligibleSurfaces()) {
-      if (newest == null || entry.lastEventAt.isAfter(newest.lastEventAt)) {
+      // >= (not >): on same-clock-tick timestamps the later-iterated
+      // surface wins — insertion order mirrors arrival order, and a
+      // strict isAfter would make the pick nondeterministic.
+      if (newest == null || !newest.lastEventAt.isAfter(entry.lastEventAt)) {
         newest = entry;
       }
     }

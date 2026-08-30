@@ -13,6 +13,15 @@ void main() {
       expect(scanner.scan(b('\x1b]133;C\x07')), ['C']);
     });
 
+    test('extracts a C mark carrying an epoch-ms argument (pwsh)', () {
+      // The pwsh integration emits the command's real start time with
+      // the C mark because it is produced at prompt time, not
+      // pre-execution.
+      final scanner = Osc133Scanner();
+      expect(scanner.scan(b('\x1b]133;C;1788078174728\x07')),
+          ['C;1788078174728']);
+    });
+
     test('extracts a D mark with exit code, ST-terminated', () {
       final scanner = Osc133Scanner();
       expect(scanner.scan(b('\x1b]133;D;0\x1b\\')), ['D;0']);

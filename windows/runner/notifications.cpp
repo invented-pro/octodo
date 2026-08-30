@@ -7,11 +7,15 @@
 #include <Windows.UI.Notifications.h>
 #include <flutter/encodable_value.h>
 #include <objbase.h>
+#include <propkey.h>
+#include <propsys.h>
 #include <roapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <winstring.h>
 #include <wrl/client.h>
+#include <wrl/event.h>
 #include <wrl/implements.h>
 #include <wrl/wrappers/corewrappers.h>
 
@@ -27,7 +31,6 @@ using ABI::Windows::Data::Xml::Dom::IXmlDocument;
 using ABI::Windows::Data::Xml::Dom::IXmlNode;
 using ABI::Windows::Data::Xml::Dom::IXmlNodeList;
 using ABI::Windows::Data::Xml::Dom::IXmlText;
-using ABI::Windows::Foundation::EventRegistrationToken;
 using ABI::Windows::UI::Notifications::IToastNotification;
 using ABI::Windows::UI::Notifications::IToastNotification2;
 using ABI::Windows::UI::Notifications::IToastNotificationFactory;
@@ -35,13 +38,14 @@ using ABI::Windows::UI::Notifications::IToastNotificationHistory;
 using ABI::Windows::UI::Notifications::IToastNotificationManagerStatics;
 using ABI::Windows::UI::Notifications::IToastNotificationManagerStatics2;
 using ABI::Windows::UI::Notifications::IToastNotifier;
+using ABI::Windows::UI::Notifications::ToastNotification;
 using ABI::Windows::UI::Notifications::ToastTemplateType;
 using ABI::Windows::UI::Notifications::ToastTemplateType_ToastText02;
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::FtmBase;
-using Microsoft::WRL::HStringReference;
 using Microsoft::WRL::Wrappers::HString;
+using Microsoft::WRL::Wrappers::HStringReference;
 
 namespace octodo {
 
@@ -73,12 +77,86 @@ std::wstring EncodableToString(const flutter::EncodableValue* v) {
   return out;
 }
 
+// EncodableValue carries UTF-8 std::string, not wstring.
+std::string WideStringToUtf8(const std::wstring& ws) {
+  if (ws.empty()) return {};
+  int len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(),
+                                nullptr, 0, nullptr, nullptr);
+  std::string out(len, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(), out.data(),
+                      len, nullptr, nullptr);
+  return out;
+}
+
 // HSTRING for the AUMID constant. Two-arg constructor form — the
 // single-arg array template is explicit and does not bind a
 // constexpr pointer.
 HStringReference AumidRef() {
   return HStringReference(
       kAumid, (UINT32)(sizeof(kAumid) / sizeof(kAumid[0]) - 1));
+}
+
+// Windows only displays toasts posted under an AUMID when that AUMID
+// resolves to a Start Menu shortcut carrying
+// System.AppUserModel.ID (or to a packaged app identity). Unpackaged
+// dev builds have no installer to make one, and Windows then drops
+// every toast silently — so the runner maintains the shortcut itself:
+// created when missing, repointed when the running exe moves (Debug ↔
+// Release trees). Same approach as Microsoft's desktop-toast compat
+// library. Best-effort — a failure here never blocks startup.
+void EnsureAumidShortcut() {
+  wchar_t exe[MAX_PATH] = {};
+  if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return;
+
+  PWSTR programs_raw = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_Programs, KF_FLAG_DEFAULT,
+                                  nullptr, &programs_raw)) ||
+      !programs_raw) {
+    return;
+  }
+  const std::wstring lnk =
+      std::wstring(programs_raw) + L"\\Octodo.lnk";
+  CoTaskMemFree(programs_raw);
+
+  // Already pointing at this exe? Nothing to do.
+  if (GetFileAttributesW(lnk.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    ComPtr<IPersistFile> reader;
+    if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr,
+                                   CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&reader))) &&
+        reader && SUCCEEDED(reader->Load(lnk.c_str(), STGM_READ))) {
+      ComPtr<IShellLinkW> existing;
+      wchar_t target[MAX_PATH] = {};
+      if (SUCCEEDED(reader.As(&existing)) && existing &&
+          SUCCEEDED(existing->GetPath(target, MAX_PATH, nullptr,
+                                      SLGP_RAWPATH)) &&
+          _wcsicmp(target, exe) == 0) {
+        return;
+      }
+    }
+  }
+
+  ComPtr<IShellLinkW> link;
+  if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr,
+                              CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&link))) ||
+      !link) {
+    return;
+  }
+  link->SetPath(exe);
+  link->SetDescription(L"Octodo");
+  ComPtr<IPropertyStore> store;
+  if (SUCCEEDED(link.As(&store)) && store) {
+    PROPVARIANT pv = {};
+    pv.vt = VT_LPWSTR;
+    pv.pwszVal = const_cast<PWSTR>(kAumid);
+    store->SetValue(PKEY_AppUserModel_ID, pv);
+    store->Commit();
+  }
+  ComPtr<IPersistFile> file;
+  if (SUCCEEDED(link.As(&file)) && file) {
+    file->Save(lnk.c_str(), TRUE);
+  }
 }
 
 // ── Toast content ─────────────────────────────────────────────────
@@ -103,8 +181,10 @@ void SetXmlText(IXmlDocument* xml, IXmlNodeList* nodes, UINT32 idx,
           &text))) {
     return;
   }
+  ComPtr<IXmlNode> text_node;
+  if (FAILED(text.As(&text_node))) return;
   ComPtr<IXmlNode> appended;
-  node->AppendChild(text.Get(), &appended);
+  node->AppendChild(text_node.Get(), &appended);
 }
 
 // ToastText02 template: two <text> nodes — first renders bold (the
@@ -155,12 +235,15 @@ void ShowToast(const std::wstring& id, const std::wstring& title,
   // the handler on its thread-pool thread regardless of the
   // apartment the toast was created on.
   EventRegistrationToken token{};
+  // NB: the delegate interface must be Implements' FIRST interface —
+  // Callback extracts it via FirstInterface; with FtmBase first it
+  // would grab FtmBase's CloakedIid<IMarshal> instead.
   auto on_activated = Callback<
       Microsoft::WRL::Implements<Microsoft::WRL::RuntimeClassFlags<
                                      Microsoft::WRL::ClassicCom>,
-                                 FtmBase,
                                  ABI::Windows::Foundation::ITypedEventHandler<
-                                     ToastNotification*, IInspectable*>>>(
+                                     ToastNotification*, IInspectable*>,
+                                 FtmBase>>(
       [](IToastNotification* sender, IInspectable* /*args*/) -> HRESULT {
         std::wstring tag;
         ComPtr<IToastNotification2> t2;
@@ -201,21 +284,31 @@ void DismissToast(const std::wstring& id) {
       IID_PPV_ARGS(&mgr2));
   if (!mgr2) return;
   ComPtr<IToastNotificationHistory> history;
-  if (FAILED(mgr2->GetHistoryWithTitleId(AumidRef().Get(), &history)) ||
-      !history) {
+  // get_History() resolves "calling app", which is not reliable for a
+  // classic Win32 process posting under an explicit AUMID; the WithId
+  // remove variants pass the AUMID explicitly (same pattern as
+  // Microsoft's desktop-toast compat library).
+  if (FAILED(mgr2->get_History(&history)) || !history) {
     return;
   }
-  history->Remove(
-      HStringReference(id.data(), (UINT32)id.size()).Get());
+  history->RemoveGroupedTagWithId(
+      HStringReference(id.data(), (UINT32)id.size()).Get(),
+      HStringReference(L"").Get(), AumidRef().Get());
 }
 
 // ── Taskbar overlay badge ─────────────────────────────────────────
 
-// 16x16 32-bpp ARGB dot (Catppuccin Mocha accentPink #F38BA8 with a
-// white ring so it reads on both light and dark taskbars). Built at
-// runtime — no bundled icon resource to manage.
+// 64x64 32-bpp ARGB dot — solid red (#FF3B30, the conventional
+// "unread" notification red) with ~1px analytic anti-aliasing. The
+// taskbar draws overlays at the small-icon metric scaled by DPI
+// (~20-40 device px), so a 64px source is always DOWNscaled — a
+// hard-edged 16px bitmap instead got upscaled on high-DPI displays
+// and looked jagged. No white ring: at taskbar size a ring dominated
+// the dot and read as a white blob. Built at runtime — no bundled
+// icon resource to manage.
 HICON BuildDotIcon() {
-  constexpr int kSize = 16;
+  constexpr int kSize = 64;
+  constexpr double kRadius = 28.0;  // red dot outer edge
   BITMAPINFO bmi = {};
   bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
   bmi.bmiHeader.biWidth = kSize;
@@ -230,22 +323,31 @@ HICON BuildDotIcon() {
   ReleaseDC(nullptr, screen);
   if (!color || !bits) return nullptr;
 
+  // Fractional coverage of a disc of [radius] at distance [d],
+  // feathered over 1px so the edge lands on partial alpha.
+  auto cover = [](double d, double radius) {
+    double c = radius - d + 0.5;
+    return c < 0.0 ? 0.0 : (c > 1.0 ? 1.0 : c);
+  };
+
   auto* px = static_cast<DWORD*>(bits);
-  const int c = kSize / 2;
+  const double c = (kSize - 1) / 2.0;
   for (int y = 0; y < kSize; y++) {
     for (int x = 0; x < kSize; x++) {
-      double d = sqrt((x - c + 0.5) * (x - c + 0.5) +
-                      (y - c + 0.5) * (y - c + 0.5));
+      const double d = sqrt((x - c) * (x - c) + (y - c) * (y - c));
+      const double alpha = cover(d, kRadius);
       DWORD argb;
-      if (d <= 5.0) {
-        argb = 0xFFF38BA8;          // accent pink, opaque
-      } else if (d <= 6.5) {
-        argb = 0xFFFFFFFF;          // white ring
-      } else {
-        px[y * kSize + x] = 0;      // transparent
+      if (alpha <= 0.0) {
+        px[y * kSize + x] = 0;  // transparent
         continue;
       }
-      px[y * kSize + x] = argb;     // ARGB dword == BGRA byte order
+      const double r = 255.0;
+      const double g = 59.0;
+      const double b = 48.0;
+      argb = ((DWORD)(alpha * 255.0) << 24) |
+             ((DWORD)(r + 0.5) << 16) | ((DWORD)(g + 0.5) << 8) |
+             (DWORD)(b + 0.5);
+      px[y * kSize + x] = argb;  // ARGB dword == BGRA byte order
     }
   }
 
@@ -353,6 +455,7 @@ void RegisterNotifications(flutter::FlutterEngine* engine, HWND hwnd) {
   // RPC_E_CHANGED_MODE (already STA) are both fine — an apartment
   // exists either way.
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  EnsureAumidShortcut();
   g_channel = new flutter::MethodChannel<flutter::EncodableValue>(
       engine->messenger(), "octodo/notifications",
       &flutter::StandardMethodCodec::GetInstance());
@@ -367,7 +470,7 @@ bool HandleNotificationsWindowMessage(UINT message, LPARAM lparam) {
     g_channel->InvokeMethod(
         "onActivation",
         std::make_unique<flutter::EncodableValue>(flutter::EncodableMap{
-            {"id", flutter::EncodableValue(*id)},
+            {"id", flutter::EncodableValue(WideStringToUtf8(*id))},
         }));
   }
   delete id;

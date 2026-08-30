@@ -56,11 +56,13 @@ void main() {
         expect(script, contains(r']2;PowerShell - '));
         // BEL terminator — raw char in script is fine, escape also works.
         expect(script, contains(r'$__Bel'));
-        // The chain must happen BEFORE the Write-Host emission.
+        // The chain must happen BEFORE the OSC 2 emission.
         final chainIdx = script.indexOf(
           r'& (Get-Item Function:__octodo_original_prompt)',
         );
-        final emitIdx = script.indexOf(r'Write-Host -NoNewline');
+        final emitIdx = script.indexOf(
+          r'Write-Host -NoNewline "${__Esc}]2;',
+        );
         expect(
           chainIdx,
           greaterThanOrEqualTo(0),
@@ -118,14 +120,19 @@ void main() {
     });
 
     test(
-      'wraps PSConsoleHostReadConsole for the C mark only when it exists',
+      'emits the C/D mark pair from prompt with history timestamps',
       () {
-        // PSReadLine installs the function when the user's $PROFILE loads
-        // (before this -File script). Wrapping unconditionally would
-        // replace the host's input path on hosts without PSReadLine.
-        expect(script, contains('PSConsoleHostReadConsole'));
-        expect(script, contains('Test-Path Function:PSConsoleHostReadConsole'));
-        expect(script, contains(r']133;C'));
+        // PSReadLine defines PSConsoleHostReadConsole only AFTER this
+        // -File script runs, so hooking the input reader never lands.
+        // Instead prompt() emits C;epoch-ms + D;code exactly once per
+        // NEW history entry (id guard), with the command's real start
+        // time from StartExecutionTime.
+        expect(script, isNot(contains('PSConsoleHostReadConsole')));
+        expect(script, contains(r']133;C;'));
+        expect(script, contains(r']133;D;'));
+        expect(script, contains('__octodoLastHistoryId'));
+        expect(script, contains('StartExecutionTime'));
+        expect(script, contains('ToUnixTimeMilliseconds'));
       },
     );
   });
