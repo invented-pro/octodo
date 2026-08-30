@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../src/app_info.dart';
 import '../../src/log.dart';
+import '../../src/notifications/desktop_notifications.dart';
 import '../../src/settings/setting.dart';
 import '../../src/settings/settings_catalog.dart';
 import '../../src/settings/json_settings_store.dart';
@@ -391,11 +392,28 @@ class _Detail extends StatelessWidget {
             // Iterate `catalog.general.all` so the row order is owned
             // by the catalog (single source of truth) — keeps the UI
             // and the catalog tests in sync without duplicating the
-            // declaration in two places.
-            for (final s in catalog.general.all)
-              _rowFor(s, showJsonPaths, store),
+            // declaration in two places. `_visibleRows` hides
+            // dependent sub-items (e.g. the notification threshold)
+            // while their master toggle is off.
+            ..._visibleRows(catalog.general.all, showJsonPaths, store),
           ],
         ),
+        if (store.get<bool>(catalog.general.desktopNotifications)) ...[
+          const SizedBox(height: 8),
+          SettingsCard(
+            children: [
+              _ActionRow(
+                icon: Icons.notifications_active_outlined,
+                title: 'Open system notification settings',
+                subtitle: Platform.isMacOS
+                    ? 'Switch Octodo to "Alerts" so banners stay on screen '
+                          'until dismissed.'
+                    : 'Adjust how Windows shows Octodo toasts.',
+                onTap: () => DesktopNotifications().openSystemSettings(),
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -471,6 +489,7 @@ class _Detail extends StatelessWidget {
       title: setting.title,
       subtitle: setting.subtitle,
       leadingIcon: setting.icon,
+      indent: setting.dependsOn != null,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -485,6 +504,22 @@ class _Detail extends StatelessWidget {
       ),
       showJsonPaths: showJsonPaths,
     );
+  }
+
+  /// Settings rows for one section, with dependent sub-items hidden
+  /// while their master toggle is off. The dialog rebuilds on every
+  /// store write (`_onWrite`), so flipping the toggle re-evaluates
+  /// the visibility immediately.
+  List<Widget> _visibleRows(
+    Iterable<Setting<dynamic>> settings,
+    bool showJsonPaths,
+    store,
+  ) {
+    return [
+      for (final s in settings)
+        if (s.dependsOn == null || store.get<bool>(s.dependsOn!))
+          _rowFor(s, showJsonPaths, store),
+    ];
   }
 
   Widget _trailingFor(Setting<dynamic> setting, store) {

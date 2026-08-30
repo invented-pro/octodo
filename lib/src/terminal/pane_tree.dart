@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import '../notifications/notification_hub.dart' show TerminalAttention;
 import '../shortcuts/app_shortcuts.dart';
 import '../theme/app_theme.dart';
 import '../theme/palette_context.dart';
@@ -105,6 +106,25 @@ class Surface extends ChangeNotifier {
     _exited = value;
     notifyListeners();
   }
+
+  /// Pending desktop-notification count for this surface, pushed from
+  /// the app shell's NotificationHub (unread dot on the tab chip).
+  /// Purely presentational model state — the hub remains the source
+  /// of truth; this mirror exists so the chip's existing
+  /// `ListenableBuilder` on the Surface repaints when it changes.
+  int _unread = 0;
+  int get unread => _unread;
+  set unread(int value) {
+    if (_unread == value) return;
+    _unread = value;
+    notifyListeners();
+  }
+
+  /// Optional teardown hook, invoked once from [dispose]. Used by the
+  /// notification pipeline to purge pending unread state when the
+  /// surface's terminal goes away (tab close / pane collapse /
+  /// workspace teardown). Set by `TerminalWorkspaceState._makeSurface`.
+  VoidCallback? onDisposed;
 
   /// The shell profile this surface was spawned from. Used by the
   /// tab bar to render the shell's icon (in its accent color) and
@@ -278,6 +298,7 @@ class Surface extends ChangeNotifier {
   void dispose() {
     // Surface owns the FocusNode; the framework's TerminalView state
     // borrows it and must NOT dispose it from its own dispose().
+    onDisposed?.call();
     focusNode.dispose();
     super.dispose();
   }
@@ -749,6 +770,18 @@ class PaneLayout extends StatelessWidget {
   /// tab of the same shell starts there.
   final void Function(ShellProfile profile, String cwd)? onShellCwdChanged;
 
+  /// Terminal attention event (OSC 9/777, BEL, OSC 133 finish) with
+  /// the emitting surface's id — forwarded to each [TerminalView]'s
+  /// `onAttention` (which doesn't know its own surface id) and up to
+  /// the workspace → app shell → NotificationHub.
+  final void Function(String surfaceId, TerminalAttention attention)?
+  onSurfaceAttention;
+
+  /// Live app-window focus shared by every [TerminalView]; drives
+  /// the terminal focus-reporting protocol (DECSET 1004). Passed
+  /// through from the workspace, which gets it from the app shell.
+  final ValueListenable<bool>? windowFocus;
+
   /// Available shell profiles for the new-tab/shell-selector menu.
   final List<ShellProfile> availableShells;
   final int defaultShellIndex;
@@ -779,6 +812,8 @@ class PaneLayout extends StatelessWidget {
     required this.onDropToSplitEdge,
     required this.workingDirectory,
     this.onShellCwdChanged,
+    this.onSurfaceAttention,
+    this.windowFocus,
     required this.availableShells,
     required this.defaultShellIndex,
     required this.onDefaultShellChanged,
@@ -971,6 +1006,10 @@ class PaneLayout extends StatelessWidget {
                           onExited: () {
                             surface.exited = true;
                           },
+                          onAttention: onSurfaceAttention == null
+                              ? null
+                              : (a) => onSurfaceAttention!(surface.id, a),
+                          windowFocus: windowFocus,
                         ),
                       ),
                   ],
@@ -1779,6 +1818,7 @@ class _DraggableChip extends StatelessWidget {
       iconAsset: profile?.iconAsset,
       iconColor: profile?.color,
       isActive: isActive,
+      hasUnread: surface.unread > 0,
       exited: surface.exited,
       onTap: () => onTap(context),
       onClose: onClose,
@@ -1962,6 +2002,12 @@ class _ChipVisual extends StatefulWidget {
   final String? iconAsset;
   final Color? iconColor;
   final bool isActive;
+
+  /// Pending desktop notifications for this tab — renders a small
+  /// accent dot next to the title. The chip's owning
+  /// [ListenableBuilder] on the Surface already rebuilds when
+  /// [Surface.unread] changes.
+  final bool hasUnread;
   final bool exited;
   final VoidCallback onTap;
   final VoidCallback onClose;
@@ -1974,6 +2020,7 @@ class _ChipVisual extends StatefulWidget {
     this.icon,
     this.iconAsset,
     this.iconColor,
+    this.hasUnread = false,
   });
 
   @override
@@ -2065,6 +2112,22 @@ class _ChipVisualState extends State<_ChipVisual> {
                         maxLines: 1,
                       ),
                     ),
+                    // Unread-notification dot. Hidden on the active
+                    // chip — the surface being visible is what clears
+                    // unread state, so the dot on a focused tab would
+                    // be a contradiction (it can appear for one frame
+                    // between the event and the clear-on-view pass).
+                    if (widget.hasUnread && !isActive) ...[
+                      const SizedBox(width: 5),
+                      Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: palette.accentPink,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),

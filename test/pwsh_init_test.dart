@@ -95,6 +95,39 @@ void main() {
       expect(script, isNot(contains('??')));
       expect(script, isNot(contains(r'?? ')));
     });
+
+    test('emits the OSC 133 D mark with an exit code', () {
+      expect(script, contains(r']133;D;'));
+      // Exit-code resolution: history ExecutionStatus for cmdlet
+      // pipelines, $LASTEXITCODE override for native commands. The
+      // notoriously version-dependent $? is deliberately unread.
+      expect(script, contains('Get-History -Count 1'));
+      expect(script, contains(r'$LASTEXITCODE'));
+      expect(script, isNot(contains(r'if ($?)')));
+    });
+
+    test('resolves the exit code BEFORE running the original prompt', () {
+      // Any statement (including the chained prompt) can clobber the
+      // status — the capture must precede the chain.
+      final captureIdx = script.indexOf(r'$__code = 0');
+      final chainIdx = script.indexOf(
+        r'& (Get-Item Function:__octodo_original_prompt)',
+      );
+      expect(captureIdx, greaterThanOrEqualTo(0));
+      expect(chainIdx, greaterThan(captureIdx));
+    });
+
+    test(
+      'wraps PSConsoleHostReadConsole for the C mark only when it exists',
+      () {
+        // PSReadLine installs the function when the user's $PROFILE loads
+        // (before this -File script). Wrapping unconditionally would
+        // replace the host's input path on hosts without PSReadLine.
+        expect(script, contains('PSConsoleHostReadConsole'));
+        expect(script, contains('Test-Path Function:PSConsoleHostReadConsole'));
+        expect(script, contains(r']133;C'));
+      },
+    );
   });
 
   group('_writePwshInitScript (temp file writer)', () {

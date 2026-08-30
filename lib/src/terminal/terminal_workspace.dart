@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
+import '../notifications/notification_hub.dart' show TerminalAttention;
 import '../settings/settings_catalog.dart';
 import '../settings/settings_runtime.dart';
 import '../theme/palettes.dart';
@@ -153,6 +155,28 @@ class TerminalWorkspace extends StatefulWidget {
   /// behave as before. The AppShell always passes an explicit value.
   final bool isFocused;
 
+  /// Terminal attention event (OSC 9/777, BEL, OSC 133 command
+  /// finish) forwarded with the emitting surface's id. The app shell
+  /// adds the workspace id and hands the pair to the NotificationHub.
+  final void Function(String surfaceId, TerminalAttention attention)?
+  onAttention;
+
+  /// The focused surface changed (tab select / pane focus) — the app
+  /// shell uses this to clear unread notification state for surfaces
+  /// the user is now looking at.
+  final void Function(String surfaceId)? onSurfaceViewed;
+
+  /// A surface in this workspace was disposed (tab closed, pane
+  /// collapsed, or workspace teardown) — the app shell purges its
+  /// pending notification state so unread badges don't leak.
+  final void Function(String surfaceId)? onSurfaceClosed;
+
+  /// Live app-window focus shared by every surface in this
+  /// workspace; drives the terminal focus-reporting protocol
+  /// (DECSET 1004) inside each [TerminalView]. Null treats the
+  /// window as always focused.
+  final ValueListenable<bool>? windowFocus;
+
   const TerminalWorkspace({
     super.key,
     this.name = 'Workspace',
@@ -164,6 +188,10 @@ class TerminalWorkspace extends StatefulWidget {
     required this.confirmCloseWorkspace,
     this.onEmpty,
     this.isFocused = true,
+    this.onAttention,
+    this.onSurfaceViewed,
+    this.onSurfaceClosed,
+    this.windowFocus,
   });
 
   @override
@@ -569,18 +597,33 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     // `ShellProfile.needsPromptCommandForOsc7`). Stock POSIX bash emits no
     // OSC 7 on its own (hosts without /etc/profile.d/vte.sh, every macOS
     // install), so the injection is what makes the cwd-reporting channel
-    // work there at all.
+    // work there at all. The same string now also emits the OSC 133;D
+    // "command finished; exit <rc>" shell-integration mark (rc captured
+    // FIRST — the subsequent printfs change $?), and PS0 below emits the
+    // matching 133;C "command started" mark — see `_osc133Ps0`.
     final injectOsc7PromptCommand =
         profile.showCwdInTitle && profile.needsPromptCommandForOsc7;
     if (injectOsc7PromptCommand) {
       env['PROMPT_COMMAND'] = _osc7PromptCommand;
+      // bash ≥ 4.4 (WSL distros, Git Bash, Linux hosts) expands PS0 with
+      // the same prompt-escape decoder as PS1 right before executing the
+      // read command — exactly the OSC 133;C semantics. Older bash (the
+      // macOS system /bin/bash 3.2) ignores the variable entirely, so
+      // the C mark is silently absent there (D-only completions are
+      // dropped downstream — no measurable duration).
+      env['PS0'] = _osc133Ps0;
       if (profile.isWsl) {
         final existing = Platform.environment['WSLENV'] ?? '';
-        env['WSLENV'] = existing.contains('PROMPT_COMMAND')
-            ? existing
-            : (existing.isEmpty
-                  ? 'PROMPT_COMMAND/u'
-                  : '$existing:PROMPT_COMMAND/u');
+        var wslenv = existing;
+        if (!wslenv.contains('PROMPT_COMMAND')) {
+          wslenv = wslenv.isEmpty
+              ? 'PROMPT_COMMAND/u'
+              : '$wslenv:PROMPT_COMMAND/u';
+        }
+        if (!wslenv.contains('PS0')) {
+          wslenv = wslenv.isEmpty ? 'PS0/u' : '$wslenv:PS0/u';
+        }
+        env['WSLENV'] = wslenv;
       }
     } else if (!Platform.isWindows &&
         Platform.environment.containsKey('PROMPT_COMMAND')) {
@@ -689,21 +732,40 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
           spawnCwd,
           preresolvedWslHome: homePath,
         );
-    return Surface(profile: profile, initialCwd: initialCwd)
+    final surface = Surface(profile: profile, initialCwd: initialCwd)
       ..program = profile.program
       ..args = args
       ..spawnCwd = spawnCwd
       ..env = env
       ..homePath = homePath;
+    // Notification-pipeline purge hook. Surface.dispose() is the
+    // single chokepoint for every teardown path (tab close, pane
+    // collapse via tree mutations, workspace dispose), so hanging
+    // the callback here catches them all without instrumenting each
+    // call site. See widget.onSurfaceClosed.
+    surface.onDisposed = () => widget.onSurfaceClosed?.call(surface.id);
+    return surface;
   }
 
   /// Bash snippet that emits an OSC 7 sequence (`ESC ] 7 ; file://host/path
-  /// ST`) before each prompt. Used as `PROMPT_COMMAND` so the terminal engine
-  /// can track the shell's working directory. The `%s` format specifiers are
-  /// filled by `printf` from `"$(hostname)"` and `"$PWD"` (double-quoted so
-  /// bash expands them at prompt time).
+  /// ST`) before each prompt, plus the OSC 133;D "command finished"
+  /// shell-integration mark with the command's exit status. Used as
+  /// `PROMPT_COMMAND` so the terminal engine can track the shell's
+  /// working directory and Octodo can detect long-command completion.
+  ///
+  /// `$?` is captured into `__octodo_rc` FIRST — every subsequent
+  /// command in the chain (the printfs) overwrites `$?`, so reading it
+  /// later would always report the previous printf's success. The `%s`
+  /// format specifiers are filled by `printf` from `"$(hostname)"` and
+  /// `"$PWD"` (double-quoted so bash expands them at prompt time).
   static const String _osc7PromptCommand =
-      r'''printf '\033]7;file://%s%s\033\\' "$(hostname)" "$PWD"''';
+      r'''__octodo_rc=$?; printf '\033]7;file://%s%s\033\\' "$(hostname)" "$PWD"; printf '\033]133;D;%s\033\\' "$__octodo_rc"''';
+
+  /// Bash `PS0` — expanded with PS1's prompt-escape decoder immediately
+  /// before the read command executes. `\e` → ESC, `\a` → BEL, so this
+  /// emits `ESC ] 133 ; C BEL` at exactly "command started" time. See
+  /// the injection site in `_makeSurface` for the bash-version caveat.
+  static const String _osc133Ps0 = r'\e]133;C\a';
 
   /// fish snippet handed to `fish --init-command` (`-C`) so cwd reporting
   /// works in stock fish (which emits no OSC 7 on its own, on any platform).
@@ -712,7 +774,13 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// the first interactive prompt, so the user's config loads untouched
   /// and the handler we register here survives it. The `fish_prompt`
   /// event fires every time fish displays a prompt — exactly when the
-  /// cwd needs to be (re)reported.
+  /// cwd needs to be (re)reported — and `fish_preexec` fires when a
+  /// command starts, which is what the OSC 133 C/D shell-integration
+  /// marks below ride.
+  ///
+  /// Ordering: `__octodo_osc133_d` is registered FIRST so it reads the
+  /// command's real `$status` — handlers run in registration order and
+  /// any earlier `printf` would reset `$status` to 0.
   ///
   /// Single-quoted on purpose: fish single quotes pass `\033` through
   /// literally so the `printf` builtin (not the shell's string parser)
@@ -721,6 +789,8 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   /// backslash collapsing inside quotes; the Alacritty engine accepts
   /// both terminators.
   static const String _fishOsc7Init =
+      r"""function __octodo_osc133_d --on-event fish_prompt; printf '\033]133;D;%s\a' "$status"; end; """
+      r"""function __octodo_osc133_c --on-event fish_preexec; printf '\033]133;C\a'; end; """
       r"""function __octodo_osc7 --on-event fish_prompt; printf '\033]7;file://%s%s\a' (hostname) "$PWD"; end""";
 
   /// zsh `.zshenv` shim written into a temp `ZDOTDIR` by
@@ -735,26 +805,37 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   ///    so every later startup file — `.zprofile`, `.zshrc`, `.zlogin` —
   ///    loads from its normal location, and so nested zsh processes
   ///    inherit the real value instead of re-running this shim.
-  /// 2. Register the OSC 7 `precmd` hook by appending to
-  ///    `precmd_functions` (no `add-zsh-hook` autoload needed — the
-  ///    array append is what add-zsh-hook does internally, and works
-  ///    this early in .zshenv where fpath-based autoloads are risky).
-  ///    `$HOST` is zsh-native (no `$(hostname)` subprocess per prompt).
-  ///    Registered in .zshenv, the hook runs before the user's `.zshrc`
-  ///    and survives it — even a `.zshrc` that replaces the prompt.
+  /// 2. Register the OSC 7 `precmd` hook and the OSC 133 shell-
+  ///    integration hooks (`_octodo_133c` on `preexec_functions` for
+  ///    "command started", `_octodo_133d` at the HEAD of
+  ///    `precmd_functions` for "command finished; exit $?" — head
+  ///    position matters, `$?` is only trustworthy before any other
+  ///    hook runs) by appending to the zsh hook arrays (no
+  ///    `add-zsh-hook` autoload needed — the array append is what
+  ///    add-zsh-hook does internally, and works this early in .zshenv
+  ///    where fpath-based autoloads are risky). `$HOST` is zsh-native
+  ///    (no `$(hostname)` subprocess per prompt). Registered in
+  ///    .zshenv, the hooks run before the user's `.zshrc` and survive
+  ///    it — even a `.zshrc` that replaces the prompt.
   /// 3. Chain to the user's real `.zshenv`, which zsh skipped because it
   ///    read ours (ZDOTDIR was already pointing here).
   ///
-  /// Emission duplicates (user already has OSC 7 integration, e.g.
-  /// ghostty/kitty hooks) are harmless: the engine just re-parses the
-  /// same `file://` URI.
+  /// Emission duplicates (user already has OSC 7 / OSC 133 integration,
+  /// e.g. ghostty/kitty/VS Code hooks) are harmless: the engine just
+  /// re-parses the same sequences, and the Dart-side 133 scanner is
+  /// idempotent per mark.
   static String _zshEnvShim(String realZdotdir) =>
       '''
-# octodo shell integration (OSC 7 cwd reporting)
+# octodo shell integration (OSC 7 cwd reporting + OSC 133 marks)
 export ZDOTDIR='${_shellSingleQuote(realZdotdir)}'
 _octodo_osc7() { printf '\\033]7;file://%s%s\\033\\\\' "\$HOST" "\$PWD" }
+_octodo_133d() { printf '\\033]133;D;%s\\033\\\\' "\$?" }
+_octodo_133c() { printf '\\033]133;C\\033\\\\' }
 typeset -ga precmd_functions
+[[ " \${precmd_functions[@]} " == *" _octodo_133d "* ]] || precmd_functions=(_octodo_133d \$precmd_functions[@])
 [[ " \${precmd_functions[@]} " == *" _octodo_osc7 "* ]] || precmd_functions+=(_octodo_osc7)
+typeset -ga preexec_functions
+[[ " \${preexec_functions[@]} " == *" _octodo_133c "* ]] || preexec_functions+=(_octodo_133c)
 [[ -f "\$ZDOTDIR/.zshenv" ]] && source "\$ZDOTDIR/.zshenv"
 ''';
 
@@ -802,20 +883,45 @@ typeset -ga precmd_functions
   static String get fishOsc7InitForTest => _fishOsc7Init;
 
   @visibleForTesting
+  static String get osc7PromptCommandForTest => _osc7PromptCommand;
+
+  @visibleForTesting
+  static String get osc133Ps0ForTest => _osc133Ps0;
+
+  @visibleForTesting
   static Future<String> writeZshIntegrationForTest() =>
       _ensureZshOsc7Integration();
 
   /// PowerShell init script that overrides `prompt` to emit OSC 2 with
-  /// the cwd after each prompt, then chains to whatever the user's
-  /// `$PROFILE` (or the built-in default) installed as `prompt`.
+  /// the cwd after each prompt (chained to the user's own prompt), plus
+  /// the OSC 133 shell-integration marks:
   ///
-  /// Why OSC 2 (not OSC 7): ConPTY intercepts OSC 7 from PowerShell on
-  /// Windows, so the Alacritty engine never sees the cwd that way.
-  /// ConPTY passes OSC 2 through, so we emit `PowerShell - <cwd>` as
-  /// the window title after every prompt and parse it back in
-  /// `TerminalView._extractCwdFromPwshTitle`.
+  ///   * `D` (command finished) — emitted from the `prompt` wrapper,
+  ///     BEFORE the original prompt runs (any statement can clobber the
+  ///     status). Exit code resolution: `Get-History -Count 1`'s
+  ///     `ExecutionStatus` is authoritative for cmdlet pipelines;
+  ///     a non-null non-zero `$LASTEXITCODE` (the last *native*
+  ///     command — builds, CLI agents) overrides it. `$LASTEXITCODE`
+  ///     is stale after pure-cmdlet commands; that misreport is
+  ///     accepted rather than zeroing a variable user scripts own.
+  ///     We deliberately do NOT read `$?` — its semantics after
+  ///     assignment statements are version-dependent.
+  ///   * `C` (command started) — emitted from a wrapper around
+  ///     `PSConsoleHostReadConsole`, the function PSReadLine installs
+  ///     and the host calls to read each input line. Only wrapped when
+  ///     it already exists (PSReadLine loaded via the user's $PROFILE,
+  ///     which runs before this `-File` script); on hosts without it we
+  ///     skip the C mark rather than change the input path.
   ///
-  /// Why emit AFTER the user's prompt (not before): oh-my-posh /
+  /// Why OSC 2 (not OSC 7) for the cwd: ConPTY intercepts OSC 7 from
+  /// PowerShell on Windows, so the Alacritty engine never sees the cwd
+  /// that way. ConPTY passes OSC 2 through, so we emit
+  /// `PowerShell - {cwd}` as the window title after every prompt and
+  /// parse it back in `TerminalView._extractCwdFromPwshTitle`.
+  /// OSC 133 best-effort rides the same pass-through (Windows
+  /// Terminal's own shell integration relies on it surviving ConPTY).
+  ///
+  /// Why emit OSC 2 AFTER the user's prompt (not before): oh-my-posh /
   /// starship / `$Host.UI.RawUI.WindowTitle` all emit their own OSC 2
   /// during the prompt. Emitting ours last means our cwd signal wins,
   /// and the title the engine sees is always parseable as long as the
@@ -841,10 +947,25 @@ if (-not (Test-Path Function:__octodo_original_prompt)) {
     }
 }
 function prompt {
+    $__code = 0
+    try {
+        $__h = Get-History -Count 1 -ErrorAction SilentlyContinue
+        if ($__h -and $__h.ExecutionStatus -ne [System.Management.Automation.Runspaces.PipelineState]::Completed) { $__code = 1 }
+    } catch {}
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $__code = $LASTEXITCODE }
     $__path = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath
     $__result = & (Get-Item Function:__octodo_original_prompt)
     Write-Host -NoNewline "${__Esc}]2;PowerShell - ${__path}${__Bel}"
+    Write-Host -NoNewline "${__Esc}]133;D;${__code}${__Bel}"
     return $__result
+}
+if ((Test-Path Function:PSConsoleHostReadConsole) -and -not (Test-Path Function:__octodo_original_readconsole)) {
+    Set-Item -Path Function:__octodo_original_readconsole -Value (Get-Item Function:PSConsoleHostReadConsole).ScriptBlock
+    function global:PSConsoleHostReadConsole {
+        $__line = & (Get-Item Function:__octodo_original_readconsole)
+        Write-Host -NoNewline "${__Esc}]133;C${__Bel}"
+        $__line
+    }
 }
 ''';
 
@@ -1272,6 +1393,7 @@ function prompt {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       surface.focusNode.requestFocus();
     });
+    widget.onSurfaceViewed?.call(surface.id);
   }
 
   void _focusContainer(PaneContainer container) {
@@ -1280,6 +1402,8 @@ function prompt {
       final surface = container.focusedSurface;
       if (surface != null) surface.focusNode.requestFocus();
     });
+    final surface = container.focusedSurface;
+    if (surface != null) widget.onSurfaceViewed?.call(surface.id);
   }
 
   void _nextSurface() {
@@ -1292,6 +1416,8 @@ function prompt {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       focusCurrentPane();
     });
+    final surface = c.focusedSurface;
+    if (surface != null) widget.onSurfaceViewed?.call(surface.id);
   }
 
   void _previousSurface() {
@@ -1305,6 +1431,8 @@ function prompt {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       focusCurrentPane();
     });
+    final surface = c.focusedSurface;
+    if (surface != null) widget.onSurfaceViewed?.call(surface.id);
   }
 
   void _selectSurfaceByIndex(int index) {
@@ -1315,6 +1443,8 @@ function prompt {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       focusCurrentPane();
     });
+    final surface = c.focusedSurface;
+    if (surface != null) widget.onSurfaceViewed?.call(surface.id);
   }
 
   /// Ask the tab bar of [container] to scroll its newly-focused
@@ -1481,6 +1611,64 @@ function prompt {
     if (surface == null) return null;
     return surface.viewKey.currentState as TerminalViewState?;
   }
+
+  // ── Notification-pipeline support ───────────────────────────────
+
+  /// Jump to and focus the surface with [surfaceId] — the click-through
+  /// target for a desktop notification. No-op (returns false) when the
+  /// surface isn't in this workspace (closed since the notification was
+  /// posted).
+  bool focusSurfaceById(String surfaceId) {
+    final surface = _findSurfaceById(surfaceId);
+    if (surface == null) return false;
+    final owner = _findContainerOf(surface);
+    if (owner == null) return false;
+    _selectSurfaceInContainer(owner, surface);
+    return true;
+  }
+
+  /// True when [surfaceId] is the focused tab of the focused container —
+  /// the terminal the user is currently looking at. Drives the hub's
+  /// visible-surface suppression check (via the app shell's closure).
+  bool isSurfaceActive(String surfaceId) =>
+      _focusedContainer?.focusedSurface?.id == surfaceId;
+
+  /// Chip title for a surface, or '' when unknown. Composed into
+  /// desktop-notification body text by the app shell at emit time so
+  /// renames / cwd changes never go stale.
+  String surfaceChipTitleById(String surfaceId) =>
+      _findSurfaceById(surfaceId)?.chipTitle ?? '';
+
+  /// Push hub-computed unread counts into the [Surface] models so the
+  /// tab chips repaint (chips listen to their Surface, not the hub).
+  /// Surfaces absent from [counts] are zeroed.
+  void syncUnreadCounts(Map<String, int> counts) {
+    for (final surface in allSurfaces) {
+      surface.unread = counts[surface.id] ?? 0;
+    }
+  }
+
+  /// Every surface in this workspace's tree (leaves of the pane tree).
+  Iterable<Surface> get allSurfaces sync* {
+    final root = _rootPane;
+    if (root == null) return;
+    if (root is PaneContainer) {
+      yield* root.surfaces;
+      return;
+    }
+    if (root is PaneSplit) {
+      final leaves = <PaneContainer>[];
+      root.forEachLeaf(leaves.add);
+      for (final leaf in leaves) {
+        yield* leaf.surfaces;
+      }
+    }
+  }
+
+  /// The focused surface of the focused container, if any — used by the
+  /// app shell's clear-on-view logic when the workspace becomes active
+  /// or the app regains focus.
+  Surface? get currentSurface => _focusedContainer?.focusedSurface;
 
   // ── Drag/drop mutations ──────────────────────────────────────────
   //
@@ -1844,6 +2032,8 @@ function prompt {
                   onAnyDragActiveChanged: _setAnyDragActive,
                   workingDirectory: userHome,
                   onShellCwdChanged: _rememberShellCwd,
+                  onSurfaceAttention: widget.onAttention,
+                  windowFocus: widget.windowFocus,
                   availableShells: widget.availableShells,
                   defaultShellIndex: _defaultShellIndex,
                   onDefaultShellChanged: _openShellFromSelector,

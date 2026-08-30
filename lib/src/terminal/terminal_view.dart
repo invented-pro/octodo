@@ -4,6 +4,7 @@ import 'dart:convert' show utf8;
 import 'dart:io' show Platform;
 import 'dart:typed_data' show BytesBuilder;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show kPrimaryButton, PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
@@ -24,9 +25,14 @@ import 'package:url_launcher/url_launcher.dart';
 import '../settings/settings_catalog.dart';
 import '../settings/settings_runtime.dart';
 import '../log.dart';
+import '../notifications/notification_hub.dart'
+    show AttentionKind, TerminalAttention;
+import '../notifications/osc133_scanner.dart';
 import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart' show Surface;
+import 'csi_mode_scanner.dart';
 import 'osc7_scanner.dart';
+import 'osc99_scanner.dart';
 import 'shell_cwd.dart';
 import 'font_family_options.dart';
 import 'terminal_settings_scope.dart';
@@ -323,6 +329,22 @@ class TerminalView extends StatefulWidget {
   /// Called when the underlying shell process exits.
   final VoidCallback? onExited;
 
+  /// Terminal "attention" events for the desktop-notification
+  /// pipeline: OSC 9/777/99 notifications, BEL, and OSC 133
+  /// command-finish marks. Forwarded by the workspace up to the app
+  /// shell's NotificationHub with the surface id attached; see
+  /// lib/src/notifications/ for the routing design.
+  final void Function(TerminalAttention attention)? onAttention;
+
+  /// Live app-window focus, shared by every surface. Combined with
+  /// this view's pane focus it drives the terminal focus-reporting
+  /// protocol (DECSET 1004): TUIs like opencode enable the mode and
+  /// expect `CSI I` / `CSI O` whenever their terminal gains or loses
+  /// focus — without those reports their notification systems stay
+  /// in an "unknown" focus state and drop every notification. Null
+  /// (tests) treats the window as always focused.
+  final ValueListenable<bool>? windowFocus;
+
   const TerminalView({
     super.key,
     required this.surface,
@@ -330,6 +352,8 @@ class TerminalView extends StatefulWidget {
     this.onTitleChanged,
     this.onPwdChanged,
     this.onExited,
+    this.onAttention,
+    this.windowFocus,
   });
 
   @override
@@ -384,6 +408,51 @@ class TerminalViewState extends State<TerminalView> {
   /// Dart-side OSC 7 pre-scanner over the PTY byte stream; supplements the
   /// engine's (lossy — see [Osc7Scanner]) extraction. See [_flushOutput].
   final Osc7Scanner _osc7Scanner = Osc7Scanner();
+
+  /// Dart-side OSC 133 shell-integration scanner (command started /
+  /// finished marks). The engine's pre-parser drops every OSC it
+  /// doesn't know, so — like OSC 7 — the marks are extracted from the
+  /// raw stream here. See [Osc133Scanner] and the state machine fields
+  /// below.
+  final Osc133Scanner _osc133Scanner = Osc133Scanner();
+
+  /// Timestamp of the most recent OSC 133 `C` ("command started")
+  /// mark, null while the shell is at a prompt. On the matching `D`
+  /// mark the elapsed time becomes the reported task duration; a `D`
+  /// without a preceding `C` (partial shell integration, e.g. macOS's
+  /// bash 3.2 which has no PS0) is dropped by the hub — no measurable
+  /// duration means no long-task signal.
+  DateTime? _cmdStartedAt;
+
+  /// Dart-side kitty-notification scanner (OSC 99). opencode's
+  /// "attention" notifications arrive via the kitty protocol, which
+  /// the engine's OSC pre-parser doesn't extract — same seam as
+  /// [_osc7Scanner]. See [Osc99Scanner].
+  final Osc99Scanner _osc99Scanner = Osc99Scanner();
+
+  /// In-flight OSC 99 chunked notifications: identifier → accumulated
+  /// (title, body). Kitty lets apps send title with `d=0` then body
+  /// with `d=1`; the flush happens on the done payload.
+  final Map<String, (String title, String body)> _osc99Pending = {};
+
+  /// Cap on [_osc99Pending] entries. A misbehaving app that opens
+  /// `d=0` streams under ever-fresh identifiers without finishing
+  /// them would otherwise grow the map for the life of the surface.
+  /// Insertion-ordered: overflow evicts the oldest.
+  static const int _osc99PendingMax = 32;
+
+  /// Dart-side DECSET/DECRST scanner for focus reporting
+  /// (`CSI ? 1004 h` / `l`). See [CsiModeScanner].
+  final CsiModeScanner _csiModeScanner = CsiModeScanner();
+
+  /// Whether the running app asked for focus reporting. While false,
+  /// no `CSI I`/`CSI O` are ever sent (a shell never enables 1004 —
+  /// this only flips on for TUIs like opencode / Neovim).
+  bool _focusReportEnabled = false;
+
+  /// Last focus value reported to the app via `CSI I`/`CSI O`, null
+  /// before the first report.
+  bool? _lastFocusSent;
 
   // ── Settings propagation ────────────────────────────────────────
   //
@@ -734,6 +803,12 @@ class TerminalViewState extends State<TerminalView> {
       if (_bellMode == BellMode.sound) {
         SystemSound.play(SystemSoundType.alert);
       }
+      // Desktop-notification source: the hub re-checks bellMode (a
+      // `none` mode drops it — defense in depth, the engine already
+      // skips emitting bell events when the bell duration is 0).
+      widget.onAttention?.call(
+        const TerminalAttention(kind: AttentionKind.bell),
+      );
     });
     // OSC 9 (iTerm2) / OSC 777 (urxvt) desktop notifications. The
     // engine surfaces both as a single `notify` event whose payload
@@ -748,6 +823,12 @@ class TerminalViewState extends State<TerminalView> {
     // it and fires notifyListeners(). We diff against `_lastPrimary` to
     // ignore redundant capture events with no new text.
     _controller.addListener(_onControllerChanged);
+
+    // Focus-reporting inputs: pane focus (this view's FocusNode) and
+    // app-window focus (shared listenable) both feed
+    // [_syncFocusReport].
+    _focus.addListener(_syncFocusReport);
+    widget.windowFocus?.addListener(_syncFocusReport);
 
     _start();
 
@@ -1024,6 +1105,21 @@ class TerminalViewState extends State<TerminalView> {
     }
   }
 
+  @override
+  void didUpdateWidget(covariant TerminalView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Re-attach the focus-report listener if the host swapped the
+    // window-focus listenable, otherwise the old listenable would
+    // keep _syncFocusReport attached and the new one would never
+    // fire. Harmless when the listenable is identical (AppShell
+    // passes one long-lived ValueNotifier).
+    if (widget.windowFocus != oldWidget.windowFocus) {
+      oldWidget.windowFocus?.removeListener(_syncFocusReport);
+      widget.windowFocus?.addListener(_syncFocusReport);
+      _syncFocusReport();
+    }
+  }
+
   /// Re-quote [s] so it survives `cmd.exe`'s `/c` parser as a single token.
   ///
   /// We launch every shell as `cmd.exe /c "<exe>" <args...>` (see
@@ -1201,7 +1297,124 @@ class TerminalViewState extends State<TerminalView> {
     for (final payload in osc7Payloads) {
       _pushPwd(stripFileUri(payload));
     }
+    // OSC 133 shell-integration marks (command started / finished).
+    // Same rationale as the OSC 7 pre-scan: the engine's pre-parser
+    // drops non-7/9/777 OSCs, so the Dart side extracts them from the
+    // same bytes the engine is about to parse.
+    for (final mark in _osc133Scanner.scan(batch)) {
+      _onOsc133Mark(mark);
+    }
+    // Kitty OSC 99 notifications (opencode "attention") — same
+    // rationale: the engine doesn't extract OSC 99 at all.
+    for (final event in _osc99Scanner.scan(batch)) {
+      _onOsc99Event(event);
+    }
+    // Focus-reporting mode requests (CSI ? 1004 h/l) — the engine
+    // parses the mode but the host owns the actual reports.
+    final focusMode = _csiModeScanner.scan(batch);
+    if (focusMode != null) {
+      _onFocusReportMode(focusMode);
+    }
     _engine.feedWithKitty(batch);
+  }
+
+  /// Handle one parsed OSC 99 event: answer capability probes, and
+  /// accumulate/flush notification payloads into the attention
+  /// pipeline.
+  void _onOsc99Event(Osc99Event event) {
+    switch (event) {
+      case Osc99Probe():
+        // Advertise support so OpenTUI keeps delivering
+        // notifications instead of falling back to silence.
+        _engine.write(
+          Uint8List.fromList(Osc99ProbeReply.reply(event.identifier)),
+        );
+      case Osc99Close():
+        // Close requests target updates of previously-shown OS
+        // notifications; Octodo's banners are transient and cleared
+        // on read, so there is nothing to withdraw. Per the kitty
+        // protocol the id is finished — drop any never-completed
+        // chunked payload for it so a crashed/abandoned chunk stream
+        // can't linger (and re-attach to a future re-use of the id).
+        _osc99Pending.remove(event.identifier);
+        break;
+      case Osc99Payload():
+        final id = event.identifier;
+        final pending = id.isEmpty ? null : _osc99Pending[id];
+        var title = pending?.$1 ?? '';
+        var body = pending?.$2 ?? '';
+        if (event.isTitle) {
+          title = title.isEmpty ? event.text : '$title${event.text}';
+        } else {
+          body = '$body${event.text}';
+        }
+        if (!event.done) {
+          if (id.isNotEmpty) {
+            // Insertion-order eviction: see [_osc99PendingMax].
+            while (_osc99Pending.length >= _osc99PendingMax) {
+              _osc99Pending.remove(_osc99Pending.keys.first);
+            }
+            _osc99Pending[id] = (title, body);
+          }
+          return;
+        }
+        _osc99Pending.remove(id);
+        if (title.isEmpty && body.isEmpty) return;
+        widget.onAttention?.call(
+          TerminalAttention(
+            kind: AttentionKind.oscNotify,
+            title: title.isEmpty ? null : title,
+            body: body,
+          ),
+        );
+    }
+  }
+
+  /// The app enabled/disabled focus reporting (DECSET 1004). On
+  /// enable, immediately report the current focus so TUIs don't sit
+  /// in their "unknown" focus state waiting for the first transition.
+  void _onFocusReportMode(bool enabled) {
+    _focusReportEnabled = enabled;
+    _lastFocusSent = null;
+    _log.fine('focus reporting ${enabled ? 'enabled' : 'disabled'}');
+    if (enabled) _syncFocusReport();
+  }
+
+  /// Reconcile the app's view of terminal focus with reality:
+  /// focused = this pane has keyboard focus AND the app window is
+  /// focused. Sends `CSI I` / `CSI O` on transitions only.
+  void _syncFocusReport() {
+    if (!_focusReportEnabled || _pty == null) return;
+    final desired = _focus.hasFocus && (widget.windowFocus?.value ?? true);
+    if (_lastFocusSent == desired) return;
+    _lastFocusSent = desired;
+    _engine.write(Uint8List.fromList([0x1b, 0x5b, desired ? 0x49 : 0x4f]));
+    _log.fine('focus report: ${desired ? 'CSI I' : 'CSI O'}');
+  }
+
+  /// OSC 133 mark handler. `C` timestamps the command start (restarted
+  /// if a previous `C` never saw its `D` — nested/aborted cases);
+  /// `D;\<rc\>` computes the duration and emits the attention event.
+  /// `A` / `B` (prompt/input marks) are currently ignored.
+  void _onOsc133Mark(String mark) {
+    if (mark.startsWith('C')) {
+      _cmdStartedAt = DateTime.now();
+      return;
+    }
+    if (mark.startsWith('D')) {
+      final startedAt = _cmdStartedAt;
+      _cmdStartedAt = null;
+      if (startedAt == null) return;
+      final rcPart = mark.length > 2 ? mark.substring(2) : '';
+      final rc = int.tryParse(rcPart) ?? 0;
+      widget.onAttention?.call(
+        TerminalAttention(
+          kind: AttentionKind.commandFinished,
+          exitCode: rc,
+          duration: DateTime.now().difference(startedAt),
+        ),
+      );
+    }
   }
 
   void _markExited() {
@@ -1426,30 +1639,23 @@ class TerminalViewState extends State<TerminalView> {
   /// The engine collapses both protocols into a single string payload:
   /// OSC 9 (iTerm2: `ESC ] 9 ; <body> ST`) sends just the body, while
   /// OSC 777 (urxvt: `ESC ] 777 ; notify ; <title> ; <body> ST`) sends
-  /// `"title\0body"`. We split on the NUL, default the title when
-  /// absent, and surface via [ScaffoldMessenger] SnackBar — adding a
-  /// Windows native toast plugin would be a separate feature.
+  /// `"title\0body"`. We split on the NUL and default the title when
+  /// absent. The event fans out to BOTH consumers:
   ///
-  /// Gated by the `terminal.notifyOnOsc9` setting (default off) —
-  /// some shells and frameworks (PSReadLine on Linux, starship,
-  /// oh-my-zsh hooks, custom `PROMPT_COMMAND` / `preexec` scripts)
-  /// emit iTerm2-style state notifications on every prompt cycle
-  /// (`OSC 9 ; 4 ; <state> ST`, e.g. `4:1:6`). Those payloads are
-  /// not user-facing text, and showing them as snackbars produces
-  /// a noisy flood. flutter_alacritty surfaces the OSC 9 plain-text
-  /// form and the OSC 9 state form as the same `notify` event, so
-  /// we cannot tell them apart from the body — the setting is the
-  /// only safe control surface.
+  ///   1. the legacy snackbar path — gated by `terminal.notifyOnOsc9`
+  ///      (default off), shown via [ScaffoldMessenger]; and
+  ///   2. the desktop-notification pipeline — forwarded unfiltered to
+  ///      [TerminalView.onAttention]; the hub applies its own noise
+  ///      filter (drops the iTerm2 state form `4;\<s\>;\<p\>`) and
+  ///      suppression. Keeping this path unfiltered here means the
+  ///      snackbar's default-off rationale (noise) is solved at the
+  ///      hub, not by dropping events at the source.
+  ///
+  /// flutter_alacritty surfaces the OSC 9 plain-text form and the OSC 9
+  /// state form as the same `notify` event, so we cannot tell them
+  /// apart from the body — the hub's regex is the discriminator.
   void _onNotify(String payload) {
     if (!mounted) return;
-    if (!_notifyOnOsc9) {
-      if (_log.isLoggable(Level.FINE)) {
-        _log.fine(
-          'OSC 9/777 notification suppressed (setting off): "$payload"',
-        );
-      }
-      return;
-    }
     String title;
     String body;
     final zeroIdx = payload.indexOf('\x00');
@@ -1459,6 +1665,25 @@ class TerminalViewState extends State<TerminalView> {
     } else {
       title = '';
       body = payload;
+    }
+
+    // Desktop-notification pipeline (unfiltered — see the doc above).
+    widget.onAttention?.call(
+      TerminalAttention(
+        kind: AttentionKind.oscNotify,
+        title: title,
+        body: body,
+      ),
+    );
+
+    // Legacy snackbar path (opt-in, unchanged).
+    if (!_notifyOnOsc9) {
+      if (_log.isLoggable(Level.FINE)) {
+        _log.fine(
+          'OSC 9/777 notification suppressed (setting off): "$payload"',
+        );
+      }
+      return;
     }
     final messenger = ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;
@@ -1572,8 +1797,7 @@ class TerminalViewState extends State<TerminalView> {
     primary(LogicalKeyboardKey.equal): const IncreaseFontSizeIntent(),
     primary(LogicalKeyboardKey.numpadAdd): const IncreaseFontSizeIntent(),
     primary(LogicalKeyboardKey.minus): const DecreaseFontSizeIntent(),
-    primary(LogicalKeyboardKey.numpadSubtract):
-        const DecreaseFontSizeIntent(),
+    primary(LogicalKeyboardKey.numpadSubtract): const DecreaseFontSizeIntent(),
     primary(LogicalKeyboardKey.digit0): const ResetFontSizeIntent(),
     primary(LogicalKeyboardKey.numpad0): const ResetFontSizeIntent(),
     // Shift variants of the zoom bindings. The unshifted forms are
@@ -2056,6 +2280,8 @@ class TerminalViewState extends State<TerminalView> {
     _controller.removeListener(_onControllerChanged);
     _engine.title.removeListener(_syncTitle);
     _engine.workingDir.removeListener(_syncPwd);
+    _focus.removeListener(_syncFocusReport);
+    widget.windowFocus?.removeListener(_syncFocusReport);
     _pty?.kill();
     _controller.dispose();
     _engine.dispose();

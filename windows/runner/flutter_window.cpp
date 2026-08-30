@@ -3,6 +3,7 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "notifications.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -25,6 +26,10 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  // Desktop-notification platform channel (toasts, taskbar overlay
+  // badge, click-through activation) — see notifications.{h,cpp}.
+  octodo::RegisterNotifications(flutter_controller_->engine(),
+                                GetHandle());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -59,6 +64,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     if (result) {
       return *result;
     }
+  }
+
+  // Toast-activation marshaling from WinRT threads (see
+  // notifications.cpp). Fully handled there — nothing else to do.
+  if (octodo::HandleNotificationsWindowMessage(message, lparam)) {
+    return 0;
   }
 
   switch (message) {

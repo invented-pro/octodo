@@ -238,6 +238,69 @@ class GeneralSettingsSection {
     icon: Icons.view_sidebar,
   );
 
+  /// Master switch for the whole notification pipeline (desktop
+  /// banners, unread dots on tabs / drawer tiles, dock / taskbar
+  /// badges, OSC 133 command tracking). When false, nothing fires at
+  /// all — see `NotificationHub.handle`'s first filter.
+  ///
+  /// Fed by three detection sources (lib/src/notifications/):
+  ///   * OSC 9 / OSC 777 escape sequences (agent tools, user scripts)
+  ///   * BEL ("may need input" — additionally gated by
+  ///     `terminal.bellMode != none`)
+  ///   * OSC 133 C/D shell-integration marks (generic long-command
+  ///     completion, injected into bash/zsh/fish/PowerShell prompts)
+  final desktopNotifications = BoolSetting(
+    'notifications.enabled',
+    defaultValue: true,
+    title: 'Desktop notifications',
+    subtitle:
+        'Notify when a long-running task finishes or a terminal needs '
+        'attention (works while Octodo is in the background).',
+    icon: Icons.notifications_active,
+  );
+
+  /// Sub-item of [desktopNotifications]: minimum wall time between the
+  /// OSC 133 command-start (`C`) and command-finish (`D`) marks before
+  /// a completion notification is sent. 0 = notify on every command
+  /// (still subject to the visible-surface suppression and the
+  /// per-surface banner cooldown).
+  ///
+  /// `late final` (not a plain field) because the `dependsOn` back-
+  /// reference to [desktopNotifications] is an instance-member access,
+  /// which Dart forbids in non-late field initializers.
+  late final IntSetting notificationMinTaskSeconds = IntSetting(
+    'notifications.minTaskSeconds',
+    defaultValue: 10,
+    min: 0,
+    max: 3600,
+    title: 'Only notify for tasks longer than',
+    subtitle:
+        'Seconds a command must run before its completion sends a '
+        'notification. 0 = always.',
+    icon: Icons.timer,
+    dependsOn: desktopNotifications,
+  );
+
+  /// Sub-item of [desktopNotifications]: while unread notifications
+  /// exist and the Octodo window is unfocused, re-post the newest
+  /// banner every 30 s (same id, so Notification Center replaces
+  /// instead of stacking) until it is read, clicked, or dismissed.
+  /// macOS and Windows auto-dismiss native banners after a few
+  /// seconds; this is the only app-side way to keep them coming
+  /// back. The OS-level alternative — switching Octodo to "Alerts"
+  /// style — persists a single banner until dismissed.
+  late final BoolSetting notificationRealertUntilRead = BoolSetting(
+    'notifications.realertUntilRead',
+    defaultValue: true,
+    title: 'Keep re-alerting until read',
+    subtitle:
+        'While Octodo is in the background and a notification is still '
+        'unread, re-show the banner every 30 seconds until you interact '
+        'with it.',
+    icon: Icons.notification_important,
+    dependsOn: desktopNotifications,
+  );
+
   /// Confirm before quitting / closing the window. Enabled by
   /// default — a stray Ctrl+Shift+Q or accidental ×-click while
   /// typing shouldn't terminate a long-running build / interactive
@@ -259,6 +322,9 @@ class GeneralSettingsSection {
     yield frostLevel;
     yield drawerDefaultCollapsed;
     yield confirmOnExit;
+    yield desktopNotifications;
+    yield notificationMinTaskSeconds;
+    yield notificationRealertUntilRead;
   }
 }
 

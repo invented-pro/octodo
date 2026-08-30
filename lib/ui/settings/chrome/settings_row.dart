@@ -22,6 +22,11 @@ class SettingsCardRow extends StatelessWidget {
   final bool showJsonPaths;
   final VoidCallback? onTap;
 
+  /// Sub-item indentation: renders the row inset with a connector
+  /// notch so it visually belongs to the row above (e.g. the
+  /// notification threshold under the notifications master toggle).
+  final bool indent;
+
   const SettingsCardRow({
     super.key,
     this.rowKey,
@@ -32,13 +37,19 @@ class SettingsCardRow extends StatelessWidget {
     required this.trailing,
     this.showJsonPaths = false,
     this.onTap,
+    this.indent = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     final body = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: EdgeInsets.only(
+        left: indent ? 38 : 16,
+        right: 16,
+        top: 10,
+        bottom: 10,
+      ),
       child: Row(
         children: [
           if (leadingIcon != null) ...[

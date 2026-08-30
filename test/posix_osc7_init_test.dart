@@ -71,6 +71,32 @@ void main() {
       },
     );
 
+    test('registers the OSC 133 D hook at the HEAD of precmd_functions', () {
+      // $? is only the command's real exit status before any other
+      // precmd hook runs — the prepend (vs append) is load-bearing.
+      expect(
+        shim,
+        contains(r'''_octodo_133d() { printf '\033]133;D;%s\033\\' "$?" }'''),
+      );
+      expect(
+        shim,
+        contains(r'precmd_functions=(_octodo_133d $precmd_functions[@])'),
+      );
+      expect(
+        shim,
+        contains('*" _octodo_133d "*'),
+        reason: 'double-append guard for the D hook',
+      );
+    });
+
+    test('registers the OSC 133 C hook on preexec_functions', () {
+      expect(
+        shim,
+        contains(r'''_octodo_133c() { printf '\033]133;C\033\\' }'''),
+      );
+      expect(shim, contains('preexec_functions+=(_octodo_133c)'));
+    });
+
     test('chains to the user real .zshenv (skipped because zsh read ours)', () {
       expect(
         shim,
@@ -135,9 +161,64 @@ void main() {
         // _makeSurface appends it as ONE argument after -C; it must not
         // depend on newlines or multi-line function bodies.
         expect(init.contains('\n'), isFalse);
-        expect(init, startsWith('function __octodo_osc7'));
+        expect(init, startsWith('function __octodo_osc133_d'));
         expect(init, endsWith('end'));
       },
     );
+
+    test('registers the 133 D handler FIRST so the status is the command\'s '
+        'real status', () {
+      // Handlers run in registration order; the OSC 7 printf in a
+      // later handler would reset $status to 0.
+      final dIdx = init.indexOf('__octodo_osc133_d');
+      final osc7Idx = init.indexOf('__octodo_osc7');
+      expect(dIdx, greaterThanOrEqualTo(0));
+      expect(osc7Idx, greaterThan(dIdx));
+      expect(
+        init,
+        contains(
+          r"""function __octodo_osc133_d --on-event fish_prompt; """
+          r"""printf '\033]133;D;%s\a' "$status"; end;""",
+        ),
+      );
+    });
+
+    test('registers the 133 C handler on fish_preexec', () {
+      expect(
+        init,
+        contains(
+          r"""function __octodo_osc133_c --on-event fish_preexec; """
+          r"""printf '\033]133;C\a'; end;""",
+        ),
+      );
+    });
+  });
+
+  group('bash PROMPT_COMMAND + PS0 (OSC 7 + OSC 133)', () {
+    final promptCommand = TerminalWorkspaceState.osc7PromptCommandForTest;
+    final ps0 = TerminalWorkspaceState.osc133Ps0ForTest;
+
+    test(r'captures $? FIRST — every later command overwrites it', () {
+      expect(promptCommand, startsWith(r'__octodo_rc=$?;'));
+      final rcIdx = promptCommand.indexOf(r'__octodo_rc=$?');
+      final osc7Idx = promptCommand.indexOf('printf');
+      expect(rcIdx, greaterThanOrEqualTo(0));
+      expect(osc7Idx, greaterThan(rcIdx));
+    });
+
+    test('emits OSC 7 then the OSC 133 D mark with the captured rc', () {
+      expect(
+        promptCommand,
+        contains(r'''printf '\033]7;file://%s%s\033\\' "$(hostname)" "$PWD"'''),
+      );
+      expect(
+        promptCommand,
+        contains(r'''printf '\033]133;D;%s\033\\' "$__octodo_rc"'''),
+      );
+    });
+
+    test('PS0 emits the C mark via prompt-escape expansion (no subshell)', () {
+      expect(ps0, r'\e]133;C\a');
+    });
   });
 }

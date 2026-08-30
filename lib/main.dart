@@ -8,6 +8,9 @@ import 'package:flutter_alacritty/flutter_alacritty.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:window_manager/window_manager.dart';
 import 'src/app_info.dart';
+import 'src/notifications/desktop_notifications.dart';
+import 'src/notifications/in_app_banner_overlay.dart';
+import 'src/notifications/notification_hub.dart';
 import 'src/settings/json_settings_store.dart';
 import 'src/settings/paths.dart';
 import 'src/settings/settings_runtime.dart';
@@ -326,6 +329,11 @@ class _WorkspaceEntry {
   String name;
   Color color;
 
+  /// Pending desktop-notification count, mirrored from the
+  /// NotificationHub on every hub change (drives the drawer tile
+  /// badge). The hub stays the source of truth.
+  int unread = 0;
+
   /// True once the user has explicitly renamed this workspace via
   /// the drawer's double-click rename affordance. Drives the
   /// window-title suffix (we don't append the auto-generated
@@ -388,6 +396,51 @@ class _AppShellState extends State<AppShell>
   late bool _drawerCollapsed = SettingsRuntime.instance.store.get(
     SettingsRuntime.instance.catalog.general.drawerDefaultCollapsed,
   );
+
+  // ── Notification pipeline ─────────────────────────────────────
+  //
+  // Detection lives in each TerminalView (OSC 9/777 + BEL streams,
+  // OSC 133 scanner); the hub below owns filtering / suppression /
+  // coalescing / unread bookkeeping; DesktopNotifications owns the
+  // native platform channel (banners, dock/taskbar badge, activation
+  // clicks). See lib/src/notifications/.
+
+  late final DesktopNotifications _desktopNotifications =
+      DesktopNotifications();
+  late final NotificationHub _hub;
+
+  /// Live "window has focus" state. The hub's suppression check runs
+  /// synchronously inside PTY event handlers, but the underlying
+  /// `windowManager.isFocused()` is async — so WindowListener's
+  /// onWindowFocus/onWindowBlur + the lifecycle observer keep this
+  /// fresh instead. It is also handed to every TerminalWorkspace so
+  /// each TerminalView can drive the terminal focus-reporting
+  /// protocol (DECSET 1004 — TUIs like opencode drop notifications
+  /// without `CSI I`/`CSI O` reports).
+  final ValueNotifier<bool> _windowFocused = ValueNotifier(true);
+
+  /// Correct the [_windowFocused] mirror once at startup — it
+  /// defaults to `true`, which is wrong for a background launch
+  /// (`open -g`, login-item restore) where no focus event ever
+  /// fires. Until corrected, events from the selected tab would be
+  /// wrongly suppressed.
+  Future<void> _syncFocusOnce() async {
+    try {
+      _windowFocused.value = await windowManager.isFocused();
+    } catch (e) {
+      _log.warning('initial isFocused probe failed: $e');
+    }
+  }
+
+  /// Watcher subscription for the notifications master toggle:
+  /// flip on → request macOS authorization; flip off → clear every
+  /// unread marker, badge, and delivered banner (the toggle controls
+  /// the whole pipeline, not just the OS popup).
+  StreamSubscription<bool>? _notificationsEnabledSub;
+
+  /// Re-alert setting watcher — flips stop an in-flight re-alert loop
+  /// immediately instead of on the next 30 s tick.
+  StreamSubscription<bool>? _notificationsRealertSub;
 
   /// Cached [BuildContext] of the app-shell subtree, captured on
   /// each [build]. Used by async mutators (e.g. the close-workspace
@@ -487,6 +540,146 @@ class _AppShellState extends State<AppShell>
     // and either lets `destroy()` run or cancels based on the user's
     // answer.
     windowManager.setPreventClose(true);
+
+    _initNotificationPipeline();
+    unawaited(_syncFocusOnce());
+  }
+
+  /// Wire the notification hub to the desktop backend and settings.
+  /// Called once from [initState]; the hub outlives workspace churn
+  /// (surfaces register/unregister via the per-workspace callbacks in
+  /// [build]).
+  void _initNotificationPipeline() {
+    final runtime = SettingsRuntime.instance;
+    _desktopNotifications.initialize();
+    _hub = NotificationHub(
+      store: runtime.store,
+      catalog: runtime.catalog,
+      isAppFocused: () => _windowFocused.value,
+      isSurfaceVisible: (workspaceId, surfaceId) {
+        final active = _activeWorkspace;
+        if (active == null || active.id != workspaceId) return false;
+        return active.key.currentState?.isSurfaceActive(surfaceId) ?? false;
+      },
+      composeDisplay: (workspaceId, surfaceId) {
+        final idx = _workspaces.indexWhere((w) => w.id == workspaceId);
+        if (idx < 0) return workspaceId;
+        final entry = _workspaces[idx];
+        final tab =
+            entry.key.currentState?.surfaceChipTitleById(surfaceId) ?? '';
+        return tab.isEmpty ? entry.name : '${entry.name} · $tab';
+      },
+      onDesktopNotification: (request) {
+        _desktopNotifications.show(
+          id: request.id,
+          title: request.title,
+          body: request.body,
+          thread: request.thread,
+        );
+      },
+      onDismissNotification: _desktopNotifications.dismiss,
+    );
+
+    // Hub change fan-out: native badge, per-entry drawer counts,
+    // per-surface chip mirrors, drawer repaint.
+    _hub.addListener(_onHubChanged);
+
+    // Focus mirror drives the re-alert loop: gaining focus stops it,
+    // losing focus may start it (see NotificationHub.syncRealert).
+    _windowFocused.addListener(_hub.syncRealert);
+
+    // Native activation (banner click) → raise window → navigate to
+    // the emitting workspace/pane/tab → clear unread.
+    _desktopNotifications.onActivation = _onNotificationActivated;
+
+    // Native dismissal (swipe-away) → stop re-alerting that surface.
+    _desktopNotifications.onDismissed = _hub.onNotificationDismissed;
+
+    // Authorization: at startup when already enabled, and on every
+    // later flip-on. Denied → log-only (in-app indicators remain).
+    if (runtime.store.get<bool>(runtime.catalog.general.desktopNotifications)) {
+      _desktopNotifications.requestAuthorization();
+    }
+    _notificationsEnabledSub = runtime.store
+        .watch<bool>(runtime.catalog.general.desktopNotifications)
+        .listen((enabled) {
+          if (enabled) {
+            _desktopNotifications.requestAuthorization();
+          } else {
+            _hub.clearAll();
+          }
+        });
+    // Re-alert toggle flips take effect on the next sync at the
+    // latest (the ticker re-checks eligibility every cycle); sync
+    // eagerly so an off-flip stops an in-flight loop immediately.
+    _notificationsRealertSub = runtime.store
+        .watch<bool>(runtime.catalog.general.notificationRealertUntilRead)
+        .listen((_) => _hub.syncRealert());
+  }
+
+  void _onHubChanged() {
+    if (!mounted) return;
+    final bySurface = _hub.unreadBySurface();
+    for (final entry in _workspaces) {
+      entry.unread = _hub.unreadCountForWorkspace(entry.id);
+      entry.key.currentState?.syncUnreadCounts(bySurface);
+    }
+    _desktopNotifications.setBadge(_hub.totalUnread);
+    // Drawer tiles read entry.unread — repaint them.
+    setState(() {});
+  }
+
+  /// Desktop-notification click-through. The native side has already
+  /// raised the window (activation is a user interaction, so focus
+  /// stealing is permitted); Dart-side we make sure, then navigate to
+  /// the recorded surface. Unknown record (app restarted, surface or
+  /// workspace closed) → activate only.
+  void _onNotificationActivated(String id) {
+    final record = _hub.consumeActivation(id);
+    _raiseWindow();
+    if (record == null) return;
+    _focusNotificationTarget(record.workspaceId, record.surfaceId);
+  }
+
+  /// In-app banner click — same treatment as a native banner click.
+  void _onInAppBannerActivated(String workspaceId, String surfaceId) {
+    _raiseWindow();
+    _focusNotificationTarget(workspaceId, surfaceId);
+  }
+
+  void _raiseWindow() {
+    windowManager.show().then((_) => windowManager.focus()).catchError((
+      Object e,
+    ) {
+      _log.warning('window raise after notification click failed: $e');
+    });
+  }
+
+  /// Navigate to the emitting workspace/surface and clear its
+  /// unread state once the IndexedStack has mounted it.
+  void _focusNotificationTarget(String workspaceId, String surfaceId) {
+    final idx = _workspaces.indexWhere((w) => w.id == workspaceId);
+    if (idx < 0) return;
+    // Capture the entry, not idx — the workspace list can change
+    // (removal, reordering) between here and the post-frame callback.
+    final entry = _workspaces[idx];
+    _selectWorkspace(idx);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final state = entry.key.currentState;
+      state?.focusSurfaceById(surfaceId);
+      _hub.markRead(workspaceId, surfaceId);
+    });
+  }
+
+  /// A surface became the visible focused tab (workspace switch, tab
+  /// select, pane focus, app resume) — clear its unread state when
+  /// the user is actually looking at it.
+  void _onSurfaceViewed(_WorkspaceEntry entry, String surfaceId) {
+    final active = _activeWorkspace;
+    if (active == null || !identical(active, entry)) return;
+    if (!_windowFocused.value) return;
+    _hub.markRead(entry.id, surfaceId);
   }
 
   /// Resolves the shell list off-isolate, then mounts the first
@@ -505,9 +698,21 @@ class _AppShellState extends State<AppShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // Resume implies the window regained focus — refresh the
+      // mirror BEFORE the clear-on-view check below.
+      _windowFocused.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _activeWorkspace?.key.currentState?.focusCurrentPane();
       });
+      _clearUnreadForVisibleSurface();
+      return;
+    }
+    if (state == AppLifecycleState.inactive) {
+      // On desktop, `inactive` fires whenever a system dialog or
+      // another app takes focus — treat it as "not focused" for
+      // suppression purposes (over-suppression is impossible: an
+      // unfocused app never suppresses).
+      _windowFocused.value = false;
       return;
     }
     if (state == AppLifecycleState.detached) {
@@ -520,6 +725,25 @@ class _AppShellState extends State<AppShell>
       // guidance) and matches what cmd/PowerShell-hosted tools do.
       exit(0);
     }
+  }
+
+  // WindowListener focus mirrors — keep `_windowFocused` fresh for
+  // the hub's synchronous suppression check. See the field's doc.
+  @override
+  void onWindowFocus() => _windowFocused.value = true;
+
+  @override
+  void onWindowBlur() => _windowFocused.value = false;
+
+  /// Clear unread state for the surface the user is currently looking
+  /// at (active workspace → focused container → selected tab). Called
+  /// on workspace switch and app resume; the per-tab select path goes
+  /// through [TerminalWorkspace.onSurfaceViewed] instead.
+  void _clearUnreadForVisibleSurface() {
+    final active = _activeWorkspace;
+    if (active == null) return;
+    final surface = active.key.currentState?.currentSurface;
+    if (surface != null) _onSurfaceViewed(active, surface.id);
   }
 
   _WorkspaceEntry? get _activeWorkspace =>
@@ -990,6 +1214,9 @@ class _AppShellState extends State<AppShell>
   /// workspaces.
   void _removeWorkspaceEntry(int index) {
     if (index < 0 || index >= _workspaces.length) return;
+    // Purge pending notification state (unread, delivered banners,
+    // activation records) before the workspace goes away.
+    _hub.purgeWorkspace(_workspaces[index].id);
     if (_workspaces.length <= 1) {
       _workspaces.removeAt(index);
       _newWorkspace();
@@ -1012,6 +1239,11 @@ class _AppShellState extends State<AppShell>
     _updateWindowTitle();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _activeWorkspace?.key.currentState?.focusCurrentPane();
+    });
+    // Switching to a workspace clears the unread state of whatever
+    // surface is now on screen (same rule as tab select / resume).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _clearUnreadForVisibleSurface();
     });
   }
 
@@ -1229,6 +1461,13 @@ class _AppShellState extends State<AppShell>
   @override
   void dispose() {
     _shortcutsEnabledSub?.cancel();
+    _notificationsEnabledSub?.cancel();
+    _notificationsRealertSub?.cancel();
+    _hub.removeListener(_onHubChanged);
+    _windowFocused.removeListener(_hub.syncRealert);
+    _desktopNotifications.onActivation = null;
+    _desktopNotifications.onDismissed = null;
+    _hub.dispose();
     _uninstallEarlyKeyHandler();
     windowManager.removeListener(this);
     WidgetsBinding.instance.removeObserver(this);
@@ -1287,33 +1526,68 @@ class _AppShellState extends State<AppShell>
             ),
             // ── Active workspace content ──────────────────────
             Expanded(
-              child: IndexedStack(
-                index: _currentIndex.clamp(0, _workspaces.length - 1),
+              // The Stack layers the persistent in-app notification
+              // banners (top-right, hit-tested only on the cards)
+              // over whichever workspace the IndexedStack shows.
+              child: Stack(
                 children: [
-                  for (var i = 0; i < _workspaces.length; i++)
-                    TerminalWorkspace(
-                      key: _workspaces[i].key,
-                      // Gate settings/theme setState on the focused
-                      // workspace so an offstage one doesn't pay an
-                      // O(M*K) rebuild on every setting change. The
-                      // offstage workspace still captures the new
-                      // value internally and re-applies on focus
-                      // (see TerminalWorkspaceState.didUpdateWidget).
-                      isFocused: i == _currentIndex,
-                      name: _workspaces[i].name,
-                      color: _workspaces[i].color,
-                      availableShells: _shells ?? const <ShellProfile>[],
-                      // Last-terminal close in this workspace asks
-                      // the user first, then — only on confirm —
-                      // tears down the tree and removes the entry
-                      // directly (no second prompt). The drawer ×
-                      // and Ctrl+Shift+W paths still go through
-                      // [_closeWorkspace] which calls the same
-                      // confirm helper.
-                      confirmCloseWorkspace: () =>
-                          _confirmWorkspaceClose(_currentIndex),
-                      onEmpty: () => _removeWorkspaceEntry(_currentIndex),
-                    ),
+                  IndexedStack(
+                    index: _currentIndex.clamp(0, _workspaces.length - 1),
+                    children: [
+                      for (var i = 0; i < _workspaces.length; i++)
+                        () {
+                          // Capture the entry (not the loop index) so the
+                          // notification closures keep pointing at the
+                          // right workspace across reorders and removals —
+                          // the entry object is stable for the workspace's
+                          // lifetime.
+                          final entry = _workspaces[i];
+                          return TerminalWorkspace(
+                            key: entry.key,
+                            // Gate settings/theme setState on the focused
+                            // workspace so an offstage one doesn't pay an
+                            // O(M*K) rebuild on every setting change. The
+                            // offstage workspace still captures the new
+                            // value internally and re-apply on focus
+                            // (see TerminalWorkspaceState.didUpdateWidget).
+                            isFocused: i == _currentIndex,
+                            name: entry.name,
+                            color: entry.color,
+                            availableShells: _shells ?? const <ShellProfile>[],
+                            // Notification pipeline plumbing: attention
+                            // events flow up with the workspace id
+                            // attached; viewed/closed hooks flow back down
+                            // to clear / purge unread state at the right
+                            // moments.
+                            onAttention: (surfaceId, attention) =>
+                                _hub.handle(entry.id, surfaceId, attention),
+                            onSurfaceViewed: (surfaceId) =>
+                                _onSurfaceViewed(entry, surfaceId),
+                            onSurfaceClosed: (surfaceId) =>
+                                _hub.purgeSurface(surfaceId),
+                            // Window focus drives the DECSET 1004
+                            // focus-reporting protocol in every surface
+                            // (opencode drops notifications without it).
+                            windowFocus: _windowFocused,
+                            // Last-terminal close in this workspace asks
+                            // the user first, then — only on confirm —
+                            // tears down the tree and removes the entry
+                            // directly (no second prompt). The drawer ×
+                            // and Ctrl+Shift+W paths still go through
+                            // [_closeWorkspace] which calls the same
+                            // confirm helper.
+                            confirmCloseWorkspace: () =>
+                                _confirmWorkspaceClose(_currentIndex),
+                            onEmpty: () => _removeWorkspaceEntry(_currentIndex),
+                          );
+                        }(),
+                    ],
+                  ),
+                  InAppBannerOverlay(
+                    hub: _hub,
+                    onActivate: _onInAppBannerActivated,
+                    onDismiss: _hub.markRead,
+                  ),
                 ],
               ),
             ),
@@ -1434,6 +1708,7 @@ class _WorkspaceDrawer extends StatelessWidget {
                         name: ws.name,
                         color: ws.color,
                         isActive: index == currentIndex,
+                        unread: ws.unread,
                         onTap: () => onSelect(index),
                       );
                     },
@@ -1557,6 +1832,10 @@ class _ExpandedWorkspaceTile extends StatefulWidget {
   final String name;
   final Color color;
   final bool isActive;
+
+  /// Pending desktop notifications for this workspace — renders a
+  /// count badge before the close button.
+  final int unread;
   final VoidCallback onTap;
   final VoidCallback onClose;
   final void Function(String newName) onRename;
@@ -1569,6 +1848,7 @@ class _ExpandedWorkspaceTile extends StatefulWidget {
     required this.name,
     required this.color,
     required this.isActive,
+    required this.unread,
     required this.onTap,
     required this.onClose,
     required this.onRename,
@@ -1793,6 +2073,35 @@ class _ExpandedWorkspaceTileState extends State<_ExpandedWorkspaceTile> {
                   ),
                 ),
               ),
+              // Unread-notification count badge. Sits left of the
+              // close button; active tiles keep it too (the active
+              // workspace may have unread tabs other than the focused
+              // one — unlike the per-tab chip dot, which is hidden on
+              // the visible tab by definition).
+              if (widget.unread > 0) ...[
+                const SizedBox(width: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 5,
+                    vertical: 1,
+                  ),
+                  decoration: BoxDecoration(
+                    color: palette.accentPink,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  constraints: const BoxConstraints(minWidth: 14),
+                  child: Text(
+                    widget.unread > 99 ? '99+' : '${widget.unread}',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: palette.textOverlay,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -1951,6 +2260,7 @@ class _DraggableWorkspaceTileState extends State<_DraggableWorkspaceTile> {
       name: w.name,
       color: w.color,
       isActive: widget.isActive,
+      unread: w.unread,
       onTap: widget.onTap,
       onClose: widget.onClose,
       onRename: (newName) => widget.onRename(w.id, newName),
@@ -2208,12 +2518,17 @@ class _CollapsedWorkspaceTile extends StatefulWidget {
   final String name;
   final Color color;
   final bool isActive;
+
+  /// Pending desktop notifications for this workspace — renders a
+  /// small accent dot pinned to the tile's top-right corner.
+  final int unread;
   final VoidCallback onTap;
 
   const _CollapsedWorkspaceTile({
     required this.name,
     required this.color,
     required this.isActive,
+    required this.unread,
     required this.onTap,
   });
 
@@ -2238,41 +2553,68 @@ class _CollapsedWorkspaceTileState extends State<_CollapsedWorkspaceTile> {
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
           onTap: widget.onTap,
-          child: Container(
-            height: 36,
-            margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              // Same three-state background as the expanded tile:
-              // active → workspace color tint, hover → accentBlue
-              // hint, rest → transparent. The collapsed tile is
-              // icon-only so the hover tint does most of the
-              // "this is interactive" work (no close button to
-              // reveal).
-              color: widget.isActive
-                  ? widget.color.withValues(alpha: 0.20)
-                  : (_hovered
-                        ? palette.accentBlue.withValues(alpha: 0.10)
-                        : Colors.transparent),
-              borderRadius: BorderRadius.circular(4),
-              border: Border(
-                left: BorderSide(
-                  color: widget.isActive ? widget.color : Colors.transparent,
-                  width: 3,
-                ),
-              ),
-            ),
-            child: Center(
-              child: Container(
-                width: 10,
-                height: 10,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                height: 36,
+                margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
-                  shape: BoxShape.circle,
+                  // Same three-state background as the expanded tile:
+                  // active → workspace color tint, hover → accentBlue
+                  // hint, rest → transparent. The collapsed tile is
+                  // icon-only so the hover tint does most of the
+                  // "this is interactive" work (no close button to
+                  // reveal).
                   color: widget.isActive
-                      ? widget.color
-                      : widget.color.withValues(alpha: 0.5),
+                      ? widget.color.withValues(alpha: 0.20)
+                      : (_hovered
+                            ? palette.accentBlue.withValues(alpha: 0.10)
+                            : Colors.transparent),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border(
+                    left: BorderSide(
+                      color: widget.isActive
+                          ? widget.color
+                          : Colors.transparent,
+                      width: 3,
+                    ),
+                  ),
+                ),
+                child: Center(
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: widget.isActive
+                          ? widget.color
+                          : widget.color.withValues(alpha: 0.5),
+                    ),
+                  ),
                 ),
               ),
-            ),
+              // Unread-notification dot, pinned to the tile's
+              // top-right (outside the rounded container so it stays
+              // circular at any tile size).
+              if (widget.unread > 0)
+                Positioned(
+                  top: 0,
+                  right: 4,
+                  child: Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: palette.accentPink,
+                      border: Border.all(
+                        color: palette.drawerSurface,
+                        width: 1.5,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),

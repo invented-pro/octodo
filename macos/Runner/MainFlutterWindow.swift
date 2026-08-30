@@ -46,6 +46,10 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
+    // Desktop-notification platform channel (banners, dock badge,
+    // click-through activation) — see Notifications.swift.
+    OctodoNotifications.shared.attach(to: flutterViewController)
+
     // Window-level transparency so the desktop / native acrylic backdrop
     // can show through when the Flutter scaffold draws at <1.0 alpha.
     // Three things must all be true at the AppKit layer:

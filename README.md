@@ -152,6 +152,86 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for unit tests, lint policies, and our 
 
 ---
 
+## Desktop Notifications
+
+Octodo watches every terminal for "needs attention" signals and posts a native desktop notification (with the Octodo icon) when you're not looking at that terminal. Clicking the notification jumps straight back to the workspace → pane → tab that raised it. Controlled by **Settings → General → Desktop notifications** (on by default), with a sub-item for the minimum task duration.
+
+### What triggers a notification
+
+| Source | Fires when | Notes |
+| ------ | ---------- | ----- |
+| OSC 9 / OSC 777 / OSC 99 (kitty) | A tool or script emits a notification escape sequence | Agents (opencode, Claude Code, Codex CLI) and build scripts — see recipes below |
+| BEL | A terminal emits the bell character | Gated by `Terminal → Bell ≠ none` |
+| OSC 133 (shell integration) | A command you ran finishes | Octodo injects the marks into bash / zsh / fish / PowerShell prompts; only commands longer than the threshold (default 10 s) notify. CMD and Nushell are not covered |
+
+### Notifying from your own tools
+
+```bash
+# OSC 777 (title + body)
+printf '\e]777;notify;Build Complete;All tests passed\e\\'
+
+# OSC 9 (body only)
+printf '\e]9;deploy done\e\\'
+
+# OSC 99 (kitty protocol; title chunk + body chunk)
+printf '\e]99;i=mytask:d=0;Build\e\\'
+printf '\e]99;i=mytask:p=body:d=1;All tests passed\e\\'
+```
+
+```python
+import sys
+sys.stdout.write("\x1b]777;notify;opencode;waiting for input\x07")
+sys.stdout.flush()
+```
+
+### opencode
+
+opencode's TUI has a built-in attention system — sounds and terminal notifications for *question needs input*, *permission needs input*, *session error*, and *session done* — but it is **disabled by default**. Enable it in `~/.config/opencode/tui.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "attention": { "enabled": true }
+}
+```
+
+Octodo implements both halves of the terminal contract opencode needs: it answers the kitty OSC 99 capability probe (how opencode delivers notifications) and reports terminal focus (`CSI I` / `CSI O`, DECSET 1004) so opencode knows the session is blurred — without focus reports opencode stays in an "unknown" focus state and silently drops every notification.
+
+### Claude Code hook
+
+`~/.claude/settings.json` — notify when a session finishes:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '\\e]777;notify;Claude Code;session complete\\a'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Notifications are suppressed while you're looking at the terminal that raised them; unread counts show as a dot on the tab, a badge on the workspace tile, and a macOS dock / Windows taskbar badge.
+
+### Banners that don't vanish
+
+macOS and Windows both auto-dismiss native banners after a few seconds. Octodo layers four mechanisms so an unattended notification stays impossible to miss:
+
+- **Persistent in-app banners** — every notification also shows as a card in the top-right corner of the Octodo window, where it stays until you click it (jump to the terminal) or dismiss it. Repeated events from the same terminal coalesce into one card with a ×N counter.
+- **Re-alert until read** — while a notification is still unread and Octodo is in the background, the banner is re-posted every 30 seconds (same id, so Notification Center replaces instead of stacking) until you click it, open the terminal, or swipe it away. Controlled by **Settings → General → Keep re-alerting until read**.
+- **Dock bounce (macOS)** — a banner posted while Octodo is backgrounded also bounces the dock icon until you switch over.
+- **"Alerts" style (macOS)** — for a banner that literally never auto-dismisses, switch Octodo to *Alerts* in System Settings → Notifications. **Settings → General → Open system notification settings** takes you there directly.
+
+---
+
 ## Acknowledgments
 
 Sincere thanks to the [Alacritty](https://github.com/alacritty/alacritty) team for creating such a lightweight, fast, and elegant masterpiece to power our terminal emulation and hardware-accelerated rendering (licensed under MPL-2.0).

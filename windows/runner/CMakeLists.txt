@@ -9,6 +9,7 @@ project(runner LANGUAGES CXX)
 add_executable(${BINARY_NAME} WIN32
   "flutter_window.cpp"
   "main.cpp"
+  "notifications.cpp"
   "utils.cpp"
   "win32_window.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
@@ -38,6 +39,9 @@ target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 # from main.cpp to pin the package namespace before any window is
 # created. Without this link the build fails with unresolved external.
 target_link_libraries(${BINARY_NAME} PRIVATE "Shell32.lib")
+# RuntimeObject.lib supplies RoGetActivationFactory / WindowsCreateString
+# for the WinRT toast + Action Center calls in notifications.cpp.
+target_link_libraries(${BINARY_NAME} PRIVATE "RuntimeObject.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

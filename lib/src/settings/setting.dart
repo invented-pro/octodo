@@ -18,6 +18,14 @@ abstract class Setting<T> {
   String get title;
   String? get subtitle;
   IconData? get icon;
+
+  /// When non-null, this setting is a *sub-item* of [dependsOn]: the
+  /// settings UI hides the row entirely while the dependency is false
+  /// (and renders it indented when visible). Used for e.g. the
+  /// notification-threshold row under the notifications master toggle.
+  /// The catalog stays the single source of truth — the dependency is
+  /// data, not UI code.
+  Setting<bool>? get dependsOn => null;
 }
 
 class BoolSetting extends Setting<bool> {
@@ -32,8 +40,19 @@ class BoolSetting extends Setting<bool> {
   @override
   final IconData? icon;
 
-  BoolSetting(this.key, {required this.defaultValue,
-      required this.title, this.subtitle, this.icon});
+  /// Hides (and indents when visible) this row while [dependsOn]
+  /// evaluates false. See [Setting.dependsOn].
+  @override
+  final Setting<bool>? dependsOn;
+
+  BoolSetting(
+    this.key, {
+    required this.defaultValue,
+    required this.title,
+    this.subtitle,
+    this.icon,
+    this.dependsOn,
+  });
 
   @override
   SettingCodec<bool> get codec => const BoolCodec();
@@ -53,8 +72,21 @@ class IntSetting extends Setting<int> {
   @override
   final IconData? icon;
 
-  IntSetting(this.key, {required this.defaultValue,
-      this.min, this.max, required this.title, this.subtitle, this.icon});
+  /// Hides (and indents when visible) this row while [dependsOn]
+  /// evaluates false. See [Setting.dependsOn].
+  @override
+  final Setting<bool>? dependsOn;
+
+  IntSetting(
+    this.key, {
+    required this.defaultValue,
+    this.min,
+    this.max,
+    required this.title,
+    this.subtitle,
+    this.icon,
+    this.dependsOn,
+  });
 
   @override
   SettingCodec<int> get codec => IntCodec(min: min, max: max);
@@ -74,8 +106,20 @@ class DoubleSetting extends Setting<double> {
   @override
   final IconData? icon;
 
-  DoubleSetting(this.key, {required this.defaultValue,
-      this.min, this.max, required this.title, this.subtitle, this.icon});
+  /// See [Setting.dependsOn].
+  @override
+  final Setting<bool>? dependsOn;
+
+  DoubleSetting(
+    this.key, {
+    required this.defaultValue,
+    this.min,
+    this.max,
+    required this.title,
+    this.subtitle,
+    this.icon,
+    this.dependsOn,
+  });
 
   @override
   SettingCodec<double> get codec => DoubleCodec(min: min, max: max);
@@ -98,9 +142,19 @@ class StringSetting extends Setting<String> {
   /// provide a domain-specific codec here.
   final SettingCodec<String>? codecOverride;
 
-  StringSetting(this.key, {required this.defaultValue,
-      required this.title, this.subtitle, this.icon,
-      this.codecOverride});
+  /// See [Setting.dependsOn].
+  @override
+  final Setting<bool>? dependsOn;
+
+  StringSetting(
+    this.key, {
+    required this.defaultValue,
+    required this.title,
+    this.subtitle,
+    this.icon,
+    this.codecOverride,
+    this.dependsOn,
+  });
 
   @override
   SettingCodec<String> get codec => codecOverride ?? const StringCodec();
@@ -120,8 +174,20 @@ class EnumSetting<T extends Enum> extends Setting<T> {
   @override
   final IconData? icon;
 
-  EnumSetting(this.key, {required this.defaultValue, required this.values,
-      required this.label, required this.title, this.subtitle, this.icon});
+  /// See [Setting.dependsOn].
+  @override
+  final Setting<bool>? dependsOn;
+
+  EnumSetting(
+    this.key, {
+    required this.defaultValue,
+    required this.values,
+    required this.label,
+    required this.title,
+    this.subtitle,
+    this.icon,
+    this.dependsOn,
+  });
 
   @override
   SettingCodec<T> get codec => EnumCodec<T>(values: values, name: label);
@@ -139,8 +205,18 @@ class ColorSetting extends Setting<Color> {
   @override
   final IconData? icon;
 
-  ColorSetting(this.key, {required this.defaultValue,
-      required this.title, this.subtitle, this.icon});
+  /// See [Setting.dependsOn].
+  @override
+  final Setting<bool>? dependsOn;
+
+  ColorSetting(
+    this.key, {
+    required this.defaultValue,
+    required this.title,
+    this.subtitle,
+    this.icon,
+    this.dependsOn,
+  });
 
   @override
   SettingCodec<Color> get codec => const ColorCodec();
