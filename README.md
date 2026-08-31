@@ -2,7 +2,7 @@
 
 **A Terminal Complex for CLI-Maxing Developers.**
 
-A multi-workspace terminal complex built natively on Rust + Flutter for Windows and macOS. Not a bloated web wrapper—RAM is too expensive, same as your time and attention.
+A multi-workspace terminal complex built natively on Rust + Flutter for Windows and macOS. Not a bloated web wrapper—RAM is too expensive, same as your attention.
 
 English | [中文简体](./README.zh-CN.md)
 
@@ -20,23 +20,24 @@ English | [中文简体](./README.zh-CN.md)
 
 ## Highlights
 
-- **Rust-Fueled Speed**
-  - Powered by **Alacritty** GPU renderer.
-  - Sub-millisecond keystroke rendering, zero stutter.
-- **Flutter-Native UI**
-  - Fluid, multi-pane-tab layouts. 
-  - Natively built for **Windows** and **macOS**.
-- **Keyboard First, Mouse Matters**
-  - Keyboard shortcuts driven.
-  - Mouse **select-to-copy** and **right-click-to-paste** for when your left hand is busy holding coffee.
-- **Auto-Discovery**
-  - Auto detects all available local shells.
-  - Friendly with **WSL** distributions out of box.
-- **Multilingual Support**
-  - Full **IME support** for multi-language typing.
-- **Self-Maintaining**
-  - Silent, in-app **auto-upgrade**. 
-  - No manual fetching required.
+* **Rust-Fueled Speed + Sleek Flutter UI**
+  * Instant GPU rendering via **Alacritty** core for zero-stutter performance.
+  * Fluid, multi-pane layouts with flexible tab management. 
+  * Native, optimized builds for **Windows** and **macOS**.
+* **Keyboard-First, Mouse-Friendly**
+  * Lightning-fast, shortcut-driven navigation.
+  * Seamless **select-to-copy** and **right-click-to-paste** for effortless one-handed use.
+* **Smart Notification**
+  * Instant notifications for completed long-running tasks.
+  * Integrated agent monitoring to keep you informed.
+* **Zero-Config Auto-Discovery**
+  * Instant detection of all local shells right out of the box.
+  * Seamless, automatic integration with **WSL** distributions.
+* **Global Multilingual Support**
+  * Full, native compatibility with multi-language IME inputs.
+* **Effortless Self-Maintenance**
+  * Frictionless, in-app **auto-updates** for both Windows and macOS.
+
 
 ---
 

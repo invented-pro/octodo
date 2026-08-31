@@ -20,23 +20,24 @@
 
 ## 功能亮点
 
-- **Rust 级速度**
-  - 由 **Alacritty** GPU 渲染器驱动。
-  - 亚毫秒级按键渲染，零卡顿。
-- **Flutter 原生 UI**
-  - 流畅的多窗格、多标签布局。
-  - 为 **Windows** 与 **macOS** 原生构建。
+- **Rust 驱动的速度 + 流畅的 Flutter UI**
+  - 基于 **Alacritty** 内核的即时 GPU 渲染，零卡顿表现。
+  - 流畅的多窗格布局与灵活的标签管理。
+  - 为 **Windows** 与 **macOS** 原生构建并优化。
 - **键盘优先，鼠标也顺手**
-  - 以键盘快捷键为核心驱动。
-  - 配备鼠标**划选即复制**与**右键即粘贴**——左手忙着端咖啡时也能操作。
-- **自动发现**
-  - 自动检测主机上所有可用的 shell。
-  - 开箱即用支持 **WSL** 发行版。
-- **多语言支持**
-  - 完整 **IME 输入法支持**，多语言输入无碍。
-- **自我维护**
-  - 静默的应用内**自动升级**。
-  - 无需手动下载更新。
+  - 闪电般的快捷键驱动导航。
+  - 顺滑的**划选即复制**与**右键即粘贴**——单手操作毫不费力。
+- **智能通知**
+  - 长时任务完成时即刻推送通知。
+  - 集成代理监控，让你随时掌握状态。
+- **零配置自动发现**
+  - 开箱即用，自动检测所有本地 shell。
+  - 与 **WSL** 发行版无缝自动集成。
+- **全局多语言支持**
+  - 完整、原生兼容多语言 IME 输入。
+- **省心的自我维护**
+  - Windows 与 macOS 均支持无摩擦的**应用内自动升级**。
+
 
 ---
 
@@ -149,6 +150,86 @@ flutter run -d macos      # macOS 主机
 | `Ctrl+=`                       | `Cmd+=`                      | 放大字体           |
 | `Ctrl+-`                       | `Cmd+-`                      | 缩小字体           |
 | `Ctrl+0`                       | `Cmd+0`                      | 重置字体缩放       |
+
+---
+
+## 桌面通知
+
+Octodo 会监听每个终端的「需要关注」信号，并在你未注视该终端时推送一条带 Octodo 图标的原生桌面通知。点击通知可直接跳回发出通知的工作区 → 窗格 → 标签。该功能由 **设置 → 通用 → 桌面通知** 控制（默认开启），并包含一个用于设置最小任务时长的子项。
+
+### 触发通知的来源
+
+| 来源 | 触发条件 | 备注 |
+| ------ | ---------- | ----- |
+| OSC 9 / OSC 777 / OSC 99 (kitty) | 工具或脚本发出通知转义序列 | 代理（opencode、Claude Code、Codex CLI）与构建脚本——参见下方示例 |
+| BEL | 终端发出响铃字符 | 受 `Terminal → Bell ≠ none` 控制 |
+| OSC 133（shell 集成） | 你运行的命令执行完成 | Octodo 会向 bash / zsh / fish / PowerShell 提示符注入标记；只有超过阈值（默认 10 秒）的命令才会通知。CMD 与 Nushell 不在此列 |
+
+### 从你自己的工具中发送通知
+
+```bash
+# OSC 777（标题 + 正文）
+printf '\e]777;notify;Build Complete;All tests passed\e\\'
+
+# OSC 9（仅正文）
+printf '\e]9;deploy done\e\\'
+
+# OSC 99（kitty 协议；标题片段 + 正文片段）
+printf '\e]99;i=mytask:d=0;Build\e\\'
+printf '\e]99;i=mytask:p=body:d=1;All tests passed\e\\'
+```
+
+```python
+import sys
+sys.stdout.write("\x1b]777;notify;opencode;waiting for input\x07")
+sys.stdout.flush()
+```
+
+### opencode
+
+opencode 的 TUI 内置了一套关注系统——会针对*问题需要输入*、*权限需要授权*、*会话出错*和*会话结束*发出声音与终端通知，但**默认处于关闭状态**。可在 `~/.config/opencode/tui.json` 中启用：
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "attention": { "enabled": true }
+}
+```
+
+Octodo 实现了 opencode 所需的终端契约的两端：一方面响应 kitty OSC 99 能力探测（opencode 借此投递通知），另一方面上报终端焦点状态（`CSI I` / `CSI O`，DECSET 1004），让 opencode 知道会话已失焦——如果不上报焦点，opencode 将停留在「未知」焦点状态并静默丢弃所有通知。
+
+### Claude Code hook
+
+在 `~/.claude/settings.json` 中——会话结束时发送通知：
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '\\e]777;notify;Claude Code;session complete\\a'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+当你的视线停留在发出通知的终端上时，通知会被抑制；未读计数会在标签上显示一个小圆点，在工作区磁贴上显示徽标，并在 macOS Dock 与 Windows 任务栏上显示徽章。
+
+### 不会消失的横幅
+
+macOS 与 Windows 都会在数秒后自动关闭原生横幅。Octodo 叠加了四层机制，确保即便无人值守，通知也不可能被错过：
+
+- **应用内持久横幅**——每条通知同时会在 Octodo 窗口右上角以卡片形式展示，直到你点击（跳转到对应终端）或主动关闭。来自同一终端的重复事件会合并为一张带 ×N 计数的卡片。
+- **未读前持续提醒**——只要通知仍处于未读状态且 Octodo 处于后台，横幅就会每 30 秒重新推送一次（使用同一 id，因此通知中心会替换而非堆叠），直到你点击、打开终端或手动滑掉。可在 **设置 → 通用 → 未读前持续提醒** 中配置。
+- **Dock 弹跳（macOS）**——在 Octodo 处于后台时发出的横幅会同时弹跳 Dock 图标，直到你切回应用。
+- **「提醒」样式（macOS）**——如果希望横幅永不自动关闭，可在系统设置 → 通知中将 Octodo 切换为*提醒*样式。**设置 → 通用 → 打开系统通知设置** 可一键直达。
 
 ---
 
