@@ -94,7 +94,52 @@ int _findMainWindow(String title) {
   }
 }
 
+/// Signature of the HWND lookup used by [enableAcrylic].
+@visibleForTesting
+typedef WindowFinder = int Function(String title);
+
+/// When set, replaces the real `FindWindowW` lookup. Test-only hook that
+/// lets the retry behaviour be exercised without a Win32 window.
+@visibleForTesting
+WindowFinder? findWindowOverride;
+
+// Startup timing: `enableAcrylic` can be invoked from a post-frame
+// callback while the window is still being shown / retitled (the
+// `waitUntilReadyToShow` callback races the first Flutter frame). A
+// single `FindWindowW` miss used to disable the acrylic backdrop for
+// the whole session — leaving a fully transparent window — so the
+// lookup now retries briefly before giving up.
+@visibleForTesting
+const int acrylicMaxAttempts = 5;
+
+@visibleForTesting
+const Duration acrylicRetryDelay = Duration(milliseconds: 100);
+
+/// Resolves the HWND for [title], retrying up to [maxAttempts] times
+/// with [retryDelay] between attempts (the window title may not be set
+/// yet during the startup race). Returns 0 if every attempt misses.
+Future<int> _resolveMainWindow(
+  String title,
+  int maxAttempts,
+  Duration retryDelay,
+) async {
+  for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+    final finder = findWindowOverride ?? _findMainWindow;
+    final hwnd = finder(title);
+    if (hwnd != 0) return hwnd;
+    if (attempt < maxAttempts) {
+      await Future<void>.delayed(retryDelay);
+    }
+  }
+  return 0;
+}
+
 /// Enable native acrylic (frosted-glass) blur behind the window [title].
+///
+/// Returns a [Future] that completes once the accent has been applied, or
+/// when all retries have been exhausted (in which case a warning is logged
+/// and the call is a no-op). Callers may safely fire-and-forget the
+/// returned future.
 ///
 /// [tint] is the acrylic overlay color (normally the active palette's
 /// `surface0`) and [alpha] (0.0–1.0) its strength: 0 = pure blur of the
@@ -102,14 +147,27 @@ int _findMainWindow(String title) {
 /// is fixed by the OS (the Win32 acrylic API exposes no sigma), so the
 /// frost slider maps to tint alpha.
 ///
-/// No-op on non-Windows or if the symbols can't be resolved.
-void enableAcrylic({required String title, required Color tint, required double alpha}) {
-  _resolve();
-  final set = _setWindowCompositionAttribute;
-  if (set == null) return;
-  final hwnd = _findMainWindow(title);
+/// On non-Windows, or when the Win32 symbols cannot be resolved, or when
+/// the target window is not found after [maxAttempts] retries, the call
+/// is a no-op.
+Future<void> enableAcrylic({
+  required String title,
+  required Color tint,
+  required double alpha,
+  @visibleForTesting int maxAttempts = acrylicMaxAttempts,
+  @visibleForTesting Duration retryDelay = acrylicRetryDelay,
+}) async {
+  final applyAccent = applyAccentOverride;
+  if (applyAccent == null) {
+    _resolve();
+    if (_setWindowCompositionAttribute == null) return;
+  }
+  final hwnd = await _resolveMainWindow(title, maxAttempts, retryDelay);
   if (hwnd == 0) {
-    _log.warning('enableAcrylic: window "$title" not found');
+    _log.warning(
+      'enableAcrylic: window "$title" not found '
+      'after $maxAttempts attempts',
+    );
     return;
   }
   final a = (alpha.clamp(0.0, 1.0) * 255).round() & 0xFF;
@@ -119,19 +177,43 @@ void enableAcrylic({required String title, required Color tint, required double 
   // Win32 composition colors are ABGR, not ARGB.
   final abgr = (a << 24) | (b << 16) | (g << 8) | r;
 
+  if (applyAccent != null) {
+    applyAccent(hwnd, _accentEnableAcrylicBlurBehind, _accentFlags, abgr);
+    return;
+  }
+
+  await _applyAccentViaWin32(hwnd, _accentEnableAcrylicBlurBehind, _accentFlags, abgr);
+}
+
+// Accent policy flags: 2 = draw all four borders of the blur region.
+const int _accentFlags = 2;
+
+/// Test-only replacement for the native `SetWindowCompositionAttribute`
+/// call, receiving `(hwnd, accentState, flags, gradientColor)`. When
+/// set, acrylic can be exercised end-to-end on any platform.
+@visibleForTesting
+void Function(int hwnd, int accentState, int flags, int gradientColor)?
+applyAccentOverride;
+
+Future<void> _applyAccentViaWin32(
+  int hwnd,
+  int accentState,
+  int flags,
+  int gradientColor,
+) async {
   final accent = malloc<_AccentPolicy>();
   final data = malloc<_WinCompAttrData>();
   try {
     accent.ref
-      ..accentState = _accentEnableAcrylicBlurBehind
-      ..flags = 2
-      ..gradientColor = abgr
+      ..accentState = accentState
+      ..flags = flags
+      ..gradientColor = gradientColor
       ..animationId = 0;
     data.ref
       ..attribute = _wcaAccentPolicy
       ..data = accent
       ..dataSize = sizeOf<_AccentPolicy>();
-    set(hwnd, data);
+    _setWindowCompositionAttribute!(hwnd, data);
   } catch (e, st) {
     _log.warning('enableAcrylic failed: $e', e, st);
   } finally {
