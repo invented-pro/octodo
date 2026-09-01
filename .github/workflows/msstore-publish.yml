@@ -153,19 +153,18 @@ jobs:
 
           # MSIX Identity Version is a STRICT 4-part numeric
           # (major.minor.build.revision; each part is a 16-bit uint,
-          # 0-65535) and the Store requires each submission to be
-          # strictly greater than the last. Map the tag to
-          # major.minor.patch and use GITHUB_RUN_NUMBER as the revision.
-          #
-          # Uniqueness caveat: GITHUB_RUN_NUMBER is stable across
-          # re-runs of the SAME run (only GITHUB_RUN_ATTEMPT increments),
-          # so clicking "Re-run" after a publish that already registered
-          # this version with the Store will be rejected as a duplicate.
-          # The 16-bit-per-part constraint prevents encoding both run and
-          # attempt into the single revision field, so recovery for a
-          # Store-rejected re-run is to delete + re-push the tag (which
-          # allocates a fresh run number), NOT to click Re-run.
-          $msixVersion = "$ver.$env:GITHUB_RUN_NUMBER"
+          # 0-65535). The Store now requires each part to be ≥ the
+          # previous submission, AND the REVISION field specifically
+          # must be exactly 0 — Microsoft's acceptance validator
+          # rejects any non-zero revision as InvalidParameterValue
+          # ("Apps are not allowed to have a Version with a revision
+          # number other than zero specified in the app manifest").
+          # So uniqueness across submissions is carried by the tag's
+          # patch number, not by GITHUB_RUN_NUMBER: a re-dispatch of
+          # the same tag will produce the same version string and the
+          # Store will reject it as a duplicate. To republish, bump
+          # the patch in the tag (release.yml does the same).
+          $msixVersion = "$ver.0"
           Write-Host "Building octodo $ver (msix version $msixVersion)"
 
           flutter pub get
