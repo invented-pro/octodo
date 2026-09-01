@@ -536,11 +536,17 @@ jobs:
               --no-progress --only-show-errors
           done
 
+      # Attach the macOS assets. build-windows also calls
+      # softprops/action-gh-release, so we keep it here too — without
+      # it, whichever job finishes second would fail to upload (gh's
+      # release-upload requires the release to already exist). To avoid
+      # the duplicated auto-generated notes that motivated this change,
+      # we pass `generate_release_notes: false`: the first invocation
+      # creates the release with notes, this one only updates the
+      # asset list without touching the body.
       - uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: false
           files: |
             octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip
             octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip.sha256
