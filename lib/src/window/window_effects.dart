@@ -136,13 +136,20 @@ Future<int> _resolveMainWindow(
 
 /// Enable native acrylic (frosted-glass) blur behind the window [title].
 ///
+/// Returns a [Future] that completes once the accent has been applied, or
+/// when all retries have been exhausted (in which case a warning is logged
+/// and the call is a no-op). Callers may safely fire-and-forget the
+/// returned future.
+///
 /// [tint] is the acrylic overlay color (normally the active palette's
 /// `surface0`) and [alpha] (0.0–1.0) its strength: 0 = pure blur of the
 /// desktop with no tint, 1 = fully opaque tint. The blur radius itself
 /// is fixed by the OS (the Win32 acrylic API exposes no sigma), so the
 /// frost slider maps to tint alpha.
 ///
-/// No-op on non-Windows or if the symbols can't be resolved.
+/// On non-Windows, or when the Win32 symbols cannot be resolved, or when
+/// the target window is not found after [maxAttempts] retries, the call
+/// is a no-op.
 Future<void> enableAcrylic({
   required String title,
   required Color tint,
