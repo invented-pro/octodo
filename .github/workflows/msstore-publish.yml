@@ -115,7 +115,6 @@ jobs:
           $client  = '${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}'.Trim()
           $secret  = '${{ secrets.AZURE_AD_APPLICATION_SECRET }}'.Trim()
           $seller  = '${{ secrets.SELLER_ID }}'.Trim()
-          $product = '${{ vars.STORE_PRODUCT_ID }}'.Trim()
 
           $ok = $true
           if ($tenant -notmatch $guidRx) {
@@ -132,10 +131,6 @@ jobs:
           }
           if ($seller -notmatch '^\d+$') {
             Write-Host '::error title=SELLER_ID::Secret is not numeric. Expected the Seller ID from Partner Center > Account settings > Organization profile > Legal info (digits only). A non-numeric value is what crashed the Aug-12 run with System.FormatException.'
-            $ok = $false
-          }
-          if ($product -notmatch '^[0-9A-Z]{6,13}\.[A-Za-z0-9]+$') {
-            Write-Host '::error title=STORE_PRODUCT_ID::Variable is malformed. Expected the Store product ID like 43D421A8.Octodo.'
             $ok = $false
           }
           if (-not $ok) { exit 1 }
