@@ -35,21 +35,14 @@ name: msstore-publish
 #   3. `msstore publish` was invoked with a nonexistent `--package`
 #      flag — the CLI takes the .msix path as the positional argument
 #      (or -i/--inputDirectory) plus -id/--appId.
-# DISABLED for releases on 2026-08-21: Microsoft's Entra/Partner Center
-# app-registration requirements (AADSTS9002331 — the Store ingestion API
-# only accepts client-credentials tokens from a tenant app with
-# signInAudience=AzureADMyOrg, linked in Partner Center) are not set up.
-# The v* tag trigger is REMOVED so this can never start, fail, or noise
-# up a release. The workflow itself is fully tested and correct up to
-# the auth step (build, validation, CLI flags all verified green).
-#
-# To re-enable: complete the Partner Center tenant-app setup documented
-# in the history section below, restore the trigger block:
-#   on:
-#     push:
-#       tags: ['v*']
-# and test first via a manual dispatch (Actions tab > Run workflow).
+# Re-enabled for releases on 2026-09-01 after Partner Center tenant-app
+# setup was completed (AADSTS9002331 fixed: Entra app now uses
+# signInAudience=AzureADMyOrg and is linked under Partner Center Users
+# with Developer role). The v* tag trigger is restored; workflow_dispatch
+# stays for testing without cutting a release.
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
