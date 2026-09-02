@@ -63,6 +63,8 @@ import 'package:path/path.dart' as p;
 import 'apply_main.dart';
 import 'crash_sentinel.dart';
 import 'install_paths.dart';
+import 'macos_codesign.dart';
+import '../digest.dart';
 
 class StagedApplyException implements Exception {
   final String message;
@@ -93,10 +95,28 @@ class StagedApply {
   /// executable because the helper's own `resolvedExecutable`
   /// basename is `octodo_helper`, not the app binary name. Only
   /// used by the bundleSwap strategy.
+  ///
+  /// [expectedDigestHex] is the signature-verified SHA-256 the GUI
+  /// process computed at download time. When non-null, the staged
+  /// zip is re-hashed against it BEFORE extraction — the staging
+  /// dir is user-writable, so without this any same-user process
+  /// could swap the zip in the gap between "verified" and
+  /// "extracted" and have the updater install it (GH issue #5,
+  /// item 4). Null skips the re-check (legacy callers / tests).
+  ///
+  /// [codeSignRequirement] (bundle-swap strategy only) is the
+  /// macOS designated requirement the extracted .app must satisfy
+  /// before the swap — Phase C of the update trust hardening.
+  /// Null skips the gate (Windows applies, legacy callers, forks
+  /// with the gate disabled). [codeSignVerifier] is the injection
+  /// point for tests; production uses [verifyBundleCodeSignature].
   static Future<void> run({
     required InstallerPaths paths,
     required int pidToIgnore,
     String? appExecutableName,
+    String? expectedDigestHex,
+    String? codeSignRequirement,
+    CodeSignVerifier? codeSignVerifier,
     Duration initialDelay =
         const Duration(milliseconds: 2500),
     Duration pidPollInterval = const Duration(milliseconds: 250),
@@ -110,6 +130,27 @@ class StagedApply {
         throw StagedApplyException(
           'Staged zip not found at ${paths.zipFile.path}',
         );
+      }
+
+      if (expectedDigestHex != null) {
+        try {
+          await verifySha256Hex(
+            file: paths.zipFile,
+            expectedHex: expectedDigestHex,
+          );
+        } on FormatException catch (e) {
+          throw StagedApplyException(
+            'Bad expected digest passed to helper: $e',
+            e,
+          );
+        } on DigestMismatchException catch (e) {
+          throw StagedApplyException(
+            'Staged zip digest changed after download — refusing to '
+            'extract. This usually means another process modified '
+            'the staged file. Re-download the update.',
+            e,
+          );
+        }
       }
 
       await _awaitProcessExit(
@@ -132,6 +173,8 @@ class StagedApply {
           paths,
           relaunchAfter: relaunchAfter,
           appExecutableName: appExecutableName,
+          codeSignRequirement: codeSignRequirement,
+          codeSignVerifier: codeSignVerifier,
         );
       } else {
         await _copyExtractedIntoInstallDir(
@@ -389,22 +432,27 @@ class StagedApply {
   /// Swap the freshly extracted `.app` bundle into the running
   /// bundle's location:
   ///
-  ///   1. strip quarantine-ish xattrs from the new bundle (bytes
+  ///   1. (optional) verify the new bundle's code signature against
+  ///      [codeSignRequirement] — Phase C; runs BEFORE anything
+  ///      destructive so a failure leaves the running bundle alone,
+  ///   2. strip quarantine-ish xattrs from the new bundle (bytes
   ///      downloaded in-app never get one, but a user-forwarded
   ///      zip could; belt-and-braces against Gatekeeper EPERM at
   ///      relaunch),
-  ///   2. sweep stale `<bundle>.old-*` asides from earlier runs,
-  ///   3. rename the old bundle aside,
-  ///   4. rename (or, cross-volume, recursively copy — preserving
+  ///   3. sweep stale `<bundle>.old-*` asides from earlier runs,
+  ///   4. rename the old bundle aside,
+  ///   5. rename (or, cross-volume, recursively copy — preserving
   ///      symlinks + exec bits) the new bundle into the old name,
   ///      restoring the aside on failure,
-  ///   5. relaunch the new binary with the helper env vars cleared,
-  ///   6. best-effort delete of the aside (POSIX keeps the running
+  ///   6. relaunch the new binary with the helper env vars cleared,
+  ///   7. best-effort delete of the aside (POSIX keeps the running
   ///      helper alive over its own unlinked image).
   static Future<void> _applyBundleSwap(
     InstallerPaths paths, {
     required bool relaunchAfter,
     String? appExecutableName,
+    String? codeSignRequirement,
+    CodeSignVerifier? codeSignVerifier,
   }) async {
     final current = paths.appBundleRoot;
     if (current == null) {
@@ -413,6 +461,18 @@ class StagedApply {
       );
     }
     final newBundle = await _findSingleAppBundle(paths.extractDir);
+
+    if (codeSignRequirement != null) {
+      final verify = codeSignVerifier ?? verifyBundleCodeSignature;
+      final ok = await verify(codeSignRequirement, newBundle.path);
+      if (!ok) {
+        throw StagedApplyException(
+          'New bundle failed code signature verification '
+          '(requirement: $codeSignRequirement) at ${newBundle.path}. '
+          'The update was NOT applied.',
+        );
+      }
+    }
 
     if (Platform.isMacOS) {
       await _runBestEffort('xattr', ['-cr', newBundle.path]);

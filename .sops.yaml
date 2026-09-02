@@ -1,0 +1,12 @@
+# SOPS creation rules. The only in-repo encrypted secret is the
+# self-update Ed25519 signing key (keys/update-signing.pem.age);
+# CI decrypts it with the SOPS_AGE_KEY Actions secret to sign the
+# release manifest (see .github/workflows/release.yml publish-manifest).
+#
+# The corresponding age *identity* never lives in this repo — it is
+# stored as the SOPS_AGE_KEY secret on GitHub and kept locally at
+# ~/.config/sops/age/keys.txt (sops' default key location).
+creation_rules:
+  - path_regex: ^keys/.*\.age$
+    age: >-
+      age144mkjsf5kgj9064fmhtmldv3p2l80x8tglqau20z2g022hsam4zqncm5de

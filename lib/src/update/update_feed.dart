@@ -36,6 +36,17 @@ class UpdateFeedException implements Exception {
       : 'UpdateFeedException: $message ($cause)';
 }
 
+/// Distinct sub-type for *deterministic* integrity refusals: the
+/// release failed the fail-closed checks (missing sidecar, missing
+/// signature, signature does not verify, signed digest disagrees
+/// with the sidecar). These are NOT transient network blips — the
+/// retry wrapper short-circuits past them, and the user-facing
+/// headline distinguishes "this release was refused for integrity"
+/// from "your network is having trouble".
+class UpdateIntegrityException extends UpdateFeedException {
+  const UpdateIntegrityException(super.message, [super.cause]);
+}
+
 /// Distinct sub-type thrown when GitHub replies 404 ("Not Found")
 /// to /releases/latest — i.e. the repo exists but has no published
 /// release yet. This is *not* a failure: it means there's nothing

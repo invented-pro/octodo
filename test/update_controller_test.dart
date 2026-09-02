@@ -19,6 +19,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -30,6 +31,7 @@ import 'package:octodo/src/settings/settings_catalog.dart';
 import 'package:octodo/src/settings/settings_runtime.dart';
 import 'package:octodo/src/settings/settings_store.dart';
 import 'package:octodo/src/update/distribution.dart';
+import 'package:octodo/src/update/manifest_signature.dart';
 import 'package:octodo/src/update/r2_update_feed.dart';
 import 'package:octodo/src/update/update_controller.dart';
 import 'package:octodo/src/update/update_feed.dart';
@@ -88,8 +90,38 @@ class _FakeSettingsStore implements SettingsStore {
   Stream<Object> watchLoadErrors() => const Stream<Object>.empty();
 }
 
-String _releaseBody({String tagName = 'v9.9.9', int zipSize = 12345}) {
+String _releaseBody({
+  String tagName = 'v9.9.9',
+  int zipSize = 12345,
+  bool withIntegrityAssets = false,
+  bool withSidecarOnly = false,
+}) {
   final zipName = 'octodo-$tagName-windows-x64.zip';
+  final assets = <Map<String, dynamic>>[
+    {
+      'name': zipName,
+      'size': zipSize,
+      'browser_download_url': 'https://example.com/$tagName/$zipName',
+      'content_type': 'application/zip',
+    },
+    if (withIntegrityAssets || withSidecarOnly)
+      {
+        'name': '$zipName.sha256',
+        'size': 64,
+        'browser_download_url': 'https://example.com/$tagName/$zipName.sha256',
+        'content_type': 'text/plain; charset=utf-8',
+      },
+    // Signature asset is omitted when `withSidecarOnly` — used by
+    // the fail-closed tests to simulate a legacy/unsigned release.
+    if (withIntegrityAssets)
+      {
+        'name': 'octodo-$tagName-manifest.sig',
+        'size': 512,
+        'browser_download_url':
+            'https://example.com/$tagName/octodo-$tagName-manifest.sig',
+        'content_type': 'text/plain; charset=utf-8',
+      },
+  ];
   return jsonEncode(<String, dynamic>{
     'tag_name': tagName,
     'name': tagName,
@@ -97,14 +129,7 @@ String _releaseBody({String tagName = 'v9.9.9', int zipSize = 12345}) {
     'published_at': '2026-06-15T12:00:00Z',
     'html_url': 'https://github.com/invented-pro/octodo/releases/tag/$tagName',
     'body': 'Test.',
-    'assets': <Map<String, dynamic>>[
-      {
-        'name': zipName,
-        'size': zipSize,
-        'browser_download_url': 'https://example.com/$tagName/$zipName',
-        'content_type': 'application/zip',
-      },
-    ],
+    'assets': assets,
   });
 }
 
@@ -122,7 +147,11 @@ UpdateFeed _feedFrom(MockClient mock) => UpdateFeed(
 /// retry/fallback tests below can use it; the original inline
 /// definition in the `fallback feed (R2)` group called into this
 /// via `r2ManifestBody(...)`.
-String r2ManifestBody({String tagName = 'v9.9.9', int zipSize = 99887766}) {
+String r2ManifestBody({
+  String tagName = 'v9.9.9',
+  int zipSize = 99887766,
+  bool withIntegrityAssets = false,
+}) {
   final zipName = 'octodo-$tagName-windows-x64.zip';
   return jsonEncode(<String, dynamic>{
     'tag_name': tagName,
@@ -138,8 +167,42 @@ String r2ManifestBody({String tagName = 'v9.9.9', int zipSize = 99887766}) {
         'browser_download_url': 'https://s3.example.test/octodo/$zipName',
         'content_type': 'application/zip',
       },
+      if (withIntegrityAssets) ...<Map<String, dynamic>>[
+        {
+          'name': '$zipName.sha256',
+          'size': 64,
+          'browser_download_url':
+              'https://s3.example.test/octodo/$zipName.sha256',
+          'content_type': 'text/plain; charset=utf-8',
+        },
+        {
+          'name': 'octodo-$tagName-manifest.sig',
+          'size': 512,
+          'browser_download_url':
+              'https://s3.example.test/octodo/octodo-$tagName-manifest.sig',
+          'content_type': 'text/plain; charset=utf-8',
+        },
+      ],
     ],
   });
+}
+
+/// Dev Ed25519 keypair used to sign mock `.sig` assets. Initialized
+/// in `setUpAll` — deterministic seed so failures reproduce. The
+/// corresponding public key is injected into the controller via
+/// `signaturePublicKeys`, mirroring how production trusts the key
+/// embedded in `manifest_signature.dart`.
+late SimpleKeyPair _devKeyPair;
+late String _devPubB64;
+
+/// Build a valid `octodo-v<ver>-manifest.sig` body covering the
+/// given zip digest, signed with [_devKeyPair].
+Future<String> _testSigBody(String tagName, String digestHex) async {
+  final asset = 'octodo-$tagName-windows-x64.zip';
+  final msg =
+      canonicalUpdateMessage(tagName.substring(1), asset, digestHex);
+  final sig = await Ed25519().sign(utf8.encode(msg), keyPair: _devKeyPair);
+  return '$kSignatureFileHeader\n$asset $digestHex ${base64.encode(sig.bytes)}\n';
 }
 
 /// Wait until [predicate] returns true or [timeout] elapses.
@@ -159,6 +222,13 @@ Future<void> _waitFor(
 }
 
 void main() {
+  setUpAll(() async {
+    final seed = List<int>.generate(32, (i) => i * 11 + 3);
+    _devKeyPair = await Ed25519().newKeyPairFromSeed(seed);
+    final pub = await _devKeyPair.extractPublicKey();
+    _devPubB64 = base64.encode(pub.bytes);
+  });
+
   late _FakeSettingsStore store;
   late SettingsCatalog catalog;
   late SettingsRuntime runtime;
@@ -982,7 +1052,9 @@ void main() {
           // version-mismatch check (in downloadLatest) passes and
           // the fallback URL is actually used.
           return http.Response(
-            r2ManifestBody(tagName: 'v9.9.9', zipSize: realZip.length),
+            r2ManifestBody(
+                tagName: 'v9.9.9', zipSize: realZip.length,
+                withIntegrityAssets: true),
             200,
           );
         }
@@ -990,6 +1062,12 @@ void main() {
             req.url.path.endsWith('.sha256')) {
           // Fallback sidecar (R2).
           return http.Response(computedDigest, 200);
+        }
+        if (req.url.host == 's3.example.test' &&
+            req.url.path.endsWith('manifest.sig')) {
+          // Fallback signature (R2), signed by the dev key.
+          return http.Response(
+              await _testSigBody('v9.9.9', computedDigest), 200);
         }
         if (req.url.host == 's3.example.test') {
           // Fallback zip — wins on the 1st attempt.
@@ -1010,6 +1088,7 @@ void main() {
             UpdateFeed(repository: r, userAgentVersion: u, client: mock),
         fallbackFeedFactory: (url, u) =>
             R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
+        signaturePublicKeys: [_devPubB64],
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
         minCheckDisplay: Duration.zero,
@@ -1095,6 +1174,239 @@ void main() {
       c.dispose();
     });
 
+    test('release without a signature asset is refused (fail-closed)',
+        () async {
+      // GH issue #5 item 2: a release may carry a valid .sha256
+      // sidecar and STILL be refused when it publishes no
+      // octodo-v<ver>-manifest.sig — the sidecar defends against
+      // corruption, the signature against a compromised feed.
+      final realZip = _buildStubZip();
+      final computedDigest = _sha256HexOfBytes(realZip);
+
+      var zipCalls = 0;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(
+            _releaseBody(
+                tagName: 'v9.9.9',
+                zipSize: realZip.length,
+                withSidecarOnly: true),
+            200,
+          );
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(computedDigest, 200);
+        }
+        if (req.url.host == 'example.com') {
+          zipCalls += 1;
+          return http.Response.bytes(realZip, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await c.downloadLatest();
+
+      expect(model.state, UpdateState.error);
+      expect(model.state, isNot(UpdateState.downloaded));
+      // Headline (not just technical details) must surface the
+      // integrity nature — the user-facing message must not
+      // misdirect toward a network check.
+      expect(
+        model.error?.message ?? '',
+        contains('integrity'),
+        reason: 'headline must call out the integrity refusal',
+      );
+      expect(model.error?.message ?? '',
+          isNot(contains('check your network')),
+          reason: 'do NOT misdirect the user to a network check');
+      expect(
+        model.error?.technicalDetails ?? '',
+        contains('signed manifest'),
+        reason: 'the refusal must be attributable in the error details',
+      );
+      // No retry amplification: a deterministic integrity failure
+      // must NOT spend the full 3-attempt budget.
+      expect(zipCalls, 1,
+          reason: 'integrity refusals are non-retryable by definition');
+      c.dispose();
+    });
+
+    test('signature by an untrusted key is refused (fail-closed)',
+        () async {
+      // The feed serves a structurally valid .sig covering the right
+      // digest — but signed by a key the build does not trust. This
+      // is exactly the "compromised feed, uncompromised signing key"
+      // case the whole mechanism exists for.
+      final realZip = _buildStubZip();
+      final computedDigest = _sha256HexOfBytes(realZip);
+
+      // A DIFFERENT keypair from the one the controller trusts.
+      final evilSeed = List<int>.generate(32, (i) => 200 - i);
+      final evilKey = await Ed25519().newKeyPairFromSeed(evilSeed);
+      final evilAsset = 'octodo-v9.9.9-windows-x64.zip';
+      final evilSig = await Ed25519().sign(
+        utf8.encode(canonicalUpdateMessage('9.9.9', evilAsset, computedDigest)),
+        keyPair: evilKey,
+      );
+
+      var zipCalls = 0;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(
+            _releaseBody(
+                tagName: 'v9.9.9',
+                zipSize: realZip.length,
+                withIntegrityAssets: true),
+            200,
+          );
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(computedDigest, 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(
+              '$kSignatureFileHeader\n$evilAsset $computedDigest '
+              '${base64.encode(evilSig.bytes)}\n',
+              200);
+        }
+        if (req.url.host == 'example.com') {
+          zipCalls += 1;
+          return http.Response.bytes(realZip, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await c.downloadLatest();
+
+      expect(model.state, UpdateState.error);
+      expect(model.state, isNot(UpdateState.downloaded));
+      expect(
+        model.error?.message ?? '',
+        contains('integrity'),
+        reason: 'headline must call out the integrity refusal',
+      );
+      expect(
+        model.error?.technicalDetails ?? '',
+        contains('signature'),
+        reason: 'the refusal must be attributable in the error details',
+      );
+      // Same non-retryable guarantee: a single attempt should
+      // suffice; the retry budget must NOT amplify the work.
+      expect(zipCalls, 1,
+          reason: 'integrity refusals are non-retryable by definition');
+      c.dispose();
+    });
+
+    test('sig asset 4xx (e.g. 404) is treated as integrity refusal',
+        () async {
+      // Mirror of the "publishes no signed manifest" case but for a
+      // release whose manifest references a signature URL the feed
+      // doesn't serve. Without the deterministic-failure short
+      // circuit the retry wrapper would burn the full 3-per-source
+      // budget re-downloading the zip + sidecar before bubbling.
+      final realZip = _buildStubZip();
+      final computedDigest = _sha256HexOfBytes(realZip);
+
+      var zipCalls = 0;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          // Manifest advertises a .sig that the feed won't serve.
+          return http.Response(
+            _releaseBody(
+                tagName: 'v9.9.9',
+                zipSize: realZip.length,
+                withIntegrityAssets: true),
+            200,
+          );
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(computedDigest, 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response('not found', 404);
+        }
+        if (req.url.host == 'example.com') {
+          zipCalls += 1;
+          return http.Response.bytes(realZip, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await c.downloadLatest();
+      await _waitFor(() => model.state == UpdateState.error);
+
+      expect(model.state, UpdateState.error);
+      expect(model.state, isNot(UpdateState.downloaded));
+      expect(
+        model.error?.message ?? '',
+        contains('integrity'),
+        reason: 'headline must call out the integrity refusal',
+      );
+      expect(
+        model.error?.technicalDetails ?? '',
+        contains('signature file is missing'),
+        reason: 'technical details must explain the missing-sig cause',
+      );
+      // No retry amplification: the sig asset being 4xx is a
+      // publish-side misconfiguration, not a transient blip.
+      expect(zipCalls, 1,
+          reason: 'sig 4xx is non-retryable by definition');
+      c.dispose();
+    });
+
     test('primary zip fails 3x → fallback zip fails 3x → error', () async {
       var primaryZipCalls = 0;
       var fallbackZipCalls = 0;
@@ -1164,7 +1476,18 @@ void main() {
           // download path now rejects a body shorter than the
           // manifest's advertised size (truncation guard).
           return http.Response(
-              _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length), 200);
+              _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length,
+                  withIntegrityAssets: true),
+              200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(_sha256HexOfBytes(realZip), 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(
+              await _testSigBody('v9.9.9', _sha256HexOfBytes(realZip)), 200);
         }
         if (req.url.host == 'example.com') {
           final c = Completer<http.Response>();
@@ -1180,6 +1503,7 @@ void main() {
         userAgentVersion: '1.0.0',
         primaryFeedFactory: (r, u) =>
             UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        signaturePublicKeys: [_devPubB64],
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
         minCheckDisplay: Duration.zero,
@@ -1225,7 +1549,18 @@ void main() {
           // download path now rejects a body shorter than the
           // manifest's advertised size (truncation guard).
           return http.Response(
-              _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length), 200);
+              _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length,
+                  withIntegrityAssets: true),
+              200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(_sha256HexOfBytes(realZip), 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(
+              await _testSigBody('v9.9.9', _sha256HexOfBytes(realZip)), 200);
         }
         if (req.url.host == 'example.com') {
           final c = Completer<http.Response>();
@@ -1241,6 +1576,7 @@ void main() {
         userAgentVersion: '1.0.0',
         primaryFeedFactory: (r, u) =>
             UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        signaturePublicKeys: [_devPubB64],
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
         minCheckDisplay: Duration.zero,
@@ -1293,9 +1629,20 @@ void main() {
           // manifest's advertised size (truncation guard).
           return http.StreamedResponse(
             Stream.value(utf8.encode(
-                _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length))),
+                _releaseBody(tagName: 'v9.9.9', zipSize: realZip.length,
+                    withIntegrityAssets: true))),
             200,
           );
+        }
+        if (req.url.path.endsWith('.sha256')) {
+          return http.StreamedResponse(
+              Stream.value(utf8.encode(_sha256HexOfBytes(realZip))), 200);
+        }
+        if (req.url.path.endsWith('manifest.sig')) {
+          return http.StreamedResponse(
+              Stream.value(utf8.encode(
+                  await _testSigBody('v9.9.9', _sha256HexOfBytes(realZip)))),
+              200);
         }
         zipCalls += 1;
         if (zipCalls == 1) {
@@ -1310,6 +1657,7 @@ void main() {
         userAgentVersion: '1.0.0',
         primaryFeedFactory: (r, u) =>
             UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        signaturePublicKeys: [_devPubB64],
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
         minCheckDisplay: Duration.zero,

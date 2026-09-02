@@ -22,7 +22,9 @@ import '../settings/settings_runtime.dart';
 import 'digest.dart';
 import 'distribution.dart';
 import 'installer/crash_sentinel.dart';
+import 'installer/macos_codesign.dart';
 import 'installer/posix_apply_script.dart';
+import 'manifest_signature.dart';
 import 'r2_update_feed.dart';
 import 'release_resolver.dart';
 import 'semver.dart';
@@ -95,6 +97,13 @@ class UpdateController {
   final UpdateFeedSource Function(
           Uri manifestUrl, String userAgentVersion)?
       fallbackFeedFactory;
+
+  /// Ed25519 public keys (base64) accepted for release-manifest
+  /// signatures. Production leaves this null and the keys embedded
+  /// in `manifest_signature.dart` apply. Tests inject a deterministic
+  /// dev keypair's public half so MockClient-served fixtures can be
+  /// signed without the production private key.
+  final List<String>? signaturePublicKeys;
 
   UpdateFeedSource? _primaryFeed;
   UpdateFeedSource? _fallbackFeed;
@@ -192,6 +201,7 @@ class UpdateController {
     this.distribution = InstallDistribution.portable,
     this.primaryFeedFactory,
     this.fallbackFeedFactory,
+    this.signaturePublicKeys,
     this.skipListFileFactory,
     this.downloadClientFactory,
     this.retryDelayFactor = const Duration(milliseconds: 200),
@@ -218,6 +228,11 @@ class UpdateController {
   /// low-level SocketException / TimeoutException / http.ClientException
   /// into [UpdateFeedException] before we get here, so the retry
   /// budget is the only signal we need to act on.
+  ///
+  /// [UpdateIntegrityException] is ALSO non-retryable: a missing
+  /// sidecar or unverified signature is a property of the release,
+  /// not a transient — retrying burns 9 wasted zip+sidecar+sig
+  /// fetches per source for the same refusal.
   Future<T> _withRetry<T>(
     Future<T> Function() fn, {
     required String label,
@@ -226,7 +241,8 @@ class UpdateController {
       fn,
       maxAttempts: _kMaxAttemptsPerSource,
       delayFactor: retryDelayFactor,
-      retryIf: (e) => e is! _DownloadCancelledException,
+      retryIf: (e) =>
+          e is! _DownloadCancelledException && e is! UpdateIntegrityException,
       onRetry: (e) {
         if (e is _DownloadCancelledException) return;
         _log.warning('$label retry: ${e.runtimeType}: $e');
@@ -578,14 +594,20 @@ class UpdateController {
       );
       await _cleanupStaging(stagingDir);
       final fallbackKind = _fallbackFeed?.kind;
+      // The terminal failure itself is quoted in the details so a
+      // fail-closed refusal (missing sidecar, missing/untrusted
+      // signature, digest mismatch) is attributable from the UI —
+      // these are security-relevant signals, not generic blips.
       final technicalDetails = fallbackKind == null
           ? 'Primary: ${primarySource?.kind ?? "?"} '
               '($_kMaxAttemptsPerSource attempts); no fallback configured.\n'
+              'Last error: $primaryFailure\n'
               '${_feedDiagnostics()}'
           : 'Primary: ${primarySource?.kind ?? "?"} '
               '($_kMaxAttemptsPerSource attempts); '
               'fallback: $fallbackKind '
               '($_kMaxAttemptsPerSource attempts each).\n'
+              'Last error: $primaryFailure\n'
               '${_feedDiagnostics()}';
       model.setError(UpdateErrorPayload(
         message: headline,
@@ -615,6 +637,16 @@ class UpdateController {
     Object? error, {
     required bool fallbackConfigured,
   }) {
+    // Deterministic integrity refusals (missing sidecar, missing
+    // signature, signature does not verify, signed digest disagrees
+    // with the sidecar) are NOT network blips — they won't recover
+    // on retry and a "check your network" message misleads the user
+    // into looping. Surface the actual nature.
+    if (error is UpdateIntegrityException) {
+      return 'Update refused: this release did not pass integrity '
+          'verification. See the technical details, and check the '
+          'release page or report this.';
+    }
     if (error is DigestMismatchException) {
       return 'Download failed integrity check. The downloaded file '
           'does not match the published SHA-256 — try again, and if '
@@ -795,37 +827,92 @@ class UpdateController {
       );
     }
 
-    // Verify SHA-256 against the .sha256 sidecar if one was
-    // advertised. A missing sidecar is allowed (older releases
-    // may not have one); we trust TLS + the asset URL comes
-    // from the source. We do log a warning so the gap is at
-    // least visible in debug logs.
+    // Integrity chain (GH issue #5, items 2+3 — all fail-closed):
     //
-    // The fetch routes through whichever source produced the zip
-    // we just downloaded (passed as [source] above). When we
-    // fell back to R2 mid-download, [source] is the R2 feed and
-    // the sidecar is fetched from R2, never via GitHub's client.
-    var digestVerified = false;
-    if (release.digestUrl != null) {
-      final expectedHex = await _fetchDigestSidecar(
-        source: source,
-        url: release.digestUrl!,
-      );
-      await verifySha256Hex(file: zipPath, expectedHex: expectedHex);
-      digestVerified = true;
-    } else {
-      _log.warning(
-        'Release ${release.version} has no .sha256 sidecar; '
-        'installing without integrity check.',
+    //   1. The `.sha256` sidecar MUST exist. A missing sidecar used
+    //      to install with a log warning; now it refuses. Every
+    //      release the workflow has published for years ships one,
+    //      so the tolerance only ever helped an attacker strip it.
+    //   2. The release MUST publish an `octodo-v<ver>-manifest.sig`
+    //      Ed25519 signature asset, and the sidecar's digest must be
+    //      covered by a valid signature against the public keys
+    //      embedded in this build. The sidecar alone defends against
+    //      corruption; the signature is what defends against a
+    //      compromised feed/GitHub account/R2 bucket serving a
+    //      malicious zip with a MATCHING hash.
+    //   3. Only then is the on-disk zip hashed and compared.
+    //
+    // Sidecar and signature both route through whichever source
+    // produced the zip (passed as [source] above) — GitHub → GitHub,
+    // R2 → R2.
+    final digestUrl = release.digestUrl;
+    if (digestUrl == null) {
+      throw UpdateIntegrityException(
+        'Release ${release.version} publishes no .sha256 sidecar; '
+        'refusing to install without an integrity check.',
       );
     }
+    final sigUrl = release.signatureUrl;
+    if (sigUrl == null) {
+      throw UpdateIntegrityException(
+        'Release ${release.version} publishes no signed manifest '
+        '(octodo-v${release.version}-manifest.sig); refusing to '
+        'install an unsigned update.',
+      );
+    }
+    final expectedHex =
+        await _fetchTextAsset(source: source, url: digestUrl);
+    final String sigBody;
+    try {
+      sigBody = await _fetchTextAsset(source: source, url: sigUrl);
+    } on UpdateFeedException catch (e) {
+      // 4xx on the signature asset means the release was published
+      // without a signature — deterministic, not transient. Surface
+      // as an integrity refusal so `_withRetry` doesn't burn the
+      // full 3-per-source budget re-downloading the zip + sidecar.
+      // 5xx stays as transient and is left to the retry wrapper.
+      if (_isHttpClientError(e)) {
+        throw UpdateIntegrityException(
+          'Release ${release.version} signature file is missing on '
+          'the feed (${e.message.split(' ').take(2).join(' ')}); '
+          'refusing to install an update without a verifiable '
+          'signature.',
+          e,
+        );
+      }
+      rethrow;
+    }
+    try {
+      await verifyAssetSignature(
+        body: sigBody,
+        version: release.version,
+        assetName: release.assetName,
+        digestHex: expectedHex,
+        publicKeysBase64: signaturePublicKeys,
+      );
+    } on UpdateSignatureException catch (e) {
+      throw UpdateIntegrityException(
+        'Update signature check failed: ${e.reason}',
+        e,
+      );
+    }
+    final actualHex = await verifySha256Hex(
+      file: zipPath,
+      expectedHex: expectedHex,
+    );
 
     final size = await zipPath.length();
     model.setDownloaded(DownloadedPayload(
       version: release.version,
       zipPath: zipPath,
       sizeBytes: size,
-      digestVerified: digestVerified,
+      digestVerified: true,
+      // The signature-verified digest rides with the payload so the
+      // apply paths can re-hash the staged zip right before
+      // extraction (TOCTOU: the staging dir is user-writable, and
+      // any same-user process could otherwise swap the file between
+      // this check and the helper running).
+      expectedDigestHex: actualHex,
     ));
   }
 
@@ -898,7 +985,11 @@ class UpdateController {
 
     model.setInstalling();
 
-    final spawned = await _spawnHelper(version: d.version, pid: pid);
+    final spawned = await _spawnHelper(
+      version: d.version,
+      pid: pid,
+      expectedDigestHex: d.expectedDigestHex,
+    );
     if (!spawned) return;
 
     await Future<void>.delayed(_kHelperStartupDelay);
@@ -1019,6 +1110,7 @@ class UpdateController {
   Future<bool> _spawnHelper({
     required String version,
     required int pid,
+    required String? expectedDigestHex,
   }) async {
     if (Platform.isMacOS) {
       return _spawnPosixApply(pid: pid);
@@ -1049,6 +1141,14 @@ class UpdateController {
           'OCTODO_UPDATE_HELPER': '1',
           'OCTODO_UPDATE_PAYLOAD': version,
           'OCTODO_UPDATE_PID': pid.toString(),
+          // The signature-verified digest — the helper re-hashes the
+          // staged zip against this before extracting (TOCTOU
+          // close; see DownloadedPayload.expectedDigestHex). Sourced
+          // from the captured DownloadedPayload, NOT from
+          // `model.downloaded`, so an intervening setError/reset
+          // can't drop the entry and silently downgrade the apply
+          // to the legacy-skip path.
+          'OCTODO_UPDATE_DIGEST_HEX': ?expectedDigestHex,
         },
         mode: ProcessStartMode.detached,
       );
@@ -1097,6 +1197,21 @@ class UpdateController {
     }
     final stagingDir = d.zipPath.parent;
     try {
+      // Phase C (macOS): resolve the code-signature requirement to
+      // enforce — non-null only when the RUNNING bundle satisfies
+      // the pinned Team ID itself (inheritance rule; see
+      // macos_codesign.dart). Dev/ad-hoc/fork builds skip the gate,
+      // official signed builds always verify their successor.
+      String? codeSignRequirement;
+      if (Platform.isMacOS) {
+        codeSignRequirement = await resolveEnforcedCodeSignRequirement(
+          runningBundlePath: bundleRootPath,
+        );
+        _log.info(codeSignRequirement == null
+            ? 'macOS apply: codesign gate skipped (running bundle does '
+                'not satisfy the pin, or gate disabled)'
+            : 'macOS apply: codesign gate armed');
+      }
       await spawnPosixApply(
         pid: pid,
         zipFile: d.zipPath,
@@ -1105,6 +1220,12 @@ class UpdateController {
         scriptFile: File(p.join(stagingDir.path, 'apply.sh')),
         sentinelFile: resolveHelperCrashSentinelFile(),
         homeDir: Platform.environment['HOME'] ?? '/',
+        // The sh script re-hashes the staged zip against this
+        // (shasum -a 256) right before ditto extraction — closes the
+        // download→apply TOCTOU the same way the Windows helper's
+        // OCTODO_UPDATE_DIGEST_HEX does.
+        expectedDigestHex: d.expectedDigestHex,
+        codeSignRequirement: codeSignRequirement,
       );
       return true;
     } catch (e) {
@@ -1402,13 +1523,8 @@ class UpdateController {
     return Directory.systemTemp.createTempSync('octodo_');
   }
 
-  String _stagedZipName(ReleaseInfo release) {
-    final uri = Uri.parse(release.zipUrl.toString());
-    final last = uri.pathSegments.isNotEmpty
-        ? uri.pathSegments.last
-        : 'octodo-${release.version}-${currentAssetToken()}.zip';
-    return last;
-  }
+  String _stagedZipName(ReleaseInfo release) =>
+      release.assetName;
 
   Future<void> _cleanupStaging(Directory d) async {
     try {
@@ -1420,13 +1536,22 @@ class UpdateController {
     }
   }
 
-  /// Fetch a `.sha256` sidecar via whichever source produced the
-  /// current release — captured at probe-time into
-  /// [_currentReleaseSource]. If for any reason that field is null
-  /// (release came from a probe we don't track, e.g. a unit test that
-  /// seeded the model directly), we fall back to a fresh short-lived
-  /// `http.Client` so the path still works in tests.
-  Future<String> _fetchDigestSidecar({
+  /// True when [e] is a 4xx response from the feed (the resource is
+  /// definitively missing or forbidden — not a transient network
+  /// failure). Used to route sig/sidecar 4xx into
+  /// `UpdateIntegrityException` so the retry wrapper doesn't burn
+  /// the full 3-per-source budget on a misconfigured release.
+  bool _isHttpClientError(UpdateFeedException e) =>
+      RegExp(r'^HTTP 4\d\d ').hasMatch(e.message);
+
+  /// Fetch a small text asset (`.sha256` sidecar or `.sig` signature
+  /// manifest) via whichever source produced the current release —
+  /// captured at probe-time into [_currentReleaseSource]. If for any
+  /// reason that field is null (release came from a probe we don't
+  /// track, e.g. a unit test that seeded the model directly), we fall
+  /// back to a fresh short-lived `http.Client` so the path still
+  /// works in tests.
+  Future<String> _fetchTextAsset({
     required UpdateFeedSource? source,
     required Uri url,
   }) async {

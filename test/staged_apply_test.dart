@@ -4,6 +4,7 @@
 import 'dart:io';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
@@ -178,6 +179,71 @@ void main() {
         StagedApply.run(paths: paths, pidToIgnore: 0),
         throwsA(isA<StagedApplyException>()),
       );
+    });
+
+    test('expectedDigestHex mismatch refuses before extraction (TOCTOU)',
+        () async {
+      // GH issue #5 item 4: the digest verified at download time
+      // must still match at apply time. A swapped staged zip aborts
+      // BEFORE any extraction or install-dir mutation, and the
+      // install dir keeps its original contents.
+      final wrong = 'ff' * 32;
+      await expectLater(
+        StagedApply.run(
+          paths: paths,
+          pidToIgnore: 0,
+          expectedDigestHex: wrong,
+          initialDelay: Duration.zero,
+          pidTimeout: const Duration(milliseconds: 100),
+          relaunchAfter: false,
+        ),
+        throwsA(isA<StagedApplyException>().having(
+          (e) => e.message,
+          'message',
+          contains('digest changed'),
+        )),
+      );
+
+      // Install dir untouched — the old MZ stub is still there.
+      final exe = File(p.join(installDir.path, 'octodo.exe'));
+      final bytes = await exe.readAsBytes();
+      expect(bytes, <int>[0x4D, 0x5A]);
+
+      // Nothing was extracted either.
+      expect(paths.extractDir.existsSync(), isFalse);
+    });
+
+    test('expectedDigestHex match applies normally', () async {
+      final bytes = await paths.zipFile.readAsBytes();
+      final good = sha256.convert(bytes).toString();
+      await StagedApply.run(
+        paths: paths,
+        pidToIgnore: 0,
+        expectedDigestHex: good,
+        initialDelay: Duration.zero,
+        pidTimeout: const Duration(milliseconds: 100),
+        overwriteAttempts: 2,
+        overwriteBackoff: const Duration(milliseconds: 50),
+        relaunchAfter: false,
+      );
+      final newExe = File(p.join(installDir.path, 'octodo.exe'));
+      expect(await newExe.readAsString(), 'fresh-binary-contents');
+    });
+
+    test('malformed expectedDigestHex fails closed', () async {
+      await expectLater(
+        StagedApply.run(
+          paths: paths,
+          pidToIgnore: 0,
+          expectedDigestHex: 'not-hex',
+          initialDelay: Duration.zero,
+          pidTimeout: const Duration(milliseconds: 100),
+          relaunchAfter: false,
+        ),
+        throwsA(isA<StagedApplyException>()),
+      );
+      final exe = File(p.join(installDir.path, 'octodo.exe'));
+      expect(await exe.readAsBytes(), <int>[0x4D, 0x5A]);
     });
 
     test('throws when install dir is missing', () async {
@@ -705,6 +771,117 @@ void main() {
       expect(entries, equals(['Octodo.app']),
           reason: 'rollback must leave no aside behind');
     }, timeout: const Timeout(Duration(seconds: 30)));
+
+    // Phase C — code-signature gate tests. Run cross-platform (the
+    // gate is requirement-driven, not Platform-gated; the legacy
+    // macOS path is the production target but verifying the gate
+    // logic on the Windows test host keeps coverage where we have
+    // working extractors and CI runs).
+    group('code signature gate (Phase C)', () {
+      /// Build a minimal-but-valid bundle-swap payload zip: a single
+      /// `Octodo.app/Contents/MacOS/Octodo` file inside the zip.
+      /// Cross-platform — uses the `archive` package, not ditto.
+      Future<File> buildMinimalBundleZip() async {
+        final staging = Directory(p.join(workDir.path, 'gate-staging'))
+          ..createSync(recursive: true);
+        final archive = Archive()
+          ..addFile(ArchiveFile.string(
+            'Octodo.app/Contents/MacOS/Octodo',
+            'fresh-binary',
+          ));
+        final zipFile = File(
+          p.join(staging.path, 'octodo-v1.2.3-macos-arm64.zip'),
+        );
+        await zipFile.writeAsBytes(ZipEncoder().encode(archive)!);
+        return zipFile;
+      }
+
+      const requirement =
+          'anchor apple generic and certificate leaf[subject.OU] = '
+              '"P2HUSGVD3W"';
+
+      test('null requirement → verifier never invoked, swap proceeds',
+          () async {
+        // Legacy callers / forks with the gate disabled: no codesign
+        // process is started, the swap runs as it did before Phase C.
+        final zip = await buildMinimalBundleZip();
+        final paths = await buildPaths(zip);
+        var calls = 0;
+        await StagedApply.run(
+          paths: paths,
+          pidToIgnore: 0,
+          initialDelay: Duration.zero,
+          pidTimeout: const Duration(milliseconds: 100),
+          relaunchAfter: false,
+          codeSignRequirement: null,
+          codeSignVerifier: (req, _) {
+            calls += 1;
+            return Future.value(true);
+          },
+        );
+        expect(calls, 0);
+        final bin = File(p.join(
+            appsDir.path, 'Octodo.app', 'Contents', 'MacOS', 'Octodo'));
+        expect(await bin.readAsString(), 'fresh-binary');
+      });
+
+      test('verifier passes → swap completes (verifier sees REQ + path)',
+          () async {
+        final zip = await buildMinimalBundleZip();
+        final paths = await buildPaths(zip);
+        String? seenReq;
+        String? seenBundle;
+        await StagedApply.run(
+          paths: paths,
+          pidToIgnore: 0,
+          initialDelay: Duration.zero,
+          pidTimeout: const Duration(milliseconds: 100),
+          relaunchAfter: false,
+          codeSignRequirement: requirement,
+          codeSignVerifier: (req, bundlePath) {
+            seenReq = req;
+            seenBundle = bundlePath;
+            return Future.value(true);
+          },
+        );
+        expect(seenReq, requirement);
+        expect(seenBundle, contains(r'Octodo.app'));
+        final bin = File(p.join(
+            appsDir.path, 'Octodo.app', 'Contents', 'MacOS', 'Octodo'));
+        expect(await bin.readAsString(), 'fresh-binary');
+      });
+
+      test('verifier fails → fail-closed, old bundle intact', () async {
+        final zip = await buildMinimalBundleZip();
+        final paths = await buildPaths(zip);
+        await expectLater(
+          StagedApply.run(
+            paths: paths,
+            pidToIgnore: 0,
+            initialDelay: Duration.zero,
+            pidTimeout: const Duration(milliseconds: 100),
+            relaunchAfter: false,
+            codeSignRequirement: requirement,
+            codeSignVerifier: (req, bundle) => Future.value(false),
+          ),
+          throwsA(isA<StagedApplyException>().having(
+            (e) => e.message,
+            'message',
+            contains('code signature'),
+          )),
+        );
+
+        // The OLD bundle's Contents/MacOS/Octodo is untouched —
+        // neither renamed nor replaced.
+        final bin = File(p.join(
+            appsDir.path, 'Octodo.app', 'Contents', 'MacOS', 'Octodo'));
+        expect(await bin.readAsString(), 'old-bin-contents');
+        final entries = appsDir.listSync(followLinks: false).map(
+            (e) => p.basename(e.path));
+        expect(entries, equals(['Octodo.app']),
+            reason: 'no aside + no swapped bundle');
+      });
+    });
 
     test('relaunches the swapped bundle via Launch Services (open)',
         () async {

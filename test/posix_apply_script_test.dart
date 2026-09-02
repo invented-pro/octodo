@@ -16,15 +16,15 @@ import 'package:path/path.dart' as p;
 
 void main() {
   group('kPosixApplyScript contract', () {
-    test('takes exactly six positional arguments', () {
-      // The argv builder and the script's $1..$6 usage must stay
+    test('takes exactly eight positional arguments', () {
+      // The argv builder and the script's $1..$8 usage must stay
       // in lockstep — a mismatch silently assigns the wrong value
       // to a step (e.g. pid → zip path) and the apply fails only
       // on a real user machine.
-      for (var i = 1; i <= 6; i++) {
+      for (var i = 1; i <= 8; i++) {
         expect(kPosixApplyScript, contains('"${r'$'}$i"'));
       }
-      expect(kPosixApplyScript, isNot(contains('"${r'$'}7"')));
+      expect(kPosixApplyScript, isNot(contains('"${r'$'}9"')));
     });
 
     test('locates the payload bundle by shape, not name', () {
@@ -69,6 +69,41 @@ void main() {
       expect(firstMv, greaterThan(zipGuard));
     });
 
+    test('re-hashes the staged zip before extraction (TOCTOU close)',
+        () {
+      // GH issue #5 item 4: the digest check must run after the
+      // zip-exists guard and BEFORE ditto touches the zip, gated on
+      // a non-empty $SHA_EXPECTED (legacy callers pass "").
+      expect(
+          kPosixApplyScript, contains(r'/usr/bin/shasum -a 256 "$ZIP"'));
+      final hashCheck = kPosixApplyScript
+          .indexOf(r'[ "$SHA_ACTUAL" = "$SHA_EXPECTED" ]');
+      final zipGuard = kPosixApplyScript.indexOf(r'[ -f "$ZIP" ]');
+      final ditto =
+          kPosixApplyScript.indexOf(r'/usr/bin/ditto -x -k --rsrc');
+      expect(hashCheck, greaterThan(zipGuard));
+      expect(ditto, greaterThan(hashCheck));
+    });
+
+    test('codesign gate runs after discovery, before xattr + swap',
+        () {
+      // Phase C: the payload signature check must fire only after
+      // the .app was located (needs "$NEW") and before ANY mutation
+      // — xattr stripping and the first mv must come later, so a
+      // verification failure leaves the running bundle untouched.
+      expect(kPosixApplyScript,
+          contains(r'/usr/bin/codesign --verify --deep --strict -R="$REQ" "$NEW"'));
+      final gate =
+          kPosixApplyScript.indexOf(r'/usr/bin/codesign --verify');
+      final discovered =
+          kPosixApplyScript.indexOf(r'[ -n "$NEW" ] || fail');
+      final xattr = kPosixApplyScript.indexOf(r'/usr/bin/xattr -cr "$NEW"');
+      final firstMv = kPosixApplyScript.indexOf(r'mv "$BUNDLE"');
+      expect(gate, greaterThan(discovered));
+      expect(xattr, greaterThan(gate));
+      expect(firstMv, greaterThan(gate));
+    });
+
     test('restores the aside when the swap fails', () {
       // Rollback moves the old bundle back before failing.
       final rollback = kPosixApplyScript.indexOf(r'mv "$ASIDE" "$BUNDLE"');
@@ -93,6 +128,9 @@ void main() {
         bundlePath: '/Applications/Octodo.app',
         sentinelPath: '/tmp/octodo_apply_crash.log',
         homeDir: '/Users/sun',
+        expectedDigestHex: 'ab' * 32,
+        codeSignRequirement: 'anchor apple generic and '
+            'certificate leaf[subject.OU] = "P2HUSGVD3W"',
       );
       expect(argv, <String>[
         '4242',
@@ -101,7 +139,24 @@ void main() {
         '/Applications/Octodo.app',
         '/tmp/octodo_apply_crash.log',
         '/Users/sun',
+        'ab' * 32,
+        'anchor apple generic and '
+            'certificate leaf[subject.OU] = "P2HUSGVD3W"',
       ]);
+    });
+
+    test('omitted digest becomes an empty 7th argv (legacy skip)', () {
+      final argv = posixApplyArgv(
+        pid: 4242,
+        zipPath: '/z',
+        extractDirPath: '/x',
+        bundlePath: '/Applications/Octodo.app',
+        sentinelPath: '/s',
+        homeDir: '/Users/sun',
+      );
+      expect(argv, hasLength(8));
+      expect(argv[6], '');
+      expect(argv[7], '');
     });
   });
 
@@ -154,6 +209,12 @@ void main() {
         '/Applications/Octodo.app',
         p.join(tmp.path, 'sentinel.log'),
         '/Users/sun',
+        // No verified digest on this legacy-style call → empty 7th.
+        '',
+        // No codesign requirement either (legacy callers don't pass
+        // it) → empty 8th; the script's `if [ -n "$REQ" ]` skips the
+        // gate entirely.
+        '',
       ]);
     });
 

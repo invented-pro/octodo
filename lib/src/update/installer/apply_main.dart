@@ -38,6 +38,15 @@ const String kHelperFlagEnv = 'OCTODO_UPDATE_HELPER';
 const String kHelperPayloadEnv = 'OCTODO_UPDATE_PAYLOAD';
 const String kHelperPidEnv = 'OCTODO_UPDATE_PID';
 
+/// Signature-verified digest of the staged zip, forwarded by the
+/// GUI process at spawn time. The helper re-hashes the zip against
+/// it BEFORE extraction — the staging dir is user-writable, so the
+/// gap between the GUI's verify and the helper's extract is a TOCTOU
+/// window otherwise (GH issue #5, item 4). Absent for legacy
+/// controllers/tests that never verified a digest; the re-check is
+/// skipped in that case.
+const String kHelperDigestEnv = 'OCTODO_UPDATE_DIGEST_HEX';
+
 /// Basename of the GUI executable inside the running .app bundle
 /// (macOS bundle-swap flow only). The controller forwards the
 /// original app's executable name because the helper's own
@@ -74,6 +83,7 @@ Future<int> runUpdateHelper() async {
       env[kHelperAppExeEnv]?.isNotEmpty == true
           ? env[kHelperAppExeEnv]
           : kDefaultAppBundleExecutable;
+  final expectedDigest = env[kHelperDigestEnv];
 
   try {
     final paths = InstallerPaths.fromVersion(
@@ -84,6 +94,10 @@ Future<int> runUpdateHelper() async {
       paths: paths,
       pidToIgnore: pidToIgnore,
       appExecutableName: appExeName,
+      expectedDigestHex:
+          expectedDigest == null || expectedDigest.isEmpty
+              ? null
+              : expectedDigest,
     );
     return 0;
   } catch (e) {

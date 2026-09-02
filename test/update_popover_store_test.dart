@@ -29,6 +29,7 @@ ReleaseInfo _release() => ReleaseInfo(
       zipUrl: Uri.parse(
           'https://example.com/v9.9.9/octodo-v9.9.9-windows-x64.zip'),
       zipSizeBytes: 5242880,
+      assetName: 'octodo-v9.9.9-windows-x64.zip',
     );
 
 Widget _wrap(Widget child) => MaterialApp(

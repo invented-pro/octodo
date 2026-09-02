@@ -78,11 +78,23 @@ class DownloadedPayload {
   final File zipPath;
   final int sizeBytes;
   final bool digestVerified;
+
+  /// The digest that was verified against BOTH the `.sha256` sidecar
+  /// and the release's Ed25519 signature at download time. Forwarded
+  /// to the apply helper so it can re-hash the staged zip right
+  /// before extraction — the staging dir is user-writable, and the
+  /// gap between "verified" and "extracted" is otherwise a TOCTOU
+  /// window any same-user process can race (GH issue #5, item 4).
+  /// Null only for payloads seeded by tests / legacy paths that
+  /// predate the field (apply then skips the re-check).
+  final String? expectedDigestHex;
+
   const DownloadedPayload({
     required this.version,
     required this.zipPath,
     required this.sizeBytes,
     required this.digestVerified,
+    this.expectedDigestHex,
   });
 }
 

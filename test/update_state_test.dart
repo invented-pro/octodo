@@ -23,6 +23,7 @@ ReleaseInfo _release({
       zipUrl: Uri.parse(
           'https://example/$tagName/octodo-$tagName-windows-x64.zip'),
       zipSizeBytes: sizeBytes,
+      assetName: 'octodo-$tagName-windows-x64.zip',
     );
 
 File _fakeFile(String path) => File(path);
