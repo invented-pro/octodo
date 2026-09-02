@@ -51,32 +51,30 @@ English | [中文简体](./README.zh-CN.md)
 
 ---
 
-## Usage & Installation
+## Installation
 
-The in-app updater adapts automatically: Microsoft Store and App Store builds update via their respective marketplaces. Direct-download builds self-apply the latest GitHub releases securely (Download → SHA-256 Verification → Hot Swap → Relaunch).
 
 ### Windows
 
-#### Microsoft Store
-Install directly from the [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ). Updates handle themselves automatically in the background.
-
-#### Portable (.zip)
-1. Download `octodo-v<version>-windows-x64.zip` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).
-2. Right-click the zip → **Properties** → check **Unblock** → Click **OK**. *(Crucial: This prevents Windows from blocking network and shell-spawn APIs).*
-3. Extract anywhere and run `octodo.exe`.
+- Microsoft Store
+Install from [Octodo @Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ). **Recommened**
+- Msix Installer
+  1. Download `Octodo-v<version>-windows-x64.Msix` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).  
+  2. Double click the Msix file to install.
+- Portable Version
+  1. Download `octodo-v<version>-windows-x64.zip` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).
+  2. Right-click the zip → **Properties** → check **Unblock** → Click **OK**. 
+     > - **This prevents Windows from blocking network and shell-spawn APIs.**
+  3. Extract anywhere, then run `octodo.exe`.
 
 ### macOS (Apple Silicon)
 
-#### Direct Download (.dmg)
 1. Download `Octodo-v<version>-macos-arm64.dmg` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).
-2. Mount the DMG and drag `Octodo.app` into your **Applications** folder.
-3. If Gatekeeper blocks execution on first launch, clear the quarantine attribute via terminal:
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/Octodo.app
-   ```
-
-#### Mac App Store
-*Coming soon.* Store builds will update automatically through the App Store ecosystem.
+2. Double click dmg file, then drag `Octodo.app` into  **Applications** folder.  
+    > If Gatekeeper blocks execution on first launch, clear the quarantine attribute via terminal:
+    >> ```bash
+    >> xattr -dr com.apple.quarantine /Applications/Octodo.app
+    >> ```
 
 ---
 

@@ -2,7 +2,7 @@
 
 **为 CLI 重度玩家打造的终端复合体。**
 
-一个基于 Rust + Flutter 原生构建的多工作区终端复合体，面向 Windows 与 macOS。不是臃肿的网页套壳——内存太贵了，你的时间和注意力也一样。
+一个原生基于 Rust + Flutter 构建、面向 Windows 与 macOS 的多工作区终端复合体。不是臃肿的网页套壳——内存寸土寸金，你的注意力亦然。
 
 [English](./README.md) | 简体中文
 
@@ -43,40 +43,38 @@
 
 ## 平台支持
 
-| #   | 平台                 | 状态          |
-| --- | -------------------- | ------------- |
-| 1   | Windows              | ✅            |
+| #   | 平台                  | 状态          |
+| --- | --------------------- | ------------- |
+| 1   | Windows               | ✅            |
 | 2   | macOS (Apple Silicon) | ✅            |
-| 3   | Linux                | ⏳ 即将推出   |
+| 3   | Linux                 | ⏳ 即将推出   |
 
 ---
 
 ## 使用与安装
 
-应用内更新器会自动适配：Microsoft Store 与 App Store 版本经由对应商店更新；直接下载版安全地自动应用最新 GitHub 发布（下载 → SHA-256 校验 → 热替换 → 重启）。
 
 ### Windows
 
-#### Microsoft Store
-直接从 [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ) 安装。更新在后台自动完成。
-
-#### 便携版（.zip）
-1. 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `octodo-v<version>-windows-x64.zip`。
-2. 右键 zip 文件 → **属性** → 勾选 **解除锁定** → **确定**。*（关键步骤：避免 Windows 拦截网络与 shell 启动相关的 API。）*
-3. 解压到任意目录，运行 `octodo.exe`。
+- Microsoft Store
+从 [Octodo @Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ) 安装。**推荐**
+- Msix 安装包
+  1. 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `Octodo-v<version>-windows-x64.Msix`。
+  2. 双击 Msix 文件即可安装。
+- 便携版
+  1. 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `octodo-v<version>-windows-x64.zip`。
+  2. 右键 zip 文件 → **属性** → 勾选 **解除锁定** → **确定**。
+     > - **此举可避免 Windows 拦截网络与 shell 启动相关的 API。**
+  3. 解压到任意目录，运行 `octodo.exe`。
 
 ### macOS（Apple Silicon）
 
-#### 直接下载（.dmg）
 1. 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `Octodo-v<version>-macos-arm64.dmg`。
-2. 挂载 DMG，将 `Octodo.app` 拖入**应用程序（Applications）**文件夹。
-3. 若首次启动被 Gatekeeper 拦截，在终端执行以下命令清除隔离属性：
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/Octodo.app
-   ```
-
-#### Mac App Store
-*即将上线。* 商店版将通过 App Store 自动更新。
+2. 双击 dmg 文件，将 `Octodo.app` 拖入**应用程序（Applications）**文件夹。
+   > 若首次启动被 Gatekeeper 拦截，可在终端执行以下命令清除隔离属性：
+   >> ```bash
+   >> xattr -dr com.apple.quarantine /Applications/Octodo.app
+   >> ```
 
 ---
 
@@ -155,7 +153,7 @@ flutter run -d macos      # macOS 主机
 
 ## 桌面通知
 
-Octodo 会监听每个终端的「需要关注」信号，并在你未注视该终端时推送一条带 Octodo 图标的原生桌面通知。点击通知可直接跳回发出通知的工作区 → 窗格 → 标签。该功能由 **设置 → 通用 → 桌面通知** 控制（默认开启），并包含一个用于设置最小任务时长的子项。
+Octodo 会监听每个终端发出的「需要关注」信号，并在你未注视该终端时推送一条带 Octodo 图标的原生桌面通知。点击通知可直接跳回发出通知的工作区 → 窗格 → 标签。该功能由 **设置 → 通用 → 桌面通知** 控制（默认开启），并包含一个用于设置最小任务时长的子项。
 
 ### 触发通知的来源
 
@@ -187,7 +185,7 @@ sys.stdout.flush()
 
 ### opencode
 
-opencode 的 TUI 内置了一套关注系统——会针对*问题需要输入*、*权限需要授权*、*会话出错*和*会话结束*发出声音与终端通知，但**默认处于关闭状态**。可在 `~/.config/opencode/tui.json` 中启用：
+opencode 的 TUI 内置了一套关注系统——会针对*问题需要输入*、*权限需要授权*、*会话出错*与*会话结束*发出声音与终端通知，但**默认处于关闭状态**。可在 `~/.config/opencode/tui.json` 中启用：
 
 ```json
 {
