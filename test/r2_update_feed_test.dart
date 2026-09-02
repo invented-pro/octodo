@@ -74,12 +74,16 @@ void main() {
       // manifest sig) substitute bytes. With signing in place
       // it's only an observation/DoS leak, but we still require
       // https so the configuration can't be downgraded by accident.
+      //
+      // The guard throws ArgumentError (not assert) so it stays
+      // active in release/profile builds, where `assert` is
+      // stripped.
       expect(
         () => R2UpdateFeed(
           manifestUrl: Uri.parse('http://s3.example.test/manifest.json'),
           userAgentVersion: '1.0.0+1',
         ),
-        throwsA(isA<AssertionError>()),
+        throwsA(isA<ArgumentError>()),
       );
     });
 
@@ -89,7 +93,7 @@ void main() {
           manifestUrl: Uri.parse('s3.example.test/manifest.json'),
           userAgentVersion: '1.0.0+1',
         ),
-        throwsA(isA<AssertionError>()),
+        throwsA(isA<ArgumentError>()),
       );
     });
 
@@ -99,7 +103,7 @@ void main() {
           manifestUrl: Uri.parse('ftp://s3.example.test/manifest.json'),
           userAgentVersion: '1.0.0+1',
         ),
-        throwsA(isA<AssertionError>()),
+        throwsA(isA<ArgumentError>()),
       );
     });
   });

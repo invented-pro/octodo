@@ -79,13 +79,7 @@ class R2UpdateFeed implements UpdateFeedSource {
     this.assetToken = kDefaultAssetToken,
     http.Client? client,
     Duration timeout = const Duration(seconds: 5),
-  })  : assert(
-          manifestUrl.scheme == 'https',
-          'R2UpdateFeed.manifestUrl must be https; '
-          'plain http would leak update checks to any on-path '
-          'attacker and enable denial-of-service suppression.',
-        ),
-        _client = client ?? http.Client(),
+  })  : _client = client ?? http.Client(),
         // Private fields can't use the `this.x` initializer form,
         // so this lint is a false-positive — but suppressing it
         // inline keeps the code straight to read.
@@ -94,7 +88,21 @@ class R2UpdateFeed implements UpdateFeedSource {
         // Same caveat as above: parameter name doesn't match the
         // private field name we want to assign to.
         // ignore: prefer_initializing_formals
-        _userAgentVersion = userAgentVersion;
+        _userAgentVersion = userAgentVersion {
+    // Throw (not assert) — `assert` is stripped in release/profile
+    // builds, and this guard exists to reject a hostile or
+    // misconfigured manifest URL at construction time, not as a
+    // "shouldn't happen" precondition. Plain http would leak
+    // update checks to any on-path attacker and enable
+    // denial-of-service suppression.
+    if (manifestUrl.scheme != 'https') {
+      throw ArgumentError.value(
+        manifestUrl,
+        'manifestUrl',
+        'must be https',
+      );
+    }
+  }
 
   @override
   String get kind => 'r2';
