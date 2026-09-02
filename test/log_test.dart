@@ -11,10 +11,7 @@
 // the end-to-end behavior the user actually cares about: a release-
 // mode app (root level OFF) stays silent.
 
-import 'dart:async';
-
 import 'package:flutter_test/flutter_test.dart';
-import 'package:logging/logging.dart';
 import 'package:octodo/src/log.dart';
 
 void main() {

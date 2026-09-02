@@ -29,10 +29,12 @@ import '../notifications/notification_hub.dart'
     show AttentionKind, TerminalAttention;
 import '../notifications/osc133_scanner.dart';
 import '../shortcuts/app_shortcuts.dart';
+import '../theme/palette_context.dart';
 import 'pane_tree.dart' show Surface;
 import 'csi_mode_scanner.dart';
 import 'osc7_scanner.dart';
 import 'osc99_scanner.dart';
+import 'link_gate.dart';
 import 'shell_cwd.dart';
 import 'font_family_options.dart';
 import 'terminal_settings_scope.dart';
@@ -1609,12 +1611,74 @@ class TerminalViewState extends State<TerminalView> {
   Future<void> _onLinkActivate(String uri) async {
     final target = Uri.tryParse(uri);
     if (target == null) return;
+    // Scheme gate (GH issue #5): OSC 8 display text is decoupled from
+    // the underlying URI, so a Ctrl+click signals "open a link", not
+    // "launch whatever handler owns this scheme". Web links and plain
+    // local files go straight through; everything else stops at a
+    // confirm-and-reveal dialog first.
+    if (classifyLinkUri(target) == LinkGateDecision.confirmFirst) {
+      final approved = await _confirmOpenLink(target);
+      if (!approved) {
+        _log.info('user declined to open link: $target');
+        return;
+      }
+    }
     final ok = await launchUrl(target, mode: LaunchMode.externalApplication);
     if (!ok && mounted) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Could not open $target')));
     }
+  }
+
+  /// Confirm-and-reveal dialog for links outside the open-directly
+  /// set (non-web schemes, executables, UNC shares). The point is not
+  /// the yes/no — it's showing the user the exact URI, scheme
+  /// included, before the OS dispatches it. Cancel is autofocus so
+  /// Enter dismisses safely, matching `_confirmClose` in main.dart.
+  Future<bool> _confirmOpenLink(Uri target) async {
+    final palette = context.palette;
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Open this link?'),
+        // Scrollable so a hostile multi-kilobyte URI can't blow up the
+        // dialog height; selectable so the user can copy it out and
+        // inspect it elsewhere.
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(linkConfirmReason(target)),
+              const SizedBox(height: 12),
+              SelectableText(
+                target.toString(),
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  color: palette.textPrimary,
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: palette.accentPink),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Open anyway'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 
   /// Secondary link-open path for non-Ctrl link modifiers.
