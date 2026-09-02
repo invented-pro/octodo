@@ -56,21 +56,20 @@ English | [中文简体](./README.zh-CN.md)
 
 ### Windows
 
-- Microsoft Store
-Install from [Octodo @Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ). **Recommened**
+- Install from [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ). **Recommened**
 - Msix Installer
-  1. Download `Octodo-v<version>-windows-x64.Msix` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).  
-  2. Double click the Msix file to install.
+  * Download `Octodo-v<version>-windows-x64.Msix` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).  
+  * Double click the Msix file to install.
 - Portable Version
-  1. Download `octodo-v<version>-windows-x64.zip` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).
-  2. Right-click the zip → **Properties** → check **Unblock** → Click **OK**. 
-     > - **This prevents Windows from blocking network and shell-spawn APIs.**
-  3. Extract anywhere, then run `octodo.exe`.
+  * Download `octodo-v<version>-windows-x64.zip` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).
+  * Right-click the zip → **Properties** → check **Unblock** → Click **OK**. 
+     >- **This prevents Windows from blocking network and shell-spawn APIs.**
+  * Extract anywhere, then run `octodo.exe`.
 
 ### macOS (Apple Silicon)
 
-1. Download `Octodo-v<version>-macos-arm64.dmg` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).
-2. Double click dmg file, then drag `Octodo.app` into  **Applications** folder.  
+- Download `Octodo-v<version>-macos-arm64.dmg` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).
+- Double click the dmg file, then drag `Octodo.app` into  **Applications**.  
     > If Gatekeeper blocks execution on first launch, clear the quarantine attribute via terminal:
     >> ```bash
     >> xattr -dr com.apple.quarantine /Applications/Octodo.app

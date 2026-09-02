@@ -56,25 +56,24 @@
 
 ### Windows
 
-- Microsoft Store
-从 [Octodo @Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ) 安装。**推荐**
+- 从 [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ) 安装。**推荐**
 - Msix 安装包
-  1. 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `Octodo-v<version>-windows-x64.Msix`。
-  2. 双击 Msix 文件即可安装。
+  * 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `Octodo-v<version>-windows-x64.Msix`。
+  * 双击 Msix 文件即可安装。
 - 便携版
-  1. 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `octodo-v<version>-windows-x64.zip`。
-  2. 右键 zip 文件 → **属性** → 勾选 **解除锁定** → **确定**。
-     > - **此举可避免 Windows 拦截网络与 shell 启动相关的 API。**
-  3. 解压到任意目录，运行 `octodo.exe`。
+  * 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `octodo-v<version>-windows-x64.zip`。
+  * 右键 zip 文件 → **属性** → 勾选 **解除锁定** → **确定**。
+     >- **此举可避免 Windows 拦截网络与 shell 启动相关的 API。**
+  * 解压到任意目录，运行 `octodo.exe`。
 
 ### macOS（Apple Silicon）
 
-1. 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `Octodo-v<version>-macos-arm64.dmg`。
-2. 双击 dmg 文件，将 `Octodo.app` 拖入**应用程序（Applications）**文件夹。
-   > 若首次启动被 Gatekeeper 拦截，可在终端执行以下命令清除隔离属性：
-   >> ```bash
-   >> xattr -dr com.apple.quarantine /Applications/Octodo.app
-   >> ```
+- 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `Octodo-v<version>-macos-arm64.dmg`。
+- 双击 dmg 文件，将 `Octodo.app` 拖入**应用程序（Applications）**。
+    > 若首次启动被 Gatekeeper 拦截，可在终端执行以下命令清除隔离属性：
+    >> ```bash
+    >> xattr -dr com.apple.quarantine /Applications/Octodo.app
+    >> ```
 
 ---
 
