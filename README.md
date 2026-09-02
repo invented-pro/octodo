@@ -56,7 +56,7 @@ English | [中文简体](./README.zh-CN.md)
 
 ### Windows
 
-- Install from [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ). **Recommened**
+- Install from [Microsoft Store](https://apps.microsoft.com/detail/9PJ4NR9XL3ZQ). **Recommend**
 - Msix Installer
   * Download `Octodo-v<version>-windows-x64.Msix` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).  
   * Double click the Msix file to install.
