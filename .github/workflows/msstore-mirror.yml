@@ -1,0 +1,247 @@
+name: msstore-mirror
+
+# Attaches the STORE-SIGNED MSIX of the latest octodo release back to
+# that release's GitHub assets, so the release page offers the exact
+# same Store-certified package the Microsoft Store serves — with
+# Windows SmartScreen accepting it out of the box (Store Marketplace
+# CA signature) instead of warning on the self-signed build.
+#
+# "Release done" detection: there is no push hook for Store
+# certification completing, and no Partner Center API returns your own
+# published package — but once a submission is Published, the Store's
+# public delivery endpoints serve the Store-SIGNED MSIX. This workflow
+# polls hourly; when the Store catalog serves the SAME version as the
+# latest GitHub release (tag vX.Y.Z <-> package X.Y.Z.0) and that
+# release does not yet carry an Octodo-v*-windows-x64.Msix asset, it
+# downloads the x64 MSIX from Microsoft's CDN, verifies the
+# Authenticode signature, and attaches it (+ .sha256 sidecar) to the
+# release as  Octodo-vX.Y.Z-windows-x64.Msix. Each run is stateless
+# reconciliation, so transient failures (network, FE3, API) self-heal
+# in the next window and a new release gets its MSIX exactly once,
+# within an hour of Store certification going live.
+#
+# COST DESIGN (private repo, free tier = 2000 min/mo, Windows 2x):
+# the hourly cron only runs the "precheck" job on ubuntu-latest — two
+# REST calls (GitHub release view + displaycatalog) with no checkout
+# (~30s, Linux 1x rate). The expensive Windows job (dotnet +
+# StoreLib/FE3 + 100 MB download + Authenticode + upload) runs ONLY
+# when precheck sees an attachable version, i.e. a couple of times per
+# month. Estimated steady state ~400 min/mo.
+#
+# The heavy job resolves download URLs with StoreLib
+# (github.com/StoreDev/StoreLib, the engine behind
+# msft-store.tplant.com.au / StoreWeb) at a pinned commit — CI talks
+# only to Microsoft + GitHub endpoints, no third-party service in the
+# loop.
+#
+# Required repository configuration: vars.STORE_PRODUCT_ID (already
+# used by msstore-publish.yml). The upload uses the ephemeral
+# GITHUB_TOKEN — no extra secrets.
+#
+# NOTE: GitHub disables scheduled workflows after 60 days of repo
+# inactivity — any push resets the timer.
+on:
+  schedule:
+    - cron: '23 * * * *'   # hourly, off the :00 top of hour
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Re-attach the current version even if the release already has the MSIX asset'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: msstore-mirror
+  # false: never cancel an in-flight attach when the next poll fires
+  cancel-in-progress: false
+
+jobs:
+  # -----------------------------------------------------------------
+  # Cheap gate: one GitHub API call (latest release + its assets) and
+  # one displaycatalog REST call (public, anonymous — returns the
+  # currently PUBLISHED package full names). No checkout, no dotnet,
+  # no FE3. Skips the expensive Windows job unless the Store live
+  # version matches the latest release AND that release is missing
+  # its MSIX asset.
+  # -----------------------------------------------------------------
+  precheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+      file: ${{ steps.check.outputs.file }}
+    steps:
+      - name: Check release assets and Store catalog
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STORE_PRODUCT_ID: ${{ vars.STORE_PRODUCT_ID }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${STORE_PRODUCT_ID:-}" ]; then
+            echo "::error title=STORE_PRODUCT_ID::Missing. Set vars.STORE_PRODUCT_ID in repo settings (same value msstore-publish.yml uses)."
+            exit 1
+          fi
+
+          # Latest published release. `gh release view` without a tag
+          # resolves GitHub's "latest" (first non-prerelease,
+          # non-draft) — prereleases can never match a Store version
+          # anyway, since msstore-publish.yml skips '-' tags.
+          if ! gh release view --repo "$GITHUB_REPOSITORY" --json tagName,assets > rel.json; then
+            echo "::notice::No published release found — nothing to attach a Store MSIX to."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          tag=$(jq -r .tagName rel.json)
+          ver=${tag#v}
+          if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::notice::Latest release tag '$tag' is not semver-shaped (expected vX.Y.Z) — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Skip when the latest release already carries a Store MSIX
+          # asset (unless a manual dispatch asked for a forced
+          # re-attach).
+          existing=$(jq -r '[.assets[].name | select(test("^Octodo-v.*-windows-x64\\.Msix$"))] | join(", ")' rel.json)
+          if [ -n "$existing" ] && [ "${FORCE:-false}" != "true" ]; then
+            echo "::notice::Release $tag already has Store MSIX asset(s): $existing — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The displaycatalog REST call answers "what version is
+          # Published right now" — PackageFullName embeds identity,
+          # 4-part version and arch. Same endpoint StoreLib uses.
+          pkg=$(curl -sf "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=${STORE_PRODUCT_ID}&market=US&languages=en-us,sneutral" \
+            | jq -r '[.Products[0].DisplaySkuAvailabilities[0].Sku.Properties.Packages[]?.PackageFullName | select(test("_x64_"))][0] // empty')
+          if [ -z "$pkg" ]; then
+            echo "::notice::No published x64 package in the Store catalog for ${STORE_PRODUCT_ID} (certification pending or listing not found). Nothing to attach."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version=$(echo "$pkg" | sed -E 's/.*_([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)_x64_.*/\1/')
+          storeVer=${version%.*}   # 4-part -> 3-part (revision is always .0)
+          echo "Published Store package: $pkg"
+
+          # The Store live version must match the latest release.
+          # While certification for vX.Y.Z is still in flight the
+          # catalog keeps serving the previous version — attaching
+          # that older signed package to the newer release would
+          # mislead users, so wait for the next poll instead.
+          if [ "$storeVer" != "$ver" ]; then
+            echo "::notice::Store currently serves $storeVer but latest release is $tag — certification for $tag not live yet; the next poll will attach it."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "file=Octodo-v${storeVer}-windows-x64.Msix" >> "$GITHUB_OUTPUT"
+
+  # -----------------------------------------------------------------
+  # Heavy path, gated by precheck: resolve the CDN URL via StoreLib
+  # (DisplayCatalog -> FE3 delivery SOAP), download, verify the
+  # signature, attach to the release. Runs on Windows because
+  # Authenticode verification (Get-AuthenticodeSignature) needs the
+  # Windows certificate stack.
+  # -----------------------------------------------------------------
+  mirror:
+    needs: precheck
+    if: needs.precheck.outputs.skip != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write   # gh release upload attaches the MSIX assets
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve, download, verify, attach
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_VERSION: ${{ needs.precheck.outputs.version }}
+          RELEASE_TAG: ${{ needs.precheck.outputs.tag }}
+          EXPECTED_FILE: ${{ needs.precheck.outputs.file }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $file = $env:EXPECTED_FILE   # Octodo-vX.Y.Z-windows-x64.Msix
+
+          # ---- resolve CDN URL (StoreLib at a pinned commit) ----
+          # Cloned outside the workspace; the $(RUNNER_TEMP)
+          # ProjectReference in store-mirror.csproj picks it up.
+          git clone --quiet https://github.com/StoreDev/StoreLib.git "$env:RUNNER_TEMP\StoreLib"
+          git -C "$env:RUNNER_TEMP\StoreLib" -c advice.detachedHead=false checkout --quiet 3f2a98ffede0bf3f78321c194e884fd0aaf14c29
+
+          dotnet build .github\store-mirror\store-mirror.csproj --nologo -v q
+          $dll = '.github\store-mirror\bin\Debug\net8.0\store-mirror.dll'
+          $lines = dotnet $dll "${{ vars.STORE_PRODUCT_ID }}"
+          if ($LASTEXITCODE -ne 0) { throw "store-mirror failed (exit $LASTEXITCODE)" }
+
+          # identity_name from the msix_config block in pubspec.yaml is
+          # the single source of truth for which package is "the app".
+          $identity = (Select-String -Path pubspec.yaml -Pattern '^\s*identity_name:\s*(\S+)').Matches[0].Groups[1].Value
+          if (-not $identity) { throw 'identity_name not found in pubspec.yaml msix_config' }
+
+          $pkg = $lines | Where-Object {
+            $_ -match "^$([regex]::Escape($identity))_(\d+\.\d+\.\d+\.\d+)_x64_\S*`t"
+          } | Select-Object -First 1
+          if (-not $pkg) { throw "No x64 package for $identity in:`n$($lines -join "`n")" }
+
+          $moniker, $url = $pkg -split "`t", 2
+          $version = [regex]::Match($moniker, '_(\d+\.\d+\.\d+\.\d+)_x64_').Groups[1].Value
+
+          # FE3 must agree with what precheck saw minutes ago; a
+          # mismatch means a newer release went live in between — let
+          # the next poll handle the new one instead of mixing states.
+          if ($version -ne $env:EXPECTED_VERSION) {
+            throw "Version moved during run: precheck saw $($env:EXPECTED_VERSION), FE3 serves $version"
+          }
+
+          # ---- download the Store-SIGNED package from Microsoft's CDN ----
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $file
+          if (-not (Test-Path $file)) { throw 'download failed' }
+
+          # The Store re-signs every submission via its Marketplace CA
+          # ("CN=Microsoft Marketplace CA ...") with a leaf certificate
+          # whose subject is OUR Store-assigned publisher identity.
+          # Anything else must never be attached to a release. The
+          # publisher is read from pubspec.yaml (single source of
+          # truth, like identity_name above).
+          $publisher = (Select-String -Path pubspec.yaml -Pattern '^\s*publisher:\s*(\S+)').Matches[0].Groups[1].Value
+          if (-not $publisher) { throw 'publisher not found in pubspec.yaml msix_config' }
+          $sig = Get-AuthenticodeSignature $file
+          if ($sig.Status -ne 'Valid' `
+              -or $sig.SignerCertificate.Subject -ne $publisher `
+              -or $sig.SignerCertificate.Issuer -notmatch 'Microsoft Marketplace') {
+            throw "Signature check failed: Status=$($sig.Status) Signer=$($sig.SignerCertificate.Subject) Issuer=$($sig.SignerCertificate.Issuer)"
+          }
+          Write-Host "Signature OK: $($sig.SignerCertificate.Subject) (issuer $($sig.SignerCertificate.Issuer))"
+
+          $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower()
+          [System.IO.File]::WriteAllText("$file.sha256", $hash)
+
+          # ---- attach to the release ----
+          # --clobber makes forced re-dispatches idempotent (replaces
+          # an asset of the same name instead of erroring out).
+          gh release upload "$env:RELEASE_TAG" "$file" "$file.sha256" --repo "$env:GITHUB_REPOSITORY" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed (exit $LASTEXITCODE)" }
+          Write-Host "Attached $file (sha256 $hash) and its sidecar to release $env:RELEASE_TAG"

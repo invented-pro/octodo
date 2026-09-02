@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>store-mirror</AssemblyName>
+    <RootNamespace>StoreMirror</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- StoreLib (github.com/StoreDev/StoreLib, the engine behind
+         msft-store.tplant.com.au / StoreWeb) is cloned by the
+         msstore-mirror workflow at a pinned commit into
+         RUNNER_TEMP\StoreLib. Environment variables are exposed to
+         MSBuild as properties, which is how this CI-only reference
+         resolves. -->
+    <ProjectReference Include="$(RUNNER_TEMP)\StoreLib\StoreLib\StoreLib.csproj" />
+  </ItemGroup>
+
+</Project>
