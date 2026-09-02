@@ -67,6 +67,43 @@ void main() {
     });
   });
 
+  group('constructor', () {
+    test('rejects an http:// manifestUrl (on-path downgrade guard)', () {
+      // Plain http on the manifest URL would let an on-path
+      // attacker observe update checks and (without the Ed25519
+      // manifest sig) substitute bytes. With signing in place
+      // it's only an observation/DoS leak, but we still require
+      // https so the configuration can't be downgraded by accident.
+      expect(
+        () => R2UpdateFeed(
+          manifestUrl: Uri.parse('http://s3.example.test/manifest.json'),
+          userAgentVersion: '1.0.0+1',
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+
+    test('rejects a scheme-less manifestUrl', () {
+      expect(
+        () => R2UpdateFeed(
+          manifestUrl: Uri.parse('s3.example.test/manifest.json'),
+          userAgentVersion: '1.0.0+1',
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+
+    test('rejects a non-http(s) manifestUrl', () {
+      expect(
+        () => R2UpdateFeed(
+          manifestUrl: Uri.parse('ftp://s3.example.test/manifest.json'),
+          userAgentVersion: '1.0.0+1',
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+  });
+
   group('fetchLatest', () {
     test('parses a complete manifest into ReleaseInfo', () async {
       final mock = MockClient((req) async {

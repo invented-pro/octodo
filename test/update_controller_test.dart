@@ -829,6 +829,50 @@ void main() {
       c.dispose();
     });
 
+    test('http:// fallbackUrl is dropped (https-only)', () async {
+      // Plain http on the fallback manifest would let an on-path
+      // attacker observe update checks and suppress them. Drop the
+      // fallback silently — same shape as the ftp:// case above
+      // — rather than erroring the GUI for a misconfigured
+      // optional setting.
+      await store.set(catalog.update.fallbackUrl, 'http://s3.example.test/octodo/manifest.json');
+
+      var fallbackProbed = false;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com') {
+          return http.Response(_releaseBody(tagName: 'v9.9.9'), 200);
+        }
+        if (req.url.host == 's3.example.test') {
+          fallbackProbed = true;
+          return http.Response('UNEXPECTED fallback probe', 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 200);
+      });
+
+      final c = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (r, u) =>
+            UpdateFeed(repository: r, userAgentVersion: u, client: mock),
+        fallbackFeedFactory: (url, u) =>
+            R2UpdateFeed(manifestUrl: url, userAgentVersion: u, client: mock),
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+      );
+      await c.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      // Primary succeeded → update surfaces regardless of fallback
+      // being dropped; the http fallback URL must never have been
+      // probed.
+      expect(model.detected?.version, '9.9.9');
+      expect(fallbackProbed, isFalse,
+          reason: 'http fallback URL must not be probed');
+      c.dispose();
+    });
+
     test('changing update.fallbackUrl rebinds the fallback feed', () async {
       // Start with no fallback; primary fails → idle.
       var primaryCalls = 0;

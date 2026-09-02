@@ -256,24 +256,30 @@ class UpdateController {
     return _defaultRepository;
   }
 
-  /// Resolves the `update.fallbackUrl` setting to an absolute
-  /// http(s) URI. Returns `null` if the setting is empty, malformed,
-  /// or non-http(s) — in all those cases the controller falls back
-  /// to "no fallback", letting the GitHub error surface.
-  Uri? _resolveFallbackUrl() {
-    final raw = SettingsRuntime.instance.store.get(settings.fallbackUrl);
-    if (raw.isEmpty) return null;
-    final parsed = Uri.tryParse(raw);
-    if (parsed == null ||
-        !parsed.isAbsolute ||
-        (parsed.scheme != 'http' && parsed.scheme != 'https')) {
-      _log.warning(
-          'update.fallbackUrl is not a valid http(s) URL: "$raw" — '
-          'fallback disabled.');
-      return null;
-    }
-    return parsed;
+/// Resolves the `update.fallbackUrl` setting to an absolute
+/// https URI. Returns `null` if the setting is empty, malformed,
+/// or non-https — in all those cases the controller falls back
+/// to "no fallback", letting the GitHub error surface.
+///
+/// Only https is accepted. Plain http would let an on-path
+/// attacker observe update checks (privacy) or suppress them (DoS),
+/// and — even with the Ed25519 manifest signature in place — fail
+/// the user's "is there a new version?" probe indefinitely.
+/// Dropping the fallback is preferable to leaking either signal.
+Uri? _resolveFallbackUrl() {
+  final raw = SettingsRuntime.instance.store.get(settings.fallbackUrl);
+  if (raw.isEmpty) return null;
+  final parsed = Uri.tryParse(raw);
+  if (parsed == null ||
+      !parsed.isAbsolute ||
+      parsed.scheme != 'https') {
+    _log.warning(
+        'update.fallbackUrl must be an https URL: "$raw" — '
+        'fallback disabled.');
+    return null;
   }
+  return parsed;
+}
 
   Future<void> start() async {
     if (_started) return;

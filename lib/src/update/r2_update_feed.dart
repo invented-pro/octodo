@@ -79,7 +79,13 @@ class R2UpdateFeed implements UpdateFeedSource {
     this.assetToken = kDefaultAssetToken,
     http.Client? client,
     Duration timeout = const Duration(seconds: 5),
-  })  : _client = client ?? http.Client(),
+  })  : assert(
+          manifestUrl.scheme == 'https',
+          'R2UpdateFeed.manifestUrl must be https; '
+          'plain http would leak update checks to any on-path '
+          'attacker and enable denial-of-service suppression.',
+        ),
+        _client = client ?? http.Client(),
         // Private fields can't use the `this.x` initializer form,
         // so this lint is a false-positive — but suppressing it
         // inline keeps the code straight to read.

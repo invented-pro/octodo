@@ -305,5 +305,15 @@ Uri? _assetDownloadUrl(
       '$hint has invalid browser_download_url: $raw',
     );
   }
+  // Only https is accepted. Plain http would let an on-path
+  // attacker observe downloads and (without the Ed25519 manifest
+  // sig) substitute malicious bytes. With signing in place the
+  // worst case is observation, but we still require https so the
+  // manifest itself can't smuggle a downgrade path.
+  if (uri.scheme != 'https') {
+    throw ResolverException(
+      '$hint has non-https browser_download_url: $raw',
+    );
+  }
   return uri;
 }

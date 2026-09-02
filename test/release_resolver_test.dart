@@ -201,4 +201,116 @@ void main() {
       );
     });
   });
+
+  group('asset URL scheme gate', () {
+    // The resolver only accepts https:// for asset URLs. A plain
+    // http:// download URL — even one with otherwise-correct
+    // filename/version — is refused so the manifest can't smuggle
+    // a downgrade path. Plain http would let an on-path attacker
+    // observe update checks and (without the Ed25519 manifest sig)
+    // substitute bytes.
+    test('rejects a zip with an http:// browser_download_url', () {
+      expect(
+        () => resolveReleaseMap(<String, dynamic>{
+          'tag_name': 'v1.2.3',
+          'prerelease': false,
+          'html_url':
+              'https://github.com/owner/repo/releases/tag/v1.2.3',
+          'assets': <Map<String, dynamic>>[
+            {
+              'name': 'octodo-v1.2.3-windows-x64.zip',
+              'size': 1,
+              'browser_download_url':
+                  'http://github.com/owner/repo/releases/download/v1.2.3/octodo-v1.2.3-windows-x64.zip',
+            }
+          ],
+        }),
+        throwsA(
+          isA<ResolverException>().having(
+              (e) => e.message, 'message', contains('non-https')),
+        ),
+      );
+    });
+
+    test('rejects a sidecar with an http:// browser_download_url', () {
+      expect(
+        () => resolveReleaseMap(<String, dynamic>{
+          'tag_name': 'v1.2.3',
+          'prerelease': false,
+          'html_url':
+              'https://github.com/owner/repo/releases/tag/v1.2.3',
+          'assets': <Map<String, dynamic>>[
+            {
+              'name': 'octodo-v1.2.3-windows-x64.zip',
+              'size': 1,
+              'browser_download_url':
+                  'https://github.com/owner/repo/releases/download/v1.2.3/octodo-v1.2.3-windows-x64.zip',
+            },
+            {
+              'name': 'octodo-v1.2.3-windows-x64.zip.sha256',
+              'size': 64,
+              'browser_download_url':
+                  'http://github.com/owner/repo/releases/download/v1.2.3/octodo-v1.2.3-windows-x64.zip.sha256',
+            },
+          ],
+        }),
+        throwsA(
+          isA<ResolverException>().having(
+              (e) => e.message, 'message', contains('non-https')),
+        ),
+      );
+    });
+
+    test('rejects a sig asset with an http:// browser_download_url', () {
+      expect(
+        () => resolveReleaseMap(<String, dynamic>{
+          'tag_name': 'v1.2.3',
+          'prerelease': false,
+          'html_url':
+              'https://github.com/owner/repo/releases/tag/v1.2.3',
+          'assets': <Map<String, dynamic>>[
+            {
+              'name': 'octodo-v1.2.3-windows-x64.zip',
+              'size': 1,
+              'browser_download_url':
+                  'https://github.com/owner/repo/releases/download/v1.2.3/octodo-v1.2.3-windows-x64.zip',
+            },
+            {
+              'name': 'octodo-v1.2.3-manifest.sig',
+              'size': 512,
+              'browser_download_url':
+                  'http://github.com/owner/repo/releases/download/v1.2.3/octodo-v1.2.3-manifest.sig',
+            },
+          ],
+        }),
+        throwsA(
+          isA<ResolverException>().having(
+              (e) => e.message, 'message', contains('non-https')),
+        ),
+      );
+    });
+
+    test('accepts an https:// browser_download_url (regression)', () {
+      // Sanity check: the existing https path still resolves. The
+      // other tests in this file already cover this implicitly;
+      // this one pins the positive case next to the negative
+      // cases above so a future refactor that breaks https too
+      // surfaces clearly.
+      final r = resolveReleaseMap(<String, dynamic>{
+        'tag_name': 'v1.2.3',
+        'prerelease': false,
+        'html_url':
+            'https://github.com/owner/repo/releases/tag/v1.2.3',
+        'assets': <Map<String, dynamic>>[
+          {
+            'name': 'octodo-v1.2.3-windows-x64.zip',
+            'size': 1,
+            'browser_download_url':
+                'https://github.com/owner/repo/releases/download/v1.2.3/octodo-v1.2.3-windows-x64.zip',
+          }
+        ],
+      });
+      expect(r.zipUrl.scheme, 'https');
+    });
+  });
 }
