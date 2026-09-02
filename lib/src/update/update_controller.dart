@@ -67,6 +67,17 @@ const int _kMaxAttemptsPerSource = 3;
 /// the macOS apply runs through /bin/sh instead.
 String get _kHelperExeName => 'octodo_helper.exe';
 
+/// Cached signed-manifest body + the digest CI signed for the
+/// helper exe on the current platform. Populated by the download
+/// step (after the same body has been verified for the zip), so
+/// the apply step can reuse the body without a second HTTPS round
+/// trip or a second Ed25519 verify.
+class _CachedHelperSig {
+  final String body;
+  final String helperDigestHex;
+  const _CachedHelperSig({required this.body, required this.helperDigestHex});
+}
+
 class UpdateController {
   final UpdateStateModel model;
   final UpdateSettingsSection settings;
@@ -115,13 +126,15 @@ class UpdateController {
   /// returns successfully; reset on `model.reset()`.
   UpdateFeedSource? _currentReleaseSource;
 
-  /// In-memory cache of verified helper-signature bodies, keyed by
-  /// the version whose helper hash they describe. Populated by
-  /// `_resolveAndVerifyHelperExe` so repeat updates don't pay a
-  /// fresh HTTPS fetch + Ed25519 verify on every spawn. Never
-  /// persisted: a fresh launch re-fetches so a tampered local
-  /// cache can't outlive the process.
-  final Map<String, String> _verifiedHelperSigBodies = {};
+  /// In-memory cache of verified helper-signature (body + digest),
+  /// keyed by the version whose helper hash they describe.
+  /// Populated by [_downloadAndVerify] at the end of a successful
+  /// download so the apply step can verify the on-disk helper
+  /// without a fresh HTTPS fetch (and without re-running the
+  /// Ed25519 verify). Never persisted: a fresh launch re-fetches
+  /// from the URL stored on [DownloadedPayload.signatureUrl], so a
+  /// tampered in-memory copy can't outlive the process.
+  final Map<String, _CachedHelperSig> _verifiedHelperSigCache = {};
 
   Timer? _probeTimer;
   Timer? _notFoundTimer;
@@ -943,6 +956,22 @@ class UpdateController {
         e,
       );
     }
+    // Also pre-verify the helper entry so the apply step doesn't
+    // pay a second Ed25519 verify. If the manifest predates the
+    // helper gate (no helper line), skip — the apply step will
+    // re-fetch + re-verify and surface the same error then.
+    try {
+      final helperDigestHex = await verifyAssetSignature(
+        body: sigBody,
+        version: release.version,
+        assetName: helperAssetNameForCurrentPlatform(),
+        publicKeysBase64: signaturePublicKeys,
+      );
+      _verifiedHelperSigCache[release.version] =
+          _CachedHelperSig(body: sigBody, helperDigestHex: helperDigestHex);
+    } on UpdateSignatureException {
+      // No helper entry, or wrong sig — handled at apply time.
+    }
     final actualHex = await verifySha256Hex(
       file: zipPath,
       expectedHex: expectedHex,
@@ -960,6 +989,11 @@ class UpdateController {
       // any same-user process could otherwise swap the file between
       // this check and the helper running).
       expectedDigestHex: actualHex,
+      // The signature asset URL for this release (fork-aware —
+      // update.repositoryOverride produces a non-default URL that
+      // the apply step must reuse if its in-memory cache is lost
+      // between download and apply).
+      signatureUrl: release.signatureUrl,
     ));
   }
 
@@ -1163,17 +1197,13 @@ class UpdateController {
     final f = helperExeFactory?.call() ?? File(helperPath);
     if (!f.existsSync()) return null;
 
-    final helperAssetName = helperAssetNameForCurrentPlatform();
-    final sigBody = await _fetchVerifiedHelperSigBody(
+final helperAssetName = helperAssetNameForCurrentPlatform();
+    final cached = await _fetchVerifiedHelperSigBody(
       version: version,
       helperAssetName: helperAssetName,
+      signatureUrl: model.downloaded?.signatureUrl,
     );
-    final expectedHex = await verifyAssetSignature(
-      body: sigBody,
-      version: version,
-      assetName: helperAssetName,
-      publicKeysBase64: signaturePublicKeys,
-    );
+    final expectedHex = cached.helperDigestHex;
 
     final actualHex = await sha256HexOfFile(f);
     if (actualHex.toLowerCase() != expectedHex.toLowerCase()) {
@@ -1189,62 +1219,49 @@ class UpdateController {
   }
 
   /// Fetch (and Ed25519-verify) the signed manifest body containing
-  /// the helper hash line for [version]. Cached per-version so
-  /// repeated update checks on the same install don't pay the
-  /// HTTPS + verify cost on every spawn.
-  Future<String> _fetchVerifiedHelperSigBody({
+  /// the helper hash line for [version].
+  ///
+  /// Lookup order:
+  ///   1. In-memory [_verifiedHelperSigCache] (populated at download
+  ///      time — no HTTPS round-trip, no second Ed25519 verify).
+  ///   2. The [signatureUrl] captured on [DownloadedPayload] at
+  ///      download time (fork-aware: a custom `update.repositoryOverride`
+  ///      produces a non-default URL that the apply step must reuse,
+  ///      not a hardcoded `github.com/invented-pro/...` mirror).
+  ///
+  /// The cache is in-memory only — a fresh launch re-fetches from
+  /// the stored URL. A tampered local copy therefore can't outlive
+  /// the process.
+  Future<_CachedHelperSig> _fetchVerifiedHelperSigBody({
     required String version,
     required String helperAssetName,
+    required Uri? signatureUrl,
   }) async {
-    final cached = _verifiedHelperSigBodies[version];
-    if (cached != null) return cached;
+    final hit = _verifiedHelperSigCache[version];
+    if (hit != null) return hit;
 
-    // Try GitHub first (canonical release assets), fall back to
-    // R2 (same files, alternative host). Both are https-only and
-    // serve identical bytes — only the URL differs.
-    const ghPrefix = 'https://github.com/invented-pro/octodo/'
-        'releases/download/v';
-    const r2Prefix = 'https://s3.primorial.net/octodo/';
-    final asset = 'octodo-v$version-manifest.sig';
-    final candidates = <Uri>[
-      Uri.parse('$ghPrefix$version/$asset'),
-      Uri.parse('$r2Prefix$asset'),
-    ];
-    Object? lastError;
-    String? body;
-    for (final url in candidates) {
-      try {
-        body = await _fetchSigBodyFromUrl(url);
-        break;
-      } catch (e) {
-        lastError = e;
-      }
-    }
-    if (body == null) {
+    if (signatureUrl == null) {
+      // Legacy payload (test/older build) without a captured URL,
+      // and no in-memory cache. Refuse to spawn rather than fall
+      // back to a hardcoded mirror — that would silently break
+      // forks and re-introduce the cross-repo-attacker surface.
       throw UpdateIntegrityException(
-        'Could not fetch the signed manifest for helper '
-        'verification (tried ${candidates.length} URL(s)). Last '
-        'error: $lastError\n'
-        'Manual download: $kAppRepositoryReleases',
+        'Cannot verify the on-disk helper: the signed manifest URL '
+        'for this build is no longer in memory and the in-memory '
+        'cache is empty. Re-trigger the update to rebuild it.',
       );
     }
 
-    // Pre-verify the helper entry's sig up-front so we cache a body
-    // that's known good. Caching an unverified body would let a
-    // tampered in-memory copy survive the lifetime of the process.
-    final verifiedDigest = await verifyAssetSignature(
+    final body = await _fetchSigBodyFromUrl(signatureUrl);
+    final helperDigestHex = await verifyAssetSignature(
       body: body,
       version: version,
       assetName: helperAssetName,
       publicKeysBase64: signaturePublicKeys,
     );
-    // We don't use the digest itself here (it's checked against
-    // the on-disk file in _resolveAndVerifyHelperExe), but the
-    // throw-on-failure side effect is what we want.
-    assert(verifiedDigest.length == 64);
-
-    _verifiedHelperSigBodies[version] = body;
-    return body;
+    final entry = _CachedHelperSig(body: body, helperDigestHex: helperDigestHex);
+    _verifiedHelperSigCache[version] = entry;
+    return entry;
   }
 
   Future<String> _fetchSigBodyFromUrl(Uri url) async {

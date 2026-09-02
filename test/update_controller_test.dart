@@ -1959,11 +1959,6 @@ void main() {
         ..writeAsBytesSync(helperBytes);
       final helperHex = _sha256HexOfBytes(helperBytes);
 
-      // The zip digest the controller will verify against the
-      // signed manifest. The apply step never actually extracts
-      // the zip here (Process.start is mocked), so a placeholder
-      // zip body is fine — the pre-extract checks aren't on the
-      // critical path we're exercising.
       final realZip = _buildStubZip();
       final zipHex = _sha256HexOfBytes(realZip);
 
@@ -1974,8 +1969,12 @@ void main() {
         helperAssetName: kHelperAssetNameWindows,
       );
 
-      var sigFetched = false;
       var processStarted = false;
+      // The apply path no longer fetches the sig body itself —
+      // the download step populates the in-memory cache and apply
+      // reuses it. Track the GitHub fetch count to confirm we
+      // don't re-fetch on apply.
+      var applyTimeGithubSigFetches = 0;
       final mock = MockClient((req) async {
         if (req.url.host == 'api.github.com' &&
             req.url.path.contains('releases/latest')) {
@@ -2000,7 +1999,7 @@ void main() {
         }
         if (req.url.host == 'github.com' &&
             req.url.path.endsWith('manifest.sig')) {
-          sigFetched = true;
+          applyTimeGithubSigFetches += 1;
           return http.Response(sigBody, 200);
         }
         return http.Response('UNEXPECTED ${req.url}', 500);
@@ -2024,17 +2023,12 @@ void main() {
         processStartFactory: (exe, args,
                 {required environment, required mode}) async {
           processStarted = true;
-          // Return a no-op detached Process — the controller
-          // doesn't await its stdin/stdout; it just returns true
-          // and the apply path considers the spawn successful.
-          // Easiest: spawn `cmd /c exit 0` on Windows.
           return Process.start(
             'cmd',
             const ['/c', 'exit', '0'],
             mode: ProcessStartMode.detached,
           );
         },
-        // Don't actually exit the test runner — observe state instead.
         exitFactory: (_) {},
       );
       await controller.start();
@@ -2043,27 +2037,204 @@ void main() {
       await controller.downloadLatest();
       await _waitFor(() => model.state == UpdateState.downloaded);
 
-      // Pre-condition: the apply step hasn't run yet.
-      expect(sigFetched, isFalse);
+      // Sanity: the download path captures the fork-aware URL on
+      // the payload so a fresh-launch apply can re-fetch from it.
+      expect(model.downloaded?.signatureUrl, isNotNull);
+      expect(
+          model.downloaded?.signatureUrl?.host, 'example.com',
+          reason: 'release JSON came from example.com in this test; '
+              'signatureUrl must reflect that exact host, not a '
+              'hardcoded mirror the apply step would otherwise build');
+      expect(
+          model.downloaded?.signatureUrl?.path,
+          contains('octodo-v9.9.9-manifest.sig'),
+          reason: 'signatureUrl must be the per-release manifest.sig');
 
       await controller.applyDownloaded();
-      // Wait for the controller's async spawn + setInstalling
-      // settle. applyDownloaded itself is sync-from-here once
-      // _spawnHelper returns, but the helper sig fetch is async.
-      await _waitFor(
-          () => sigFetched || model.state == UpdateState.error);
-      // Give the post-spawn setInstalling a tick.
+      await _waitFor(() =>
+          processStarted || model.state == UpdateState.error);
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      // The signature body was fetched from GitHub (canonical
-      // release URL), the helper's sha256 matched the signed
-      // digest, and Process.start was invoked for the helper.
-      expect(sigFetched, isTrue,
-          reason: 'helper sig fetch should run on Windows apply');
+      // The apply step used the in-memory cache populated at
+      // download time — no second fetch of the sig body, no second
+      // Ed25519 verify, and Process.start was invoked for the
+      // helper because the on-disk hash matched.
+      expect(applyTimeGithubSigFetches, 0,
+          reason:
+              'apply must reuse the download-time cache, not re-fetch');
       expect(processStarted, isTrue,
           reason: 'helper with matching hash should be spawned');
       expect(model.state, UpdateState.installing,
           reason: 'matching hash → proceed to installing state');
+      controller.dispose();
+    });
+
+    test('applyDownloaded re-fetches the sig body from the captured '
+        'signatureUrl when the in-memory cache is empty (process '
+        'restart simulation, Windows only)', () async {
+      // Real-world trigger: the user closes the app between
+      // download and apply. The in-memory cache is empty on next
+      // launch, but the apply step still has to verify the helper
+      // before spawning — and it has to do so from the SAME URL
+      // the release came from (fork-aware), not a hardcoded mirror.
+      if (!Platform.isWindows) return;
+
+      final helperBytes = utf8.encode('FAKE-OCTODO-HELPER');
+      final helperFile = File(p.join(tmp.path, 'octodo_helper.exe'))
+        ..writeAsBytesSync(helperBytes);
+      final helperHex = _sha256HexOfBytes(helperBytes);
+      final realZip = _buildStubZip();
+      final zipHex = _sha256HexOfBytes(realZip);
+
+      final sigBody = await _testSigBodyWithHelper(
+        tagName: 'v9.9.9',
+        zipDigestHex: zipHex,
+        helperDigestHex: helperHex,
+        helperAssetName: kHelperAssetNameWindows,
+      );
+
+      // Pretend the download just happened: seed the model with a
+      // DownloadedPayload carrying the fork-aware signatureUrl, but
+      // leave the controller's in-memory cache empty (simulating a
+      // fresh launch). The URL intentionally targets a host other
+      // than `github.com` so the test can distinguish a fork-aware
+      // re-fetch (correct) from a re-introduced hardcoded-mirror
+      // fallback (regression).
+      final sigUrl = Uri.parse(
+          'https://release.myfork.example/octodo/'
+          'octodo-v9.9.9-manifest.sig');
+      final model = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+      );
+      model.setDownloaded(DownloadedPayload(
+        version: '9.9.9',
+        zipPath: File(p.join(tmp.path, 'fake.zip'))
+          ..writeAsBytesSync(realZip),
+        sizeBytes: realZip.length,
+        digestVerified: true,
+        expectedDigestHex: zipHex,
+        signatureUrl: sigUrl,
+      ));
+
+      var sigRefetches = 0;
+      var processStarted = false;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'release.myfork.example' &&
+            req.url.path.endsWith('manifest.sig')) {
+          sigRefetches += 1;
+          return http.Response(sigBody, 200);
+        }
+        if (req.url.host == 'github.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          // The OLD hardcoded fallback — must NOT be used for the
+          // fork. A fetch here would mean the fork bug was
+          // re-introduced.
+          return http.Response('WRONG SIG BODY', 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final controller = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+        helperExeFactory: () => helperFile,
+        processStartFactory: (exe, args,
+                {required environment, required mode}) async {
+          processStarted = true;
+          return Process.start('cmd', const ['/c', 'exit', '0'],
+              mode: ProcessStartMode.detached);
+        },
+        exitFactory: (_) {},
+      );
+      // NOTE: no start() — we're past the probe phase, the user
+      // just resumed an existing install.
+
+      await controller.applyDownloaded();
+      await _waitFor(() =>
+          processStarted || model.state == UpdateState.error);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(sigRefetches, 1,
+          reason: 'cache miss must refetch from the captured URL');
+      expect(processStarted, isTrue,
+          reason: 'matching helper hash → spawn proceeds');
+      expect(model.state, UpdateState.installing);
+      controller.dispose();
+    });
+
+    test('applyDownloaded refuses to spawn when the captured '
+        'signatureUrl is missing (legacy payload, Windows only)',
+        () async {
+      // No in-memory cache AND no signatureUrl on the payload =
+      // we cannot safely verify the helper. Refuse to spawn rather
+      // than fall back to a hardcoded mirror (which would silently
+      // break forks). The user has to re-trigger the update to
+      // rebuild the cache + payload.
+      if (!Platform.isWindows) return;
+
+      final helperBytes = utf8.encode('FAKE-OCTODO-HELPER');
+      final helperFile = File(p.join(tmp.path, 'octodo_helper.exe'))
+        ..writeAsBytesSync(helperBytes);
+      final realZip = _buildStubZip();
+
+      final model = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+      );
+      model.setDownloaded(DownloadedPayload(
+        version: '9.9.9',
+        zipPath: File(p.join(tmp.path, 'fake.zip'))
+          ..writeAsBytesSync(realZip),
+        sizeBytes: realZip.length,
+        digestVerified: true,
+        expectedDigestHex: _sha256HexOfBytes(realZip),
+        // signatureUrl intentionally null — legacy payload.
+      ));
+
+      final mock = MockClient((req) async {
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+      final controller = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+        helperExeFactory: () => helperFile,
+        processStartFactory: (exe, args,
+                {required environment, required mode}) async {
+          return Process.start('cmd', const ['/c', 'exit', '0'],
+              mode: ProcessStartMode.detached);
+        },
+        exitFactory: (_) {},
+      );
+
+      await controller.applyDownloaded();
+      await _waitFor(() => model.state == UpdateState.error);
+
+      expect(model.state, UpdateState.error);
+      expect(
+        model.error?.message ?? '',
+        contains('integrity'),
+        reason: 'legacy payload + no cache → integrity refusal',
+      );
+      expect(
+        model.error?.technicalDetails ?? '',
+        contains('no longer in memory'),
+        reason: 'reason must explain the cache-loss scenario',
+      );
       controller.dispose();
     });
 

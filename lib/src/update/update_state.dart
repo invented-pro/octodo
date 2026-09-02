@@ -89,12 +89,24 @@ class DownloadedPayload {
   /// predate the field (apply then skips the re-check).
   final String? expectedDigestHex;
 
+  /// URL of the `octodo-v<ver>-manifest.sig` asset that was
+  /// fetched and verified at download time. Captured here so the
+  /// apply step can re-fetch the same body if its in-memory cache
+  /// was lost (process restart between download and apply) — and
+  /// so a fork with a custom `update.repositoryOverride` uses
+  /// its OWN release URL, not the hardcoded GitHub/R2 fallback
+  /// the rest of the apply code would otherwise build. Null only
+  /// for legacy / test-seeded payloads predating the helper
+  /// verification gate.
+  final Uri? signatureUrl;
+
   const DownloadedPayload({
     required this.version,
     required this.zipPath,
     required this.sizeBytes,
     required this.digestVerified,
     this.expectedDigestHex,
+    this.signatureUrl,
   });
 }
 
