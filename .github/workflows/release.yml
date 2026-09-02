@@ -624,7 +624,11 @@ jobs:
           key="$RUNNER_TEMP/update-signing.pem"
           mkdir -p "$work"
           gh release download "$tag" --repo "${{ github.repository }}" \
-            -p '*.zip.sha256' -D "$work"
+            -p '*.zip.sha256' \
+            -p 'octodo-v*-windows-x64.zip' \
+            -p 'octodo-v*-macos-arm64.zip' \
+            -p 'octodo-v*-macos-x64.zip' \
+            -D "$work"
 
           sops -d keys/update-signing.pem.age > "$key"
           chmod 600 "$key"
@@ -640,6 +644,52 @@ jobs:
               exit 1
             fi
             printf '%s' "octodo-update-v1|$ver|$asset|$hash" > "$work/msg"
+            openssl pkeyutl -sign -rawin -inkey "$key" \
+              -in "$work/msg" -out "$work/msg.sig"
+            b64="$(base64 -w0 "$work/msg.sig")"
+            echo "$asset $hash $b64" >> "$sig_file"
+          done
+
+          # Helper-binary signatures. The apply step spawns
+          # octodo_helper.exe (Windows) / octodo_helper (macOS, the
+          # sh path doesn't actually invoke it but the manifest pins
+          # it for parity) at apply time. Pre-Phase-D an attacker
+          # who could write to a per-user install dir could replace
+          # the helper and get RCE on the next update — closing
+          # this requires the on-disk helper hash to match what CI
+          # signed for this version, so the running app fetches
+          # this sig body on Windows apply and refuses on mismatch.
+          # We pull the helper straight out of each platform's zip
+          # (no separate sidecar upload needed) so the hash is the
+          # same bytes the running app will SHA-256 next apply.
+          for plat in windows-x64 macos-arm64 macos-x64; do
+            zip="$work/octodo-v$ver-$plat.zip"
+            if [[ ! -f "$zip" ]]; then continue; fi
+            case "$plat" in
+              windows-x64)
+                helper_path="octodo_helper.exe"
+                asset="octodo_helper.exe"
+                ;;
+              *)
+                helper_path="Octodo.app/Contents/MacOS/octodo_helper"
+                asset="octodo_helper"
+                ;;
+            esac
+            # unzip -p writes the extracted bytes to stdout; sha256sum
+            # emits "<hex>  -". awk pulls the first field; tr
+            # lower-cases. The pipe never touches the runner's cwd
+            # because unzip -p streams, doesn't extract to disk.
+            hash="$(unzip -p "$zip" "$helper_path" \
+              | sha256sum \
+              | awk '{print $1}' \
+              | tr 'A-F' 'a-f')"
+            if ! [[ "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "helper $helper_path in $zip is missing or "
+              echo "non-bytes; refusing to publish manifest.sig" >&2
+              exit 1
+            fi
+            printf '%s' "octodo-update-v1|$ver|$asset|$hash" \
+              > "$work/msg"
             openssl pkeyutl -sign -rawin -inkey "$key" \
               -in "$work/msg" -out "$work/msg.sig"
             b64="$(base64 -w0 "$work/msg.sig")"

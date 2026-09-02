@@ -33,6 +33,7 @@
 // embedded key → the update is refused.
 
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data' show Uint8List;
 
 import 'package:cryptography/cryptography.dart';
@@ -55,6 +56,24 @@ const String? kUpdateSigningPublicKeyNext = null;
 /// Comment line every signature file starts with. Informational —
 /// not covered by any signature (the canonical message is).
 const String kSignatureFileHeader = '# octodo-update-sig-v1';
+
+/// Asset name (inside the signed manifest) for the Windows helper
+/// exe. CI signs a line `<name> <sha256hex> <base64sig>` using this
+/// exact string; the running app looks it up the same way. The
+/// `version` portion of the canonical message prevents cross-
+/// release replay regardless of the basename collision.
+const String kHelperAssetNameWindows = 'octodo_helper.exe';
+
+/// Asset name for the macOS helper binary (no `.exe` suffix). The
+/// macOS production apply goes through `/bin/sh` (Apple-signed),
+/// not the helper — this line exists so the helper hash is still
+/// pinned for belt-and-braces parity with the Windows apply path.
+const String kHelperAssetNameMacOS = 'octodo_helper';
+
+/// Returns the helper asset name the running app should look up in
+/// the signed manifest for its current platform.
+String helperAssetNameForCurrentPlatform() =>
+    Platform.isWindows ? kHelperAssetNameWindows : kHelperAssetNameMacOS;
 
 /// Build the canonical signed message. MUST stay byte-identical to
 /// the bash side in release.yml:
@@ -137,20 +156,27 @@ List<ManifestSignatureEntry> parseSignatureFile(String body) {
 }
 
 /// Verify that the release's [assetName] at [version] is covered by
-/// a valid Ed25519 signature whose signed digest equals
-/// [digestHex] (the value the `.sha256` sidecar advertised).
+/// a valid Ed25519 signature.
+///
+/// Returns the signed hex digest on success. When [digestHex] is
+/// supplied (the `.sha256` sidecar value for a zip), the signed
+/// digest must equal it — that's the standard zip + sidecar case.
+/// When [digestHex] is null, the cross-check is skipped and the
+/// caller must compare the returned digest to whatever resource
+/// it just fetched (e.g. an on-disk helper exe).
 ///
 /// Fail-closed on every gap; returns normally ONLY when all of:
 ///   1. the file parses (header, well-formed entries),
 ///   2. an entry exists for exactly [assetName],
-///   3. that entry's signed digest equals [digestHex],
-///   4. its signature verifies against one of [publicKeysBase64]
-///      (defaults to the keys embedded in this module).
-Future<void> verifyAssetSignature({
+///   3. its signature verifies against one of [publicKeysBase64]
+///      (defaults to the keys embedded in this module), and
+///   4. (when [digestHex] is non-null) that entry's signed digest
+///      equals [digestHex].
+Future<String> verifyAssetSignature({
   required String body,
   required String version,
   required String assetName,
-  required String digestHex,
+  String? digestHex,
   List<String>? publicKeysBase64,
 }) async {
   final keys = publicKeysBase64 ??
@@ -176,19 +202,22 @@ Future<void> verifyAssetSignature({
   }
   final entry = matches.single;
 
-  final sidecar = digestHex.toLowerCase();
-  if (!_kHex64.hasMatch(sidecar)) {
-    throw const UpdateSignatureException(
-        'sidecar digest is not 64-hex');
-  }
-  if (entry.digestHex != sidecar) {
-    // The signed manifest and the sidecar disagree — one of the two
-    // channels is lying. Distinct reason: this is the strongest
-    // tamper signal the updater can observe. Include both digests
-    // so the controller's `technicalDetails` line is actionable.
-    throw UpdateSignatureException(
-        'signed digest does not match the .sha256 sidecar '
-        '(signed=${entry.digestHex}, sidecar=$sidecar)');
+  final sidecar = digestHex?.toLowerCase();
+  if (sidecar != null) {
+    if (!_kHex64.hasMatch(sidecar)) {
+      throw const UpdateSignatureException(
+          'sidecar digest is not 64-hex');
+    }
+    if (entry.digestHex != sidecar) {
+      // The signed manifest and the sidecar disagree — one of the
+      // two channels is lying. Distinct reason: this is the
+      // strongest tamper signal the updater can observe. Include
+      // both digests so the controller's `technicalDetails` line
+      // is actionable.
+      throw UpdateSignatureException(
+          'signed digest does not match the .sha256 sidecar '
+          '(signed=${entry.digestHex}, sidecar=$sidecar)');
+    }
   }
 
   final Uint8List signatureBytes;
@@ -237,4 +266,5 @@ Future<void> verifyAssetSignature({
     throw const UpdateSignatureException(
         'Ed25519 signature did not verify against any known key');
   }
+  return entry.digestHex;
 }

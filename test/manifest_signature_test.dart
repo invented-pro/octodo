@@ -16,6 +16,8 @@
 import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart';
+import 'dart:io' show Platform;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:octodo/src/update/manifest_signature.dart';
 
@@ -251,6 +253,96 @@ void main() {
       expect(entries, hasLength(1));
       expect(entries.single.assetName, 'a.zip');
       expect(entries.single.digestHex, 'cd' * 32);
+    });
+  });
+
+  group('verifyAssetSignature — return value + sidecar skip', () {
+    test('returns the signed (lower-cased) digest on success', () async {
+      // The standard zip + .sha256 case: caller passes both the
+      // asset name and the sidecar digest, the function returns
+      // the signed digest after verification.
+      final hex = 'AB' * 32; // upper-case to confirm normalization
+      final sig = await devSig('1.2.3', 'a.zip', hex);
+      final returned = await verifyAssetSignature(
+        body: sigBody(['a.zip $hex $sig']),
+        version: '1.2.3',
+        assetName: 'a.zip',
+        digestHex: hex,
+        publicKeysBase64: [devPubB64],
+      );
+      expect(returned, 'ab' * 32);
+    });
+
+    test(
+        'omitting digestHex skips the sidecar cross-check and still '
+        'returns the signed digest (helper-verification case)', () async {
+      // Used by UpdateController to verify the helper exe at
+      // spawn time — there's no .sha256 sidecar for the helper, so
+      // the caller passes no digestHex and compares the returned
+      // digest to the on-disk file hash itself.
+      final hex = 'ef' * 32;
+      final sig = await devSig('1.2.3', 'octodo_helper.exe', hex);
+      final returned = await verifyAssetSignature(
+        body: sigBody(['octodo_helper.exe $hex $sig']),
+        version: '1.2.3',
+        assetName: 'octodo_helper.exe',
+        // digestHex intentionally omitted.
+        publicKeysBase64: [devPubB64],
+      );
+      expect(returned, hex);
+    });
+
+    test(
+        'omitting digestHex still fails on a wrong-version sig '
+        '(replay defense unchanged)', () async {
+      // Sanity: the version-in-message binding has to work whether
+      // or not the caller passes a sidecar digest. Replaying a
+      // v1.2.3-signed helper line as v9.9.9 must still fail.
+      final hex = 'ee' * 32;
+      final sig = await devSig('1.2.3', 'octodo_helper.exe', hex);
+      await expectLater(
+        verifyAssetSignature(
+          body: sigBody(['octodo_helper.exe $hex $sig']),
+          version: '9.9.9',
+          assetName: 'octodo_helper.exe',
+          publicKeysBase64: [devPubB64],
+        ),
+        throwsA(isA<UpdateSignatureException>()),
+      );
+    });
+
+    test(
+        'omitting digestHex still fails when no entry exists for '
+        'the asset', () async {
+      final hex = 'ef' * 32;
+      final sig = await devSig('1.2.3', 'other.exe', hex);
+      await expectLater(
+        verifyAssetSignature(
+          body: sigBody(['other.exe $hex $sig']),
+          version: '1.2.3',
+          assetName: 'octodo_helper.exe', // not in the body
+          publicKeysBase64: [devPubB64],
+        ),
+        throwsA(
+          isA<UpdateSignatureException>().having(
+              (e) => e.reason, 'reason', contains('no entry')),
+        ),
+      );
+    });
+  });
+
+  group('helper asset names', () {
+    test('helperAssetNameForCurrentPlatform returns the right basename',
+        () {
+      if (Platform.isWindows) {
+        expect(
+            helperAssetNameForCurrentPlatform(), kHelperAssetNameWindows);
+        expect(kHelperAssetNameWindows, 'octodo_helper.exe');
+      } else {
+        expect(
+            helperAssetNameForCurrentPlatform(), kHelperAssetNameMacOS);
+        expect(kHelperAssetNameMacOS, 'octodo_helper');
+      }
     });
   });
 }

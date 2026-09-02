@@ -205,6 +205,31 @@ Future<String> _testSigBody(String tagName, String digestHex) async {
   return '$kSignatureFileHeader\n$asset $digestHex ${base64.encode(sig.bytes)}\n';
 }
 
+/// Build a `octodo-v<ver>-manifest.sig` body covering BOTH the zip
+/// and the helper exe for the Windows production apply path.
+/// Signed with [_devKeyPair]; uses [helperAssetName] as the helper
+/// asset name (caller passes `kHelperAssetNameWindows` or the macOS
+/// equivalent).
+Future<String> _testSigBodyWithHelper({
+  required String tagName,
+  required String zipDigestHex,
+  required String helperDigestHex,
+  required String helperAssetName,
+}) async {
+  final zipAsset = 'octodo-$tagName-windows-x64.zip';
+  final ver = tagName.substring(1);
+  final zipMsg = canonicalUpdateMessage(ver, zipAsset, zipDigestHex);
+  final helperMsg =
+      canonicalUpdateMessage(ver, helperAssetName, helperDigestHex);
+  final zipSig =
+      await Ed25519().sign(utf8.encode(zipMsg), keyPair: _devKeyPair);
+  final helperSig =
+      await Ed25519().sign(utf8.encode(helperMsg), keyPair: _devKeyPair);
+  return '$kSignatureFileHeader\n'
+      '$zipAsset $zipDigestHex ${base64.encode(zipSig.bytes)}\n'
+      '$helperAssetName $helperDigestHex ${base64.encode(helperSig.bytes)}\n';
+}
+
 /// Wait until [predicate] returns true or [timeout] elapses.
 /// Polls every 5 ms; capped at [timeout]. Necessary because
 /// `Future<void>.delayed(Duration.zero)` doesn't reliably pump
@@ -1916,6 +1941,312 @@ void main() {
       } else {
         expect(portableModel.error?.message, contains('helper is missing'));
       }
+      controller.dispose();
+    });
+
+    test('applyDownloaded verifies the helper hash against the signed '
+        'manifest before spawning (Windows only)', () async {
+      // The macOS production apply goes through /bin/sh and never
+      // spawns octodo_helper; this gate is a Windows-only concern.
+      if (!Platform.isWindows) {
+        return;
+      }
+
+      // Build a fake helper exe in temp — its sha256 is what we'll
+      // sign into the manifest.sig body.
+      final helperBytes = utf8.encode('FAKE-OCTODO-HELPER');
+      final helperFile = File(p.join(tmp.path, 'octodo_helper.exe'))
+        ..writeAsBytesSync(helperBytes);
+      final helperHex = _sha256HexOfBytes(helperBytes);
+
+      // The zip digest the controller will verify against the
+      // signed manifest. The apply step never actually extracts
+      // the zip here (Process.start is mocked), so a placeholder
+      // zip body is fine — the pre-extract checks aren't on the
+      // critical path we're exercising.
+      final realZip = _buildStubZip();
+      final zipHex = _sha256HexOfBytes(realZip);
+
+      final sigBody = await _testSigBodyWithHelper(
+        tagName: 'v9.9.9',
+        zipDigestHex: zipHex,
+        helperDigestHex: helperHex,
+        helperAssetName: kHelperAssetNameWindows,
+      );
+
+      var sigFetched = false;
+      var processStarted = false;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(
+            _releaseBody(
+                tagName: 'v9.9.9',
+                zipSize: realZip.length,
+                withIntegrityAssets: true),
+            200,
+          );
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(zipHex, 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(sigBody, 200);
+        }
+        if (req.url.host == 'example.com') {
+          return http.Response.bytes(realZip, 200);
+        }
+        if (req.url.host == 'github.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          sigFetched = true;
+          return http.Response(sigBody, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final model = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+      );
+      final controller = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+        helperExeFactory: () => helperFile,
+        processStartFactory: (exe, args,
+                {required environment, required mode}) async {
+          processStarted = true;
+          // Return a no-op detached Process — the controller
+          // doesn't await its stdin/stdout; it just returns true
+          // and the apply path considers the spawn successful.
+          // Easiest: spawn `cmd /c exit 0` on Windows.
+          return Process.start(
+            'cmd',
+            const ['/c', 'exit', '0'],
+            mode: ProcessStartMode.detached,
+          );
+        },
+        // Don't actually exit the test runner — observe state instead.
+        exitFactory: (_) {},
+      );
+      await controller.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await controller.downloadLatest();
+      await _waitFor(() => model.state == UpdateState.downloaded);
+
+      // Pre-condition: the apply step hasn't run yet.
+      expect(sigFetched, isFalse);
+
+      await controller.applyDownloaded();
+      // Wait for the controller's async spawn + setInstalling
+      // settle. applyDownloaded itself is sync-from-here once
+      // _spawnHelper returns, but the helper sig fetch is async.
+      await _waitFor(
+          () => sigFetched || model.state == UpdateState.error);
+      // Give the post-spawn setInstalling a tick.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      // The signature body was fetched from GitHub (canonical
+      // release URL), the helper's sha256 matched the signed
+      // digest, and Process.start was invoked for the helper.
+      expect(sigFetched, isTrue,
+          reason: 'helper sig fetch should run on Windows apply');
+      expect(processStarted, isTrue,
+          reason: 'helper with matching hash should be spawned');
+      expect(model.state, UpdateState.installing,
+          reason: 'matching hash → proceed to installing state');
+      controller.dispose();
+    });
+
+    test('applyDownloaded refuses to spawn a tampered helper exe '
+        '(Windows only)', () async {
+      if (!Platform.isWindows) return;
+
+      // Helper on disk has a DIFFERENT hash than the manifest
+      // signed for — simulates an attacker who replaced the
+      // file after the install.
+      final helperBytes = utf8.encode('MALICIOUS-HELPER');
+      final helperFile = File(p.join(tmp.path, 'octodo_helper.exe'))
+        ..writeAsBytesSync(helperBytes);
+      final realHelperHex = _sha256HexOfBytes(utf8.encode('TRUSTED-HELPER'));
+
+      final realZip = _buildStubZip();
+      final zipHex = _sha256HexOfBytes(realZip);
+
+      final sigBody = await _testSigBodyWithHelper(
+        tagName: 'v9.9.9',
+        zipDigestHex: zipHex,
+        helperDigestHex: realHelperHex,
+        helperAssetName: kHelperAssetNameWindows,
+      );
+
+      var processStarted = false;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(
+            _releaseBody(
+                tagName: 'v9.9.9',
+                zipSize: realZip.length,
+                withIntegrityAssets: true),
+            200,
+          );
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(zipHex, 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(sigBody, 200);
+        }
+        if (req.url.host == 'example.com') {
+          return http.Response.bytes(realZip, 200);
+        }
+        if (req.url.host == 'github.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(sigBody, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final model = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+      );
+      final controller = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+        helperExeFactory: () => helperFile,
+        processStartFactory: (exe, args,
+                {required environment, required mode}) async {
+          processStarted = true;
+          return Process.start('cmd', const ['/c', 'exit', '0'],
+              mode: ProcessStartMode.detached);
+        },
+        exitFactory: (_) {},
+      );
+      await controller.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await controller.downloadLatest();
+      await _waitFor(() => model.state == UpdateState.downloaded);
+
+      await controller.applyDownloaded();
+      await _waitFor(() => model.state == UpdateState.error);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(processStarted, isFalse,
+          reason: 'tampered helper must never be spawned');
+      expect(model.state, UpdateState.error);
+      expect(
+        model.error?.message ?? '',
+        contains('integrity'),
+        reason: 'integrity refusal must surface as integrity, not network',
+      );
+      expect(
+        model.error?.technicalDetails ?? '',
+        contains('on-disk='),
+        reason: 'technical details must include the offending hashes',
+      );
+      controller.dispose();
+    });
+
+    test('applyDownloaded surfaces an integrity error when the helper '
+        'entry is missing from the signed manifest (Windows only)',
+        () async {
+      if (!Platform.isWindows) return;
+
+      final helperBytes = utf8.encode('FAKE-HELPER');
+      final helperFile = File(p.join(tmp.path, 'octodo_helper.exe'))
+        ..writeAsBytesSync(helperBytes);
+      final realZip = _buildStubZip();
+      final zipHex = _sha256HexOfBytes(realZip);
+
+      // Sign ONLY the zip line — no helper line. Old releases
+      // predating this hardening lack a helper entry.
+      final sigBody = await _testSigBody('v9.9.9', zipHex);
+
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(
+            _releaseBody(
+                tagName: 'v9.9.9',
+                zipSize: realZip.length,
+                withIntegrityAssets: true),
+            200,
+          );
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(zipHex, 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(sigBody, 200);
+        }
+        if (req.url.host == 'example.com') {
+          return http.Response.bytes(realZip, 200);
+        }
+        if (req.url.host == 'github.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(sigBody, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final model = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+      );
+      final controller = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+        helperExeFactory: () => helperFile,
+        exitFactory: (_) {},
+      );
+      await controller.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await controller.downloadLatest();
+      await _waitFor(() => model.state == UpdateState.downloaded);
+
+      await controller.applyDownloaded();
+      await _waitFor(() => model.state == UpdateState.error);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      // No helper entry → verification throws → UpdateIntegrity
+      // Exception → error state. The user is told to reinstall.
+      expect(model.state, UpdateState.error);
+      expect(
+        model.error?.message ?? '',
+        contains('integrity'),
+        reason: 'missing helper entry surfaces as integrity refusal',
+      );
       controller.dispose();
     });
 

@@ -115,6 +115,14 @@ class UpdateController {
   /// returns successfully; reset on `model.reset()`.
   UpdateFeedSource? _currentReleaseSource;
 
+  /// In-memory cache of verified helper-signature bodies, keyed by
+  /// the version whose helper hash they describe. Populated by
+  /// `_resolveAndVerifyHelperExe` so repeat updates don't pay a
+  /// fresh HTTPS fetch + Ed25519 verify on every spawn. Never
+  /// persisted: a fresh launch re-fetches so a tampered local
+  /// cache can't outlive the process.
+  final Map<String, String> _verifiedHelperSigBodies = {};
+
   Timer? _probeTimer;
   Timer? _notFoundTimer;
   StreamSubscription<void>? _repoOverrideSub;
@@ -173,6 +181,36 @@ class UpdateController {
   /// be exercised deterministically without hitting the network.
   final http.Client Function()? downloadClientFactory;
 
+  /// Optional override for the path of `octodo_helper.exe` (or
+  /// `octodo_helper` on macOS, where the production apply goes
+  /// through `/bin/sh` and the helper is unused). Production
+  /// resolves next to [Platform.resolvedExecutable]; tests pass
+  /// a temp file so the integrity check can be exercised without
+  /// touching the real install dir (e.g. next to the
+  /// `flutter_tester` host).
+  final File? Function()? helperExeFactory;
+
+  /// Optional override for [Process.start] used to spawn the
+  /// update helper exe. Production leaves this null and uses
+  /// `Process.start` directly; tests inject a no-op so the
+  /// apply path can be exercised without actually launching a
+  /// binary. Matches the same pattern in `posix_apply_script.dart`
+  /// and `staged_apply.dart`.
+  final Future<Process> Function(
+    String executable,
+    List<String> arguments, {
+    required Map<String, String> environment,
+    required ProcessStartMode mode,
+  })? processStartFactory;
+
+  /// Optional override for the final `exit(0)` that
+  /// [applyDownloaded] invokes after the helper is spawned.
+  /// Production leaves this null and uses `dart:io`'s `exit`;
+  /// tests pass a no-op so the test runner survives a successful
+  /// apply. (Without this override the entire test process is
+  /// torn down before subsequent tests can run.)
+  final void Function(int code)? exitFactory;
+
   /// Base for the exponential backoff between retry attempts.
   /// Production: 200 ms (the `package:retry` default — yields
   /// 400 ms / 800 ms gaps between attempts, ±25% jitter).
@@ -204,6 +242,9 @@ class UpdateController {
     this.signaturePublicKeys,
     this.skipListFileFactory,
     this.downloadClientFactory,
+    this.helperExeFactory,
+    this.processStartFactory,
+    this.exitFactory,
     this.retryDelayFactor = const Duration(milliseconds: 200),
     this.minCheckDisplay = const Duration(milliseconds: 600),
     this.probeTimeout = const Duration(seconds: 20),
@@ -1000,7 +1041,7 @@ class UpdateController {
 
     await Future<void>.delayed(_kHelperStartupDelay);
 
-    exit(0);
+    (exitFactory ?? exit)(0);
   }
 
   /// Everything that must be verified BEFORE the app quits. Each
@@ -1080,15 +1121,155 @@ class UpdateController {
   }
 
   /// Resolve the standalone helper binary path next to the running
-  /// executable (Windows only — the macOS apply runs through
-  /// /bin/sh and needs no helper binary). Returns null if the file
-  /// is absent — the caller surfaces a clear error in that case so
-  /// the user knows to reinstall rather than retry blindly.
-  File? _resolveHelperExe() {
+  /// executable and verify its hash against the signed release
+  /// manifest before returning it (Windows only — the macOS apply
+  /// runs through /bin/sh and needs no helper binary).
+  ///
+  /// Returns null if the file is absent (the caller surfaces the
+  /// reinstall error). Throws [UpdateIntegrityException] if the
+  /// helper on disk does not match the hash the release workflow
+  /// signed for the CURRENT version — i.e. the file at this path
+  /// has been tampered with since the last update installed it.
+  /// `applyDownloaded` catches that exception and surfaces the
+  /// same Reinstall flow as the missing-helper case.
+  ///
+  /// Trust chain:
+  ///   * helper asset name is platform-specific
+  ///     ([kHelperAssetNameWindows] / [kHelperAssetNameMacOS]);
+  ///   * the line in `octodo-v<ver>-manifest.sig` is signed by the
+  ///     same Ed25519 key as the zip digest (Phase B);
+  ///   * the signed message includes the version, so an old
+  ///     version's sig body can't be replayed against a newer
+  ///     install;
+  ///   * the helper at this path is the one the running app's own
+  ///     apply step extracted from a Phase-B-verified zip, so the
+  ///     initial-install trust anchor is the embedded public key.
+  ///
+  /// The macOS apply goes through /bin/sh (Apple-signed) and
+  /// never invokes this helper, but the manifest still pins the
+  /// helper hash for parity / future-proofing.
+  Future<File?> _resolveAndVerifyHelperExe({
+    required String version,
+  }) async {
+    if (!Platform.isWindows) {
+      // macOS production apply runs through /bin/sh; the helper
+      // binary is unused. _spawnHelper short-circuits to
+      // _spawnPosixApply before reaching here, so this branch is
+      // a belt-and-braces guard.
+      return null;
+    }
     final installDir = p.dirname(Platform.resolvedExecutable);
     final helperPath = p.join(installDir, _kHelperExeName);
-    final f = File(helperPath);
-    return f.existsSync() ? f : null;
+    final f = helperExeFactory?.call() ?? File(helperPath);
+    if (!f.existsSync()) return null;
+
+    final helperAssetName = helperAssetNameForCurrentPlatform();
+    final sigBody = await _fetchVerifiedHelperSigBody(
+      version: version,
+      helperAssetName: helperAssetName,
+    );
+    final expectedHex = await verifyAssetSignature(
+      body: sigBody,
+      version: version,
+      assetName: helperAssetName,
+      publicKeysBase64: signaturePublicKeys,
+    );
+
+    final actualHex = await sha256HexOfFile(f);
+    if (actualHex.toLowerCase() != expectedHex.toLowerCase()) {
+      throw UpdateIntegrityException(
+        'Update helper at $helperPath has been modified since this '
+        'build of Octodo was installed (on-disk=$actualHex, '
+        'signed=$expectedHex). The apply step cannot safely spawn '
+        'it. Reinstall Octodo from the download page to apply '
+        'future updates.',
+      );
+    }
+    return f;
+  }
+
+  /// Fetch (and Ed25519-verify) the signed manifest body containing
+  /// the helper hash line for [version]. Cached per-version so
+  /// repeated update checks on the same install don't pay the
+  /// HTTPS + verify cost on every spawn.
+  Future<String> _fetchVerifiedHelperSigBody({
+    required String version,
+    required String helperAssetName,
+  }) async {
+    final cached = _verifiedHelperSigBodies[version];
+    if (cached != null) return cached;
+
+    // Try GitHub first (canonical release assets), fall back to
+    // R2 (same files, alternative host). Both are https-only and
+    // serve identical bytes — only the URL differs.
+    const ghPrefix = 'https://github.com/invented-pro/octodo/'
+        'releases/download/v';
+    const r2Prefix = 'https://s3.primorial.net/octodo/';
+    final asset = 'octodo-v$version-manifest.sig';
+    final candidates = <Uri>[
+      Uri.parse('$ghPrefix$version/$asset'),
+      Uri.parse('$r2Prefix$asset'),
+    ];
+    Object? lastError;
+    String? body;
+    for (final url in candidates) {
+      try {
+        body = await _fetchSigBodyFromUrl(url);
+        break;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    if (body == null) {
+      throw UpdateIntegrityException(
+        'Could not fetch the signed manifest for helper '
+        'verification (tried ${candidates.length} URL(s)). Last '
+        'error: $lastError\n'
+        'Manual download: $kAppRepositoryReleases',
+      );
+    }
+
+    // Pre-verify the helper entry's sig up-front so we cache a body
+    // that's known good. Caching an unverified body would let a
+    // tampered in-memory copy survive the lifetime of the process.
+    final verifiedDigest = await verifyAssetSignature(
+      body: body,
+      version: version,
+      assetName: helperAssetName,
+      publicKeysBase64: signaturePublicKeys,
+    );
+    // We don't use the digest itself here (it's checked against
+    // the on-disk file in _resolveAndVerifyHelperExe), but the
+    // throw-on-failure side effect is what we want.
+    assert(verifiedDigest.length == 64);
+
+    _verifiedHelperSigBodies[version] = body;
+    return body;
+  }
+
+  Future<String> _fetchSigBodyFromUrl(Uri url) async {
+    // Reuse [downloadClientFactory] so a single MockClient can route
+    // both the zip download and the helper-sig fetch in tests.
+    final client = downloadClientFactory?.call() ?? http.Client();
+    final ownsClient = downloadClientFactory == null;
+    try {
+      final req = http.Request('GET', url)
+        ..headers['Accept'] = 'text/plain'
+        ..headers['User-Agent'] = 'octodo/$userAgentVersion';
+      final resp = await client.send(req).timeout(_kSidecarTimeout);
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        throw UpdateFeedException(
+            'HTTP ${resp.statusCode} from $url');
+      }
+      return (await resp.stream.bytesToString()).trim();
+    } on TimeoutException catch (e) {
+      throw UpdateFeedException(
+          'Timed out after ${_kSidecarTimeout.inSeconds}s', e);
+    } on http.ClientException catch (e) {
+      throw UpdateFeedException('HTTP client error: ${e.message}', e);
+    } finally {
+      if (ownsClient) client.close();
+    }
   }
 
   /// Spawns the apply orchestrator, then the caller exits the
@@ -1121,26 +1302,74 @@ class UpdateController {
     if (Platform.isMacOS) {
       return _spawnPosixApply(pid: pid);
     }
-    final helper = _resolveHelperExe();
-    if (helper == null) {
-      // Without the standalone helper exe we cannot safely apply
-      // the update: the legacy in-process path (spawn octodo.exe
-      // with env vars) hits the DLL-self-lock bug and corrupts the
-      // install dir partway. Refuse with a clear error and no
-      // retry button — the only recovery is to reinstall.
-      final installDir = p.dirname(Platform.resolvedExecutable);
+    final File helper;
+    try {
+      final resolved = await _resolveAndVerifyHelperExe(version: version);
+      if (resolved == null) {
+        // Without the standalone helper exe we cannot safely apply
+        // the update: the legacy in-process path (spawn octodo.exe
+        // with env vars) hits the DLL-self-lock bug and corrupts the
+        // install dir partway. Refuse with a clear error and no
+        // retry button — the only recovery is to reinstall.
+        final installDir = p.dirname(Platform.resolvedExecutable);
+        model.setError(UpdateErrorPayload(
+          message: 'Update helper is missing. Reinstall Octodo '
+              'to apply this update.',
+          technicalDetails: 'Expected $_kHelperExeName next to the '
+              'running executable at $installDir.\n'
+              'Manual download: $kAppRepositoryReleases',
+          onDismiss: () => model.reset(),
+        ));
+        return false;
+      }
+      helper = resolved;
+    } on UpdateIntegrityException catch (e) {
+      // The helper at the canonical path doesn't match the hash
+      // CI signed for this version. Most likely the on-disk file
+      // was tampered with (per-user install, attacker with write
+      // access to the install dir) — refuse to spawn it.
+      _log.severe('helper integrity check failed: ${e.message}');
       model.setError(UpdateErrorPayload(
-        message: 'Update helper is missing. Reinstall Octodo '
-            'to apply this update.',
-        technicalDetails: 'Expected $_kHelperExeName next to the '
-            'running executable at $installDir.\n'
+        message: 'Update refused: the on-disk helper did not pass '
+            'integrity verification. Reinstall Octodo to apply '
+            'future updates.',
+        technicalDetails: '${e.message}\n'
+            'Manual download: $kAppRepositoryReleases',
+        onDismiss: () => model.reset(),
+      ));
+      return false;
+    } on UpdateSignatureException catch (e) {
+      // Same UX as the integrity-mismatch case: the helper can't be
+      // trusted. Surface as a Reinstall — same shape as the
+      // missing-helper path. The dedicated "integrity verification"
+      // headline keeps the user from misdirecting to a network
+      // check.
+      _log.severe('helper signature verification failed: ${e.reason}');
+      model.setError(UpdateErrorPayload(
+        message: 'Update refused: the helper signature did not pass '
+            'integrity verification. Reinstall Octodo to apply '
+            'future updates.',
+        technicalDetails: '${e.reason}\n'
             'Manual download: $kAppRepositoryReleases',
         onDismiss: () => model.reset(),
       ));
       return false;
     }
     try {
-      await Process.start(
+      final startProc = processStartFactory ??
+          ((
+            String executable,
+            List<String> arguments, {
+            required Map<String, String> environment,
+            required ProcessStartMode mode,
+          }) async =>
+              Process.start(
+            executable,
+            arguments,
+            environment: environment,
+            mode: mode,
+          ));
+      await startProc(
         helper.path,
         const <String>[],
         environment: <String, String>{
