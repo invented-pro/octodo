@@ -1372,6 +1372,19 @@ function prompt {
     if (best != null) _focusContainer(best);
   }
 
+  /// Applies a double-click tab rename. Pure model write: the chip
+  /// rebuilds itself via the Surface's ChangeNotifier. `newTitle`
+  /// null clears the custom title; OSC 0/2 titles kept updating
+  /// [Surface.title] underneath, so the chip immediately shows the
+  /// current automatic title.
+  void _renameSurfaceInContainer(
+    PaneContainer owner,
+    Surface surface,
+    String? newTitle,
+  ) {
+    surface.customTitle = newTitle;
+  }
+
   void _closeSurfaceInContainer(PaneContainer owner, Surface surface) {
     if (_rootPane is PaneContainer) {
       // Single-pane workspace: the container holds only this surface.
@@ -2157,6 +2170,7 @@ function prompt {
                     _newSurfaceInFocusedContainer();
                   },
                   onCloseSurface: _closeSurfaceInContainer,
+                  onRenameSurface: _renameSurfaceInContainer,
                   onSplit: (container, surface, direction) {
                     _focusContainer(container);
                     _splitFocusedContainer(direction);

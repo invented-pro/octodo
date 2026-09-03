@@ -211,6 +211,77 @@ void main() {
     });
   });
 
+  group('Surface.chipTitle — manual rename priority (issue #7)', () {
+    // Double-click rename pins a custom title over the automatic one.
+    // OSC 0/2 writes must keep landing in Surface.title while pinned
+    // (they double as the pwsh/nushell cwd channel), so clearing the
+    // custom title reverts to the LIVE automatic title — never a
+    // stale snapshot stashed at rename time.
+    ShellProfile pwshProfile() => ShellProfile(
+          label: 'pwsh',
+          program: r'C:\Program Files\PowerShell\7\pwsh.exe',
+          args: const ['-NoLogo'],
+          icon: Icons.terminal,
+          color: const Color(0xFF0078D4),
+          shortName: 'pwsh',
+          showCwdInTitle: true,
+        );
+
+    test('custom title wins over the OSC 0/2 title and the fallback', () {
+      final s = Surface(profile: pwshProfile(), initialCwd: r'C:\Users\tester')
+        ..currentCwd = r'C:\Users\tester\proj';
+      s.title = 'nvim init.vim';
+      s.customTitle = 'work';
+      expect(s.chipTitle, 'work');
+    });
+
+    test(
+        'OSC 0/2 writes keep landing while pinned; clearing reverts to the '
+        'LIVE auto title (not a stale snapshot)', () {
+      final s = Surface(profile: pwshProfile(), initialCwd: r'C:\Users\tester');
+      s.title = 'nvim init.vim';
+      s.customTitle = 'work';
+      // While pinned, further OSC titles must not change the display…
+      s.title = 'ssh prod';
+      expect(s.chipTitle, 'work');
+      // …but must still be tracked underneath, so clearing shows the
+      // most recent one.
+      s.customTitle = null;
+      expect(s.chipTitle, 'ssh prod');
+    });
+
+    test(
+        'clearing the custom title with no OSC title falls back to '
+        'fallbackTitle', () {
+      final s = Surface(profile: pwshProfile(), initialCwd: r'C:\Users\tester')
+        ..currentCwd = r'C:\Users\tester\proj';
+      s.customTitle = 'work';
+      s.customTitle = null;
+      expect(s.chipTitle, 'pwsh proj');
+    });
+
+    test('custom title is rendered as typed (no .exe stripping, no path '
+        'shortening)', () {
+      final s = Surface(profile: pwshProfile(), initialCwd: r'C:\Users\tester');
+      s.title = 'nvim init.vim';
+      // The automatic chain would reduce this to '' (→ fallback); a
+      // custom title is the user's literal choice.
+      s.customTitle = r'C:\tools\pwsh.exe';
+      expect(s.chipTitle, r'C:\tools\pwsh.exe');
+    });
+
+    test('setting the same custom title does not notify; changing it does', () {
+      final s = Surface();
+      s.customTitle = 'work';
+      var notified = 0;
+      s.addListener(() => notified++);
+      s.customTitle = 'work';
+      expect(notified, 0);
+      s.customTitle = null;
+      expect(notified, 1);
+    });
+  });
+
   group('applyDropToSplitEdgeForTest — source-pane collapse (regression: '
       'dragged terminal must dock, not disappear)', () {
     // Regression for the bug where _dropToSplitEdge captured

@@ -10,6 +10,7 @@ import '../shortcuts/app_shortcuts.dart';
 import '../theme/app_theme.dart';
 import '../theme/palette_context.dart';
 import '../theme/palettes.dart';
+import '../../ui/common/text_input_dialog.dart';
 import 'terminal_view.dart';
 import 'shell_profiles.dart';
 
@@ -95,6 +96,21 @@ class Surface extends ChangeNotifier {
   set title(String value) {
     if (_title == value) return;
     _title = value;
+    notifyListeners();
+  }
+
+  /// Title the user set by double-clicking the tab chip. While
+  /// non-null it wins over both the shell-set [title] and the
+  /// derived fallback title in [chipTitle] — OSC 0/2 writes keep
+  /// landing in [title] (so the auto title stays current and the
+  /// pwsh/nushell cwd channel keeps working), they just stop being
+  /// displayed until the custom title is cleared back to null.
+  /// Session-scoped — not persisted across launches.
+  String? _customTitle;
+  String? get customTitle => _customTitle;
+  set customTitle(String? value) {
+    if (_customTitle == value) return;
+    _customTitle = value;
     notifyListeners();
   }
 
@@ -236,11 +252,14 @@ class Surface extends ChangeNotifier {
     return slash < 0 ? path : path.substring(slash + 1);
   }
 
-  /// The full title to render in the tab chip. Tries the shell-set
-  /// title first; if [_shortenTitle] reduces it to an empty string
-  /// (e.g. ConPTY sent the raw process name `pwsh.exe` and the
-  /// `.exe` filter stripped it), falls back to [fallbackTitle] so the
-  /// chip never shows the literal "shell" placeholder.
+  /// The full title to render in the tab chip. Priority order:
+  ///   1. a user-set custom title (double-click rename) — immune to
+  ///      OSC 0/2 overwrites until cleared;
+  ///   2. the shell-set title — unless [_shortenTitle] reduces it to
+  ///      an empty string (e.g. ConPTY sent the raw process name
+  ///      `pwsh.exe` and the `.exe` filter stripped it), in which
+  ///      case fall back to [fallbackTitle] so the chip never shows
+  ///      the literal "shell" placeholder.
   ///
   /// The one shell-set title that is NOT shown is the synthetic
   /// `PowerShell - <cwd>` string octodo's own pwsh init script emits
@@ -253,6 +272,11 @@ class Surface extends ChangeNotifier {
   /// program exits the shell's prompt hook re-emits the synthetic
   /// title and the chip falls back again.
   String get chipTitle {
+    // A user-set custom title has the highest priority and is shown
+    // as typed (no `_shortenTitle` stripping — the user chose the
+    // text; the chip's TextOverflow.ellipsis handles overflow).
+    final custom = _customTitle;
+    if (custom != null && custom.isNotEmpty) return custom;
     if (_title.isNotEmpty && !_isSyntheticCwdTitle) {
       final shortened = _shortenTitle(_title);
       if (shortened.isNotEmpty) return shortened;
@@ -726,6 +750,15 @@ class PaneLayout extends StatelessWidget {
   final void Function(PaneContainer container, Surface surface) onFocusSurface;
   final void Function(PaneContainer container) onNewSurface;
   final void Function(PaneContainer container, Surface surface) onCloseSurface;
+
+  /// Called when the user renames a tab via double-click. [newTitle]
+  /// null = clear the custom title (revert to the automatic one).
+  final void Function(
+    PaneContainer container,
+    Surface surface,
+    String? newTitle,
+  )
+  onRenameSurface;
   final void Function(PaneContainer container, Surface surface, Axis direction)
   onSplit;
   final void Function(PaneSplit parent, double newRatio) onResize;
@@ -815,6 +848,7 @@ class PaneLayout extends StatelessWidget {
     required this.onFocusSurface,
     required this.onNewSurface,
     required this.onCloseSurface,
+    required this.onRenameSurface,
     required this.onSplit,
     required this.onResize,
     required this.onReorderSurface,
@@ -942,6 +976,7 @@ class PaneLayout extends StatelessWidget {
               onFocusSurface: (s) => onFocusSurface(container, s),
               onNewSurface: () => onNewSurface(container),
               onCloseSurface: (s) => onCloseSurface(container, s),
+              onRenameSurface: (s, t) => onRenameSurface(container, s, t),
               onSplit: (s, dir) => onSplit(container, s, dir),
               onDefaultShellChanged: onDefaultShellChanged,
               onToggleMaximize: onToggleMaximize,
@@ -1170,6 +1205,11 @@ class _ContainerTabBar extends StatefulWidget {
   final void Function(Surface) onFocusSurface;
   final VoidCallback onNewSurface;
   final void Function(Surface) onCloseSurface;
+
+  /// Applies a rename requested from this tab bar. [newTitle] is the
+  /// trimmed dialog input: null clears the custom title (revert to
+  /// the live automatic title), non-null pins it over OSC 0/2.
+  final void Function(Surface surface, String? newTitle) onRenameSurface;
   final void Function(Surface, Axis) onSplit;
   final void Function(int) onDefaultShellChanged;
   final VoidCallback? onToggleMaximize;
@@ -1202,6 +1242,7 @@ class _ContainerTabBar extends StatefulWidget {
     required this.onFocusSurface,
     required this.onNewSurface,
     required this.onCloseSurface,
+    required this.onRenameSurface,
     required this.onSplit,
     required this.onDefaultShellChanged,
     required this.onReorderSurface,
@@ -1316,6 +1357,30 @@ class ContainerTabBarState extends State<_ContainerTabBar> {
       _hoverIndex = index;
       _hoverAfter = after;
     });
+  }
+
+  /// Double-click rename: focus the tab, then open the input dialog
+  /// seeded with the custom title (so a renamed tab re-edits its own
+  /// name) or the current automatic [Surface.chipTitle]. An empty
+  /// trimmed submission clears the custom title — the chip then shows
+  /// the live automatic title again (OSC 0/2 titles kept landing in
+  /// [Surface.title] the whole time, so it's current, not a stale
+  /// snapshot). Cancelling (Esc / Cancel / barrier) changes nothing.
+  Future<void> _renameSurface(Surface surface) async {
+    widget.onFocusSurface(surface);
+    final result = await showTextInputDialog(
+      context,
+      title: 'Rename tab',
+      initialValue: surface.customTitle ?? surface.chipTitle,
+      hintText: 'Leave empty to restore the automatic title',
+      confirmLabel: 'Rename',
+    );
+    if (!mounted || result == null) return;
+    // The surface may have been closed or moved to another container
+    // while the modal dialog was open; writing to a disposed
+    // ChangeNotifier would trip the debug assertion.
+    if (!widget.container.surfaces.contains(surface)) return;
+    widget.onRenameSurface(surface, result.isEmpty ? null : result);
   }
 
   void _setEndZoneHover(bool v) {
@@ -1532,11 +1597,16 @@ class ContainerTabBarState extends State<_ContainerTabBar> {
           isActive: isActive,
           containerId: c.id,
           indexInContainer: i,
+          // Focus follows press (see _ChipVisual.onPress) so tab
+          // switching is instant; the delayed single-tap callback
+          // only keeps the edge-click auto-scroll, which has no
+          // immediacy expectation.
+          onPress: () => widget.onFocusSurface(surface),
           onTap: (chipContext) {
-            widget.onFocusSurface(surface);
             _maybeAutoScroll(chipContext, i);
           },
           onClose: () => widget.onCloseSurface(surface),
+          onRename: () => _renameSurface(surface),
           onLocalDragChanged: widget.onAnyDragActiveChanged,
           onHoverChanged: (after) => _setHover(i, after),
           onReorderInContainer: (oldIndex, newIndex) =>
@@ -1760,7 +1830,13 @@ class _DraggableChip extends StatelessWidget {
   /// [BuildContext] so the parent can locate the chip's
   /// [RenderBox] (used by the edge-click auto-scroll).
   final void Function(BuildContext) onTap;
+
+  /// Immediate focus on primary-button press — fires before gesture
+  /// disambiguation so tab switching isn't delayed by the
+  /// double-tap (rename) recognizer. See [_ChipVisual.onPress].
+  final VoidCallback onPress;
   final VoidCallback onClose;
+  final VoidCallback onRename;
   final ValueChanged<bool> onLocalDragChanged;
   final ValueChanged<bool> onHoverChanged;
   final void Function(int oldIndex, int newIndex) onReorderInContainer;
@@ -1776,7 +1852,9 @@ class _DraggableChip extends StatelessWidget {
     required this.containerId,
     required this.indexInContainer,
     required this.onTap,
+    required this.onPress,
     required this.onClose,
+    required this.onRename,
     required this.onLocalDragChanged,
     required this.onHoverChanged,
     required this.onReorderInContainer,
@@ -1821,6 +1899,7 @@ class _DraggableChip extends StatelessWidget {
     // shell-set title is something unhelpful like `pwsh.exe` (which
     // the `_shortenTitle` `.exe` filter would reduce to empty).
     final title = surface.chipTitle;
+    final renamed = surface.customTitle != null;
     final profile = surface.profile;
     final chip = _ChipVisual(
       title: title,
@@ -1830,7 +1909,10 @@ class _DraggableChip extends StatelessWidget {
       isActive: isActive,
       hasUnread: surface.unread > 0,
       exited: surface.exited,
+      isRenamed: renamed,
       onTap: () => onTap(context),
+      onPress: onPress,
+      onDoubleTap: onRename,
       onClose: onClose,
     );
 
@@ -1888,6 +1970,10 @@ class _DraggableChip extends StatelessWidget {
                   style: TextStyle(
                     color: isActive ? palette.textPrimary : palette.textBody,
                     fontSize: 12,
+                    fontWeight:
+                        renamed ? FontWeight.w700 : FontWeight.normal,
+                    fontStyle:
+                        renamed ? FontStyle.italic : FontStyle.normal,
                     decoration: surface.exited
                         ? TextDecoration.lineThrough
                         : null,
@@ -2019,7 +2105,27 @@ class _ChipVisual extends StatefulWidget {
   /// [Surface.unread] changes.
   final bool hasUnread;
   final bool exited;
+
+  /// True when the title comes from a user rename (double-click)
+  /// rather than the automatic OSC/fallback chain — rendered bold +
+  /// italic so a pinned title is visually distinguishable at a
+  /// glance. Composes with the exited strikethrough.
+  final bool isRenamed;
   final VoidCallback onTap;
+
+  /// Immediate focus on primary-button press. Deliberately a raw
+  /// `Listener` (not `onTapDown`) at the call site: with
+  /// `onDoubleTap` registered, every arena-based tap callback
+  /// (including `onTapDown`) can be held back by double-tap
+  /// disambiguation (~300ms), and tab switching must not wait for
+  /// that. Fires on both presses of a double-click and at drag-start
+  /// — both idempotent focus-wise.
+  final VoidCallback? onPress;
+
+  /// Double-click opens the rename dialog. Nullable so future inline
+  ///-editing states can suspend it (same shape as the workspace
+  /// tile's rename).
+  final VoidCallback? onDoubleTap;
   final VoidCallback onClose;
   const _ChipVisual({
     required this.title,
@@ -2027,10 +2133,13 @@ class _ChipVisual extends StatefulWidget {
     required this.exited,
     required this.onTap,
     required this.onClose,
+    this.onPress,
+    this.onDoubleTap,
     this.icon,
     this.iconAsset,
     this.iconColor,
     this.hasUnread = false,
+    this.isRenamed = false,
   });
 
   @override
@@ -2060,117 +2169,136 @@ class _ChipVisualState extends State<_ChipVisual> {
     } else {
       bg = Colors.transparent;
     }
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: widget.onTap,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.basic,
-        onEnter: (_) => setState(() => _hovered = true),
-        onExit: (_) => setState(() => _hovered = false),
-        child: Container(
-          // Fixed width (rather than `MainAxisSize.min` + maxWidth)
-          // so the close button can be right-aligned to the chip's
-          // edge via `MainAxisAlignment.spaceBetween`. Title text
-          // ellipsizes when overflowed; close button stays pinned
-          // to the right edge of the chip.
-          width: 160,
-          height: 30,
-          padding: const EdgeInsets.only(left: 10, right: 4),
-          decoration: BoxDecoration(
-            color: bg,
-            border: Border(
-              bottom: BorderSide(
-                color: isActive ? palette.accentBlue : Colors.transparent,
-                width: 2,
-              ),
-            ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              // Left: icon + title (truncated). The Expanded lets
-              // the title ellipsize instead of pushing the close
-              // button off-screen.
-              Expanded(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (widget.icon != null || widget.iconAsset != null) ...[
-                      _ShellIcon(
-                        iconData: widget.icon,
-                        iconAsset: widget.iconAsset,
-                        color: widget.iconColor ?? palette.textMuted,
-                        size: 16,
-                      ),
-                      const SizedBox(width: 5),
-                    ],
-                    Flexible(
-                      child: Text(
-                        widget.title,
-                        style: TextStyle(
-                          color: isActive
-                              ? palette.textPrimary
-                              : (exited ? palette.textMuted : palette.textBody),
-                          fontSize: 12,
-                          decoration: exited
-                              ? TextDecoration.lineThrough
-                              : null,
-                          height: 1.2,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 1,
-                      ),
-                    ),
-                    // Unread-notification dot. Hidden on the active
-                    // chip — the surface being visible is what clears
-                    // unread state, so the dot on a focused tab would
-                    // be a contradiction (it can appear for one frame
-                    // between the event and the clear-on-view pass).
-                    if (widget.hasUnread && !isActive) ...[
-                      const SizedBox(width: 5),
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: palette.accentPink,
-                        ),
-                      ),
-                    ],
-                  ],
+    return Listener(
+      // Focus follows press. This must NOT be an arena-based callback
+      // (onTap/onTapDown): with onDoubleTap registered below, those
+      // are delayed by double-tap disambiguation (~300ms), which
+      // would make every tab switch feel laggy. A raw Listener fires
+      // on pointer-down before the arena gets involved.
+      onPointerDown: (event) {
+        if (event.buttons == kPrimaryButton) widget.onPress?.call();
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        onDoubleTap: widget.onDoubleTap,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.basic,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: Container(
+            // Fixed width (rather than `MainAxisSize.min` + maxWidth)
+            // so the close button can be right-aligned to the chip's
+            // edge via `MainAxisAlignment.spaceBetween`. Title text
+            // ellipsizes when overflowed; close button stays pinned
+            // to the right edge of the chip.
+            width: 160,
+            height: 30,
+            padding: const EdgeInsets.only(left: 10, right: 4),
+            decoration: BoxDecoration(
+              color: bg,
+              border: Border(
+                bottom: BorderSide(
+                  color: isActive ? palette.accentBlue : Colors.transparent,
+                  width: 2,
                 ),
               ),
-              // Right: close button, auto-hides on inactive tabs.
-              // AnimatedOpacity gives a smooth 120ms fade-in / out
-              // instead of a jarring pop when hovering the bar.
-              AnimatedOpacity(
-                opacity: showClose ? 1.0 : 0.0,
-                duration: const Duration(milliseconds: 120),
-                child: IgnorePointer(
-                  ignoring: !showClose,
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: GestureDetector(
-                      onTap: widget.onClose,
-                      child: Container(
-                        // Hit area is a bit larger than the icon so
-                        // the close button is easy to click even at
-                        // 12px icon size.
-                        padding: const EdgeInsets.all(3),
-                        child: Icon(
-                          Icons.close,
-                          size: 12,
-                          color: isActive
-                              ? palette.textOverlay
-                              : palette.textMuted,
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Left: icon + title (truncated). The Expanded lets
+                // the title ellipsize instead of pushing the close
+                // button off-screen.
+                Expanded(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (widget.icon != null || widget.iconAsset != null) ...[
+                        _ShellIcon(
+                          iconData: widget.icon,
+                          iconAsset: widget.iconAsset,
+                          color: widget.iconColor ?? palette.textMuted,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 5),
+                      ],
+                      Flexible(
+                        child: Text(
+                          widget.title,
+                          style: TextStyle(
+                            color: isActive
+                                ? palette.textPrimary
+                                : (exited
+                                    ? palette.textMuted
+                                    : palette.textBody),
+                            fontSize: 12,
+                            fontWeight: widget.isRenamed
+                                ? FontWeight.w700
+                                : FontWeight.normal,
+                            fontStyle: widget.isRenamed
+                                ? FontStyle.italic
+                                : FontStyle.normal,
+                            decoration: exited
+                                ? TextDecoration.lineThrough
+                                : null,
+                            height: 1.2,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 1,
+                        ),
+                      ),
+                      // Unread-notification dot. Hidden on the active
+                      // chip — the surface being visible is what clears
+                      // unread state, so the dot on a focused tab would
+                      // be a contradiction (it can appear for one frame
+                      // between the event and the clear-on-view pass).
+                      if (widget.hasUnread && !isActive) ...[
+                        const SizedBox(width: 5),
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: palette.accentPink,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                // Right: close button, auto-hides on inactive tabs.
+                // AnimatedOpacity gives a smooth 120ms fade-in / out
+                // instead of a jarring pop when hovering the bar.
+                AnimatedOpacity(
+                  opacity: showClose ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 120),
+                  child: IgnorePointer(
+                    ignoring: !showClose,
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: GestureDetector(
+                        onTap: widget.onClose,
+                        child: Container(
+                          // Hit area is a bit larger than the icon so
+                          // the close button is easy to click even at
+                          // 12px icon size.
+                          padding: const EdgeInsets.all(3),
+                          child: Icon(
+                            Icons.close,
+                            size: 12,
+                            color: isActive
+                                ? palette.textOverlay
+                                : palette.textMuted,
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
