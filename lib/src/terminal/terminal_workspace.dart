@@ -9,6 +9,7 @@ import '../theme/palettes.dart';
 import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
 import 'pane_tree.dart';
+import 'fresh_environment.dart';
 import 'shell_cwd.dart';
 import 'shell_profiles.dart';
 import 'terminal_settings_scope.dart';
@@ -557,6 +558,34 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     String? initialCwdOverride;
     String? homePath;
     final Map<String, String> env = {};
+
+    // Windows: base every spawn on a FRESH registry snapshot of the
+    // system + user environment, not the app process's launch-time
+    // `Platform.environment`. flutter_alacritty's `resolveShellSpec`
+    // always spreads the entire launch-time `Platform.environment`
+    // into the spawn env; per-tab entries below overlay this map on
+    // top of that, so a same-named key (PATH above all) resolves to
+    // the registry's current value. That is what makes an installer
+    // appending to the user PATH (mimo, scoop, …) visible to the
+    // NEXT tab without restarting octodo — matching Windows
+    // Terminal.
+    //
+    // Two overlay caveats, both handled inside FreshEnvironment.read
+    // or accepted deliberately:
+    //   * Session-scoped launch additions to registry-defined names
+    //     (venv/conda, `$env:PATH += …`) would be shadowed by the
+    //     registry value; FreshEnvironment.mergePath prepends
+    //     session-only PATH entries so dev-shell launches keep them.
+    //   * Registry keys REMOVED since launch still leak through the
+    //     launch-time base; removing them would require forking the
+    //     plugin layer, and Windows Terminal's own reload has the
+    //     same overlay semantics.
+    // A null read (channel failure) keeps the historical launch-env
+    // behavior.
+    if (Platform.isWindows) {
+      final fresh = await FreshEnvironment.read();
+      if (fresh != null) env.addAll(fresh);
+    }
 
     // Resolve the home path (used by Surface._isAtHome) and, for WSL,
     // reuse the $HOME query for initialCwd to avoid a second call.

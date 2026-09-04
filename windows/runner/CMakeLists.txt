@@ -8,6 +8,7 @@ project(runner LANGUAGES CXX)
 # Any new source files that you add to the application should be added here.
 add_executable(${BINARY_NAME} WIN32
   "flutter_window.cpp"
+  "environment.cpp"
   "main.cpp"
   "notifications.cpp"
   "utils.cpp"
@@ -47,6 +48,9 @@ target_link_libraries(${BINARY_NAME} PRIVATE "Shell32.lib")
 # RuntimeObject.lib supplies RoGetActivationFactory / WindowsCreateString
 # for the WinRT toast + Action Center calls in notifications.cpp.
 target_link_libraries(${BINARY_NAME} PRIVATE "RuntimeObject.lib")
+# Userenv.lib supplies CreateEnvironmentBlock for the fresh-registry
+# environment channel (environment.cpp).
+target_link_libraries(${BINARY_NAME} PRIVATE "Userenv.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
