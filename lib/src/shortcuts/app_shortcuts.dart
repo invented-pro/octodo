@@ -331,37 +331,47 @@ class AppShellBindings {
     bindings[primary(LogicalKeyboardKey.bracketLeft, shift: true)] =
         previousWorkspace;
 
-    // macOS alias for the two workspace-cycle bindings above.
+    // macOS + Linux alias for the two workspace-cycle bindings above.
     //
-    // Root cause (verified against the engine source and a live instrumented
-    // run): the macOS embedder derives a key event's logical key from its
-    // layout map first (`FlutterEmbedderKeyResponder.handleDownEvent` →
-    // `layoutMap[keyCode]`), and only falls back to the NSEvent's
-    // `charactersIgnoringModifiers`. `FlutterKeyboardManager.buildLayout`
-    // populates the layout map for letters and digits (mandatory
-    // US-layout goals), which is why ⌘⇧1..9 report `digit1..9` and work
-    // unmodified. Symbol keys like `[` (keyCode 33) get NO layout-map
-    // entry — the US-layout goal is skipped when either clue is EASCII —
-    // so the fallback runs, and per Apple's contract
-    // `charactersIgnoringModifiers` ignores all modifiers EXCEPT Shift:
-    // ⌘⇧[ reports `{` → logical `braceLeft` (0x7b), and ⌘⇧] reports `}`
-    // → logical `braceRight` (0x7d). The `bracketLeft`/`bracketRight`
-    // activators above can never match those events on macOS.
+    // Root cause (verified against the engine source): both embedders
+    // derive a key event's logical key from a *shifted* source, so
+    // Ctrl+Shift+[ / ] never report `bracketLeft` / `bracketRight`.
     //
-    // The fix: bind the brace variants too, macOS only. Windows/Linux
-    // are untouched (VK_OEM_4/VK_OEM_5 and USB-HID mapping always report
-    // `bracketLeft`/`bracketRight`, and this branch never executes
-    // there). The aliases describe the same physical chord (⌘⇧[ / ⌘⇧]),
-    // so the Settings → Shortcuts manifest intentionally does not list
-    // them separately.
+    // - macOS: `FlutterEmbedderKeyResponder.handleDownEvent` prefers
+    //   the layout map, which only populates letters/digits; symbol
+    //   keys fall back to `charactersIgnoringModifiers`, which per
+    //   Apple's contract ignores all modifiers EXCEPT Shift: ⌘⇧[
+    //   reports `{` → logical `braceLeft` (0x7b), ⌘⇧] reports `}` →
+    //   `braceRight` (0x7d).
+    // - Linux: `fl_key_event_get_keyval` returns GDK's keyval for
+    //   the event, and GDK translates the hardware key with the
+    //   current XKB modifier state — Shift+[ on a US layout is keyval
+    //   `braceleft` (0x7b) → logical `braceLeft` via the embedder's
+    //   unicode path (keyval < 256). The GTK embedder's layout-goal
+    //   system (`fl_keyboard_manager.cc` guarantee_layout) overrides
+    //   this with a keycode→logical US map, but only for *mandatory*
+    //   goals — letters and digits — which is why Ctrl+Shift+N
+    //   reports `keyN` and Ctrl+Shift+1..9 report `digit1..9` on
+    //   Linux. Bracket goals are non-mandatory, and any ASCII clue
+    //   (< 256, `is_eascii`) disqualifies the US fallback, so
+    //   brackets take the keyval path.
     //
-    // Passthrough note: before these aliases existed, ⌘⇧{ / ⌘⇧} fell
-    // through the early-key handler and were encoded into PTY bytes by
-    // `flutter_alacritty`'s `_onKeyFallback`. They are now intentionally
-    // consumed by the app. If a future "key passthrough" / user keymap
-    // feature surfaces, remember that these chords are no longer
-    // reachable from the shell on macOS.
-    if (Platform.isMacOS) {
+    // The fix: bind the brace variants too, on macOS and Linux.
+    // Windows is untouched — its embedder derives the logical key
+    // from the virtual key code (VK_OEM_4/VK_OEM_6), which Windows
+    // keeps at the unshifted base level, so Ctrl+Shift+[ / ] report
+    // `bracketLeft`/`bracketRight` and the aliases stay unbound there.
+    // The aliases describe the same physical chord (Ctrl/⌘+Shift+[ /
+    // ]), so the Settings → Shortcuts manifest intentionally does not
+    // list them separately.
+    //
+    // Passthrough note: before these aliases existed, the brace chords
+    // fell through the early-key handler and were encoded into PTY
+    // bytes by `flutter_alacritty`'s `_onKeyFallback`. They are now
+    // intentionally consumed by the app. If a future "key passthrough"
+    // / user keymap feature surfaces, remember that these chords are
+    // no longer reachable from the shell on macOS/Linux.
+    if (Platform.isMacOS || Platform.isLinux) {
       bindings[primary(LogicalKeyboardKey.braceRight, shift: true)] =
           nextWorkspace;
       bindings[primary(LogicalKeyboardKey.braceLeft, shift: true)] =

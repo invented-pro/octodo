@@ -144,12 +144,16 @@ void main() {
       );
     });
 
-    // macOS reports ⌘⇧[ / ⌘⇧] as braceLeft / braceRight (see the long
-    // comment in AppShellBindings.build), so the app binds the brace
-    // variants as aliases on macOS only. Windows / Linux must NOT have
-    // them — Ctrl+Shift+[ / ] already report bracketLeft / bracketRight
-    // there, and the extra entries would only widen the binding surface.
-    test('macOS braceLeft/braceRight workspace-cycle aliases (macOS only)', () {
+    // macOS reports ⌘⇧[ / ⌘⇧] as braceLeft / braceRight (layout map
+    // misses symbol keys; `charactersIgnoringModifiers` keeps Shift),
+    // and Linux reports Ctrl+Shift+[ / ] the same way (GDK keyvals
+    // are translated with the current XKB state, so Shift+[ is
+    // keyval `braceleft`) — see the long comment in
+    // AppShellBindings.build. Both platforms bind the brace variants
+    // as aliases. Windows must NOT have them — Ctrl+Shift+[ / ]
+    // report bracketLeft / bracketRight there (VK-based, unshifted),
+    // and the extra entries would only widen the binding surface.
+    test('braceLeft/braceRight workspace-cycle aliases (macOS + Linux)', () {
       String? fired;
       final bindings = AppShellBindings.build(
         toggleDrawer: () {},
@@ -172,20 +176,23 @@ void main() {
 
       final braceLeft = aliasFor(LogicalKeyboardKey.braceLeft);
       final braceRight = aliasFor(LogicalKeyboardKey.braceRight);
-      if (Platform.isMacOS) {
-        // Aliases exist, use the platform primary modifier (meta), and
-        // dispatch to the same callbacks as the bracket bindings.
-        expect(braceLeft, isNotNull, reason: '⌘⇧[ reports braceLeft');
-        expect(braceRight, isNotNull, reason: '⌘⇧] reports braceRight');
-        expect(braceLeft!.meta, isTrue);
-        expect(braceRight!.meta, isTrue);
+      if (Platform.isMacOS || Platform.isLinux) {
+        // Aliases exist, use the platform primary modifier (⌘ on
+        // macOS, Ctrl on Linux), and dispatch to the same callbacks
+        // as the bracket bindings.
+        expect(braceLeft, isNotNull, reason: 'Ctrl/⌘+Shift+[ reports braceLeft');
+        expect(braceRight, isNotNull, reason: 'Ctrl/⌘+Shift+] reports braceRight');
+        expect(braceLeft!.meta, Platform.isMacOS);
+        expect(braceLeft.control, Platform.isLinux);
+        expect(braceRight!.meta, Platform.isMacOS);
+        expect(braceRight.control, Platform.isLinux);
         bindings[braceLeft]!();
         expect(fired, 'previous');
         bindings[braceRight]!();
         expect(fired, 'next');
       } else {
-        expect(braceLeft, isNull, reason: 'no brace alias off-macOS');
-        expect(braceRight, isNull, reason: 'no brace alias off-macOS');
+        expect(braceLeft, isNull, reason: 'no brace alias on Windows');
+        expect(braceRight, isNull, reason: 'no brace alias on Windows');
       }
     });
   });
