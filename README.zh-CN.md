@@ -2,11 +2,11 @@
 
 **为 CLI 重度玩家打造的终端复合体。**
 
-一个原生基于 Rust + Flutter 构建、面向 Windows 与 macOS 的多工作区终端复合体。不是臃肿的网页套壳——内存寸土寸金，你的注意力亦然。
+一个原生基于 Rust + Flutter 构建、面向 Windows、macOS 与 Linux 的多工作区终端复合体。不是臃肿的网页套壳——内存寸土寸金，你的注意力亦然。
 
 [English](./README.md) | 简体中文
 
-[![Release](https://img.shields.io/github/v/release/invented-pro/octodo)](https://github.com/invented-pro/octodo/releases/latest) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-0078d4)](https://github.com/invented-pro/octodo/releases/latest)
+[![Release](https://img.shields.io/github/v/release/invented-pro/octodo)](https://github.com/invented-pro/octodo/releases/latest) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4)](https://github.com/invented-pro/octodo/releases/latest)
 
 ---
 
@@ -23,20 +23,20 @@
 - **Rust 驱动的速度 + 流畅的 Flutter UI**
   - 基于 **Alacritty** 内核的即时 GPU 渲染，零卡顿表现。
   - 流畅的多窗格布局与灵活的标签管理。
-  - 为 **Windows** 与 **macOS** 原生构建并优化。
+  - 为 **Windows**、**macOS** 与 **Linux** 原生构建并优化。
 - **键盘优先，鼠标也顺手**
   - 闪电般的快捷键驱动导航。
-  - 顺滑的**划选即复制**与**右键即粘贴**——单手操作毫不费力。
+  - 顺滑的**划选即复制**与**右键即粘贴**，支持**拖拽**重排标签。
 - **智能通知**
   - 长时任务完成时即刻推送通知。
-  - 集成代理监控，让你随时掌握状态。
+  - 集成智能体监控，让你随时掌握状态。
 - **零配置自动发现**
   - 开箱即用，自动检测所有本地 shell。
-  - 与 **WSL** 发行版无缝自动集成。
+  - **WSL** 发行版自动集成。
 - **全局多语言支持**
   - 完整、原生兼容多语言 IME 输入。
 - **省心的自我维护**
-  - Windows 与 macOS 均支持无摩擦的**应用内自动升级**。
+  - Windows、macOS 与 Linux 均支持无摩擦的**应用内自动升级**。
 
 
 ---
@@ -47,7 +47,7 @@
 | --- | --------------------- | ------------- |
 | 1   | Windows               | ✅            |
 | 2   | macOS (Apple Silicon) | ✅            |
-| 3   | Linux                 | ⏳ 即将推出   |
+| 3   | Linux (x64 / arm64)   | ✅            |
 
 ---
 
@@ -75,6 +75,17 @@
     >> xattr -dr com.apple.quarantine /Applications/Octodo.app
     >> ```
 
+### Linux（x64 / arm64）
+
+- 根据主机架构，从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `octodo-v<version>-linux-x64.AppImage` 或 `octodo-v<version>-linux-arm64.AppImage`。
+- 添加可执行权限后运行：
+    ```bash
+    chmod +x octodo-v<version>-linux-*.AppImage
+    ./octodo-v<version>-linux-*.AppImage
+    ```
+    >- 若 AppImage 无法启动，请通过包管理器安装 **FUSE 2**（`libfuse2`），或改用 `--appimage-extract-and-run` 运行。
+    >- 可选：对照发布侧附带的 `.sha256` 校验文件验证下载。
+
 ---
 
 ## 从源码构建
@@ -84,6 +95,7 @@
 * **Rust 工具链**（通过 [rustup.rs](https://rustup.rs) 安装）
 * **平台构建工具**：
   * **Windows**：Windows 10/11，安装 Visual Studio（**使用 C++ 的桌面开发**工作负载）。
+  * **Linux**：Clang、CMake、Ninja 与 GTK3 开发头文件（如 `sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev`）。
   * **macOS**：Xcode Command Line Tools。
 
 ### 编译步骤
@@ -92,6 +104,8 @@ git clone https://github.com/invented-pro/octodo.git
 cd octodo
 flutter pub get
 flutter run -d windows    # Windows 主机
+# 或
+flutter run -d linux      # Linux 主机
 # 或
 flutter run -d macos      # macOS 主机
 ```
@@ -103,7 +117,7 @@ flutter run -d macos      # macOS 主机
 
 ### 工作区（侧边栏）
 
-| Windows              | macOS               | 动作                             |
+| Windows / Linux      | macOS               | 动作                             |
 | -------------------- | ------------------- | -------------------------------- |
 | `Ctrl+Shift+B`       | `Cmd+Shift+B`       | 切换工作区抽屉                   |
 | `Ctrl+Shift+N`       | `Cmd+Shift+N`       | 新建工作区（自动聚焦）           |
@@ -116,8 +130,8 @@ flutter run -d macos      # macOS 主机
 
 ### 窗格（分屏与焦点）
 
-| Windows        | macOS         | 动作                     |
-| -------------- | ------------- | ------------------------ |
+| Windows / Linux  | macOS         | 动作                     |
+| ---------------- | ------------- | ------------------------ |
 | `Ctrl+Shift+D` | `Cmd+Shift+D` | 垂直分屏（右侧）         |
 | `Ctrl+Shift+E` | `Cmd+Shift+E` | 水平分屏（下方）         |
 | `Ctrl+Shift+↑` | `Cmd+Shift+↑` | 焦点移到上方窗格         |
@@ -128,7 +142,7 @@ flutter run -d macos      # macOS 主机
 
 ### 标签（聚焦窗格内）
 
-| Windows          | macOS          | 动作                   |
+| Windows / Linux  | macOS          | 动作                   |
 | ---------------- | -------------- | ---------------------- |
 | `Ctrl+Shift+T`   | `Cmd+Shift+T`  | 在聚焦窗格打开新标签   |
 | `Ctrl+Shift+K`   | `Cmd+Shift+K`  | 关闭当前标签           |
@@ -138,7 +152,7 @@ flutter run -d macos      # macOS 主机
 
 ### 终端引擎（剪贴板与缩放）
 
-| Windows                        | macOS                        | 动作               |
+| Windows / Linux               | macOS                        | 动作               |
 | ------------------------------ | ---------------------------- | ------------------ |
 | `Ctrl+Shift+C` / `Ctrl+Insert` | `Cmd+Shift+C` / `Cmd+Insert` | 复制选中内容       |
 | `Ctrl+V` / `Ctrl+Shift+V`      | `Cmd+V` / `Cmd+Shift+V`      | 从剪贴板粘贴       |
@@ -221,7 +235,7 @@ Octodo 实现了 opencode 所需的终端契约的两端：一方面响应 kitty
 
 ### 不会消失的横幅
 
-macOS 与 Windows 都会在数秒后自动关闭原生横幅。Octodo 叠加了四层机制，确保即便无人值守，通知也不可能被错过：
+Windows、macOS 与 Linux 都会在数秒后自动关闭原生横幅。Octodo 叠加了四层机制，确保即便无人值守，通知也不可能被错过：
 
 - **应用内持久横幅**——每条通知同时会在 Octodo 窗口右上角以卡片形式展示，直到你点击（跳转到对应终端）或主动关闭。来自同一终端的重复事件会合并为一张带 ×N 计数的卡片。
 - **未读前持续提醒**——只要通知仍处于未读状态且 Octodo 处于后台，横幅就会每 30 秒重新推送一次（使用同一 id，因此通知中心会替换而非堆叠），直到你点击、打开终端或手动滑掉。可在 **设置 → 通用 → 未读前持续提醒** 中配置。

@@ -2,11 +2,11 @@
 
 **A Terminal Complex for CLI-Maxing Developers.**
 
-A multi-workspace terminal complex built natively on Rust + Flutter for Windows and macOS. Not a bloated web wrapper—RAM is too expensive, same as your attention.
+A multi-workspace terminal complex built natively on Rust + Flutter for Windows, macOS, and Linux. Not a bloated web wrapper—RAM is too expensive, same as your attention.
 
 English | [中文简体](./README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/release/invented-pro/octodo)](https://github.com/invented-pro/octodo/releases/latest) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-0078d4)](https://github.com/invented-pro/octodo/releases/latest)
+[![Release](https://img.shields.io/github/v/release/invented-pro/octodo)](https://github.com/invented-pro/octodo/releases/latest) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078d4)](https://github.com/invented-pro/octodo/releases/latest)
 
 ---
 
@@ -23,10 +23,10 @@ English | [中文简体](./README.zh-CN.md)
 * **Rust-Fueled Speed + Sleek Flutter UI**
   * Instant GPU rendering via **Alacritty** core for zero-stutter performance.
   * Fluid, multi-pane layouts with flexible tab management. 
-  * Native, optimized builds for **Windows** and **macOS**.
+  * Native, optimized builds for **Windows**, **macOS**, and **Linux**.
 * **Keyboard-First, Mouse-Friendly**
   * Lightning-fast, shortcut-driven navigation.
-  * Seamless **select-to-copy** and **right-click-to-paste** for effortless one-handed use.
+  * **select-to-copy** and **right-click-to-paste**, **drag-and-drop** for tab re-arrangement.
 * **Smart Notification**
   * Instant notifications for completed long-running tasks.
   * Integrated agent monitoring to keep you informed.
@@ -36,7 +36,7 @@ English | [中文简体](./README.zh-CN.md)
 * **Global Multilingual Support**
   * Full, native compatibility with multi-language IME inputs.
 * **Effortless Self-Maintenance**
-  * Frictionless, in-app **auto-updates** for both Windows and macOS.
+  * Frictionless, in-app **auto-updates** for Windows, macOS, and Linux.
 
 
 ---
@@ -47,7 +47,7 @@ English | [中文简体](./README.zh-CN.md)
 | --- | --------------------- | ------------- |
 | 1   | Windows               | ✅             |
 | 2   | macOS (Apple Silicon) | ✅             |
-| 3   | Linux                 | ⏳ Coming Soon |
+| 3   | Linux (x64 / arm64)   | ✅             |
 
 ---
 
@@ -75,6 +75,17 @@ English | [中文简体](./README.zh-CN.md)
     >> xattr -dr com.apple.quarantine /Applications/Octodo.app
     >> ```
 
+### Linux (x64 / arm64)
+
+- Download `octodo-v<version>-linux-x64.AppImage` or `octodo-v<version>-linux-arm64.AppImage` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest) per your host arch.
+- Make it executable, then run:
+    ```bash
+    chmod +x octodo-v<version>-linux-*.AppImage
+    ./octodo-v<version>-linux-*.AppImage
+    ```
+    >- If the AppImage fails to launch, install **FUSE 2** (`libfuse2`) via your package manager, or run with `--appimage-extract-and-run`.
+    >- Optional: verify the download against the published `.sha256` sidecar file.
+
 ---
 
 ## Build From Source
@@ -84,6 +95,7 @@ English | [中文简体](./README.zh-CN.md)
 * **Rust Toolchain** (Installed via [rustup.rs](https://rustup.rs))
 * **Platform Build Tools**: 
   * **Windows**: Windows 10/11 with Visual Studio (**Desktop development with C++** workload).
+  * **Linux**: Clang, CMake, Ninja, GTK3 development headers (e.g. `sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev`).
   * **macOS**: Xcode Command Line Tools.
 
 ### Compilation steps
@@ -92,6 +104,8 @@ git clone https://github.com/invented-pro/octodo.git
 cd octodo
 flutter pub get
 flutter run -d windows    # For Windows hosts
+# or
+flutter run -d linux      # For Linux hosts
 # or
 flutter run -d macos      # For macOS hosts
 ```
@@ -103,7 +117,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for unit tests, lint policies, and our 
 
 ### Workspaces (Sidebar)
 
-| Windows              | macOS               | Action                                          |
+| Windows / Linux      | macOS               | Action                                          |
 | -------------------- | ------------------- | ----------------------------------------------- |
 | `Ctrl+Shift+B`       | `Cmd+Shift+B`       | Toggle workspace drawer                         |
 | `Ctrl+Shift+N`       | `Cmd+Shift+N`       | Create new workspace (auto-focus)               |
@@ -116,8 +130,8 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for unit tests, lint policies, and our 
 
 ### Panes (Splitting & Focus)
 
-| Windows        | macOS         | Action                                 |
-| -------------- | ------------- | -------------------------------------- |
+| Windows / Linux  | macOS         | Action                                 |
+| ---------------- | ------------- | -------------------------------------- |
 | `Ctrl+Shift+D` | `Cmd+Shift+D` | Split focused pane vertically (Right)  |
 | `Ctrl+Shift+E` | `Cmd+Shift+E` | Split focused pane horizontally (Down) |
 | `Ctrl+Shift+↑` | `Cmd+Shift+↑` | Move focus to pane above               |
@@ -128,7 +142,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for unit tests, lint policies, and our 
 
 ### Tabs (Inside Focus Pane)
 
-| Windows          | macOS          | Action                       |
+| Windows / Linux  | macOS          | Action                       |
 | ---------------- | -------------- | ---------------------------- |
 | `Ctrl+Shift+T`   | `Cmd+Shift+T`  | Open new tab in focused pane |
 | `Ctrl+Shift+K`   | `Cmd+Shift+K`  | Close active tab             |
@@ -138,7 +152,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for unit tests, lint policies, and our 
 
 ### Terminal Engine (Clipboard & Zoom)
 
-| Windows                        | macOS                        | Action                      |
+| Windows / Linux               | macOS                        | Action                      |
 | ------------------------------ | ---------------------------- | --------------------------- |
 | `Ctrl+Shift+C` / `Ctrl+Insert` | `Cmd+Shift+C` / `Cmd+Insert` | Copy active selection       |
 | `Ctrl+V` / `Ctrl+Shift+V`      | `Cmd+V` / `Cmd+Shift+V`      | Paste from clipboard        |
@@ -221,7 +235,7 @@ Notifications are suppressed while you're looking at the terminal that raised th
 
 ### Banners that don't vanish
 
-macOS and Windows both auto-dismiss native banners after a few seconds. Octodo layers four mechanisms so an unattended notification stays impossible to miss:
+Windows, macOS, and Linux all auto-dismiss native banners after a few seconds. Octodo layers four mechanisms so an unattended notification stays impossible to miss:
 
 - **Persistent in-app banners** — every notification also shows as a card in the top-right corner of the Octodo window, where it stays until you click it (jump to the terminal) or dismiss it. Repeated events from the same terminal coalesce into one card with a ×N counter.
 - **Re-alert until read** — while a notification is still unread and Octodo is in the background, the banner is re-posted every 30 seconds (same id, so Notification Center replaces instead of stacking) until you click it, open the terminal, or swipe it away. Controlled by **Settings → General → Keep re-alerting until read**.
