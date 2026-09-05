@@ -7,7 +7,6 @@ name: release
 #   - octodo-v1.2.3-macos-arm64.zip       + .sha256   (macOS assets)
 #   - Octodo-v1.2.3-macos-arm64.dmg                   (macOS first-install)
 #   - octodo-v1.2.3-linux-x64.AppImage   + .sha256    (Linux assets)
-#   - octodo-v1.2.3-linux-arm64.AppImage + .sha256    (Linux assets)
 #   - manifest.json                      (R2 mirror only — built by the
 #     publish-manifest job AFTER both platform jobs finish, so a single
 #     multi-platform manifest describes the release; no per-job races)
@@ -580,16 +579,21 @@ jobs:
           security delete-keychain "$KEYCHAIN" || true
 
   # -----------------------------------------------------------------
-  # Linux AppImages (x86_64 + aarch64). The AppImage IS the Linux
+  # Linux AppImages (x86_64 only). The AppImage IS the Linux
   # distribution: the in-app updater downloads it directly (token
-  # "linux-x64" / "linux-arm64") and swaps it over $APPIMAGE via
+  # "linux-x64") and swaps it over $APPIMAGE via
   # lib/src/update/installer/linux_apply_script.dart.
   #
-  # Ubuntu 22.04 on BOTH legs pins the glibc baseline (2.35) so
-  # older distributions stay supported; ubuntu-latest (24.04)
-  # would silently raise it to 2.39. The arm64 leg uses GitHub's
-  # native arm runners (free for public repos) — QEMU cross-builds
-  # are ~10x slower and often flaky.
+  # Ubuntu 22.04 pins the glibc baseline (2.35) so older
+  # distributions stay supported; ubuntu-latest (24.04) would
+  # silently raise it to 2.39.
+  #
+  # NOTE: no arm64 leg. Flutter does not publish linux-arm64 SDK
+  # artifacts (releases_linux.json carries no dart_sdk_arch=arm64
+  # entries), so subosito/flutter-action cannot resolve an SDK on
+  # ubuntu-22.04-arm ("Unable to determine Flutter version ...
+  # architecture: arm64"). Re-add the matrix leg + aarch64 SHA
+  # pins when Flutter ships arm64 Linux SDKs.
   # -----------------------------------------------------------------
   build-linux:
     strategy:
@@ -600,10 +604,6 @@ jobs:
             arch: x86_64
             runs-on: ubuntu-22.04
             token: linux-x64
-          - flutter_arch: arm64
-            arch: aarch64
-            runs-on: ubuntu-22.04-arm
-            token: linux-arm64
     runs-on: ${{ matrix.runs-on }}
     env:
       R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
@@ -715,15 +715,12 @@ jobs:
           arch="${{ matrix.arch }}"
           declare -A LINUXDEPLOY_SHA=(
             [x86_64]=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
-            [aarch64]=620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff
           )
           declare -A APPIMAGETOOL_SHA=(
             [x86_64]=df3baf5ca5facbecfc2f3fa6713c29ab9cefa8fd8c1eac5d283b79cab33e4acb
-            [aarch64]=334e77beb67fc1e71856c29d5f3f324ca77b0fde7a840fdd14bd3b88c25c341f
           )
           declare -A RUNTIME_SHA=(
             [x86_64]=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
-            [aarch64]=00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
           )
           LINUXDEPLOY_TAG="1-alpha-20251107-1"
           APPIMAGETOOL_TAG="13"
@@ -786,11 +783,13 @@ jobs:
           # EXTRACT_AND_RUN so no FUSE is needed on the runner.
           # The app must be alive at BOTH probes (1 s and 6 s) — a
           # build that crashes after GTK init must fail the release,
-          # not pass on first sighting.
+          # not pass on first sighting. NOTE: "$PWD/$AI", not "$AI" —
+          # a bare filename is PATH-searched by xvfb-run's shell and
+          # fails with "not found" even though the file exists.
           # ----------------------------------------------------------
           echo "==> launch smoke test (xvfb)"
           APPIMAGE_EXTRACT_AND_RUN=1 GDK_BACKEND=x11 \
-            xvfb-run -a -s "-screen 0 1280x800x24" "$AI" &
+            xvfb-run -a -s "-screen 0 1280x800x24" "$PWD/$AI" &
           alive=0
           for attempt in 1 2; do
             sleep $(( attempt == 1 ? 1 : 5 ))
@@ -1041,7 +1040,6 @@ jobs:
                   ("macos-arm64", ".zip", "application/zip"),
                   ("macos-x64", ".zip", "application/zip"),
                   ("linux-x64", ".AppImage", "application/vnd.appimage"),
-                  ("linux-arm64", ".AppImage", "application/vnd.appimage"),
               ):
                   for suffix, sctype in (
                       (payload_ext, ctype),
@@ -1065,7 +1063,6 @@ jobs:
               ("windows-x64", ".zip"),
               ("macos-arm64", ".zip"),
               ("linux-x64", ".AppImage"),
-              ("linux-arm64", ".AppImage"),
           ):
               for suffix in (payload_ext, payload_ext + ".sha256"):
                   if f"octodo-v{ver}-{platform}{suffix}" not in got:

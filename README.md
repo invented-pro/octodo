@@ -47,7 +47,8 @@ English | [中文简体](./README.zh-CN.md)
 | --- | --------------------- | ------------- |
 | 1   | Windows               | ✅             |
 | 2   | macOS (Apple Silicon) | ✅             |
-| 3   | Linux (x64 / arm64)   | ✅             |
+| 3   | Linux (x64)           | ✅             |
+| 4   | Linux (arm64)         | ⏳ Coming Soon |
 
 ---
 
@@ -75,16 +76,17 @@ English | [中文简体](./README.zh-CN.md)
     >> xattr -dr com.apple.quarantine /Applications/Octodo.app
     >> ```
 
-### Linux (x64 / arm64)
+### Linux (x64)
 
-- Download `octodo-v<version>-linux-x64.AppImage` or `octodo-v<version>-linux-arm64.AppImage` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest) per your host arch.
+- Download `octodo-v<version>-linux-x64.AppImage` from [Latest Releases](https://github.com/invented-pro/octodo/releases/latest).
 - Make it executable, then run:
     ```bash
-    chmod +x octodo-v<version>-linux-*.AppImage
-    ./octodo-v<version>-linux-*.AppImage
+    chmod +x octodo-v<version>-linux-x64.AppImage
+    ./octodo-v<version>-linux-x64.AppImage
     ```
     >- If the AppImage fails to launch, install **FUSE 2** (`libfuse2`) via your package manager, or run with `--appimage-extract-and-run`.
     >- Optional: verify the download against the published `.sha256` sidecar file.
+    >- arm64 builds are coming soon — blocked on Flutter publishing linux-arm64 SDK artifacts.
 
 ---
 

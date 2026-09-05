@@ -936,7 +936,16 @@ env | grep -c '^OCTODO_UPDATE' > "${envMarker.path}" || echo 0 > "${envMarker.pa
       }
       expect(appeared, isTrue,
           reason: 'stub bundle did not launch within 10 s');
-      expect((await envMarker.readAsString()).trim(), '0',
+      var envCount = '';
+      for (var i = 0; i < 50 && envCount.isEmpty; i++) {
+        if (await envMarker.exists()) {
+          envCount = (await envMarker.readAsString()).trim();
+        }
+        if (envCount.isEmpty) {
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+        }
+      }
+      expect(envCount, '0',
           reason: 'helper env vars must not leak into the LS-launched app');
     }, timeout: const Timeout(Duration(seconds: 60)));
   });
