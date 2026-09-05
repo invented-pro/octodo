@@ -1,12 +1,27 @@
 name: msstore-publish
 
 # Publishes the MSIX build of the tagged release to the Microsoft
-# Store. Intentionally a SEPARATE workflow from release.yml: both
-# trigger on the same `v*` tag and run concurrently, so the slow
-# Store submission (baseline validation blocks in-job; full
-# certification takes hours/days) can never delay or fail the
-# zip / SHA-256 / R2 mirror / GitHub-Release assets that release.yml
-# produces. Wall-clock is max(build, publish), not the sum.
+# Store. Intentionally a SEPARATE workflow from release.yml, but
+# SEQUENCED after it via workflow_run: this workflow fires only
+# when a run of the "release" workflow (which itself only runs on
+# `v*` tag pushes) completes with conclusion=success. That gates
+# the Store submission on the GitHub/R2 assets actually being
+# built, hashed, and published — a release whose builds or
+# manifest failed never touches the Store pipeline. Trade-off:
+# the submission starts only after release.yml finishes instead
+# of in parallel (wall-clock is the sum, not max, of the two);
+# the slow part (full Store certification, hours/days) is
+# asynchronous either way.
+#
+# workflow_run caveat: the event fires in the context of the
+# DEFAULT BRANCH, not the tag — github.ref_name is "main" here.
+# The tag is recovered from github.event.workflow_run.head_branch
+# (for tag-triggered runs it holds the tag name) and used for
+# both checkout and version derivation below. Also: the event
+# only fires for workflows present on the default branch, and a
+# full "re-run all jobs" of release.yml re-fires this workflow
+# (the Store then rejects the duplicate version — republishing
+# requires a new patch tag, same as before).
 #
 # workflow_dispatch (with a version input) allows testing the whole
 # pipeline without cutting a release tag.
@@ -41,8 +56,9 @@ name: msstore-publish
 # with Developer role). The v* tag trigger is restored; workflow_dispatch
 # stays for testing without cutting a release.
 on:
-  push:
-    tags: ['v*']
+  workflow_run:
+    workflows: ['release']
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
@@ -59,14 +75,26 @@ permissions:
 jobs:
   publish-msstore:
     runs-on: windows-latest
-    # Skip the Store path for prerelease tags (e.g. v1.5.2-rc.1). The
-    # Store has no prerelease channel — a submission that clears
-    # certification goes live to ALL Store users, so RC builds must
-    # stay on the GitHub/R2 side only (release.yml still ships them,
-    # marked as GitHub prereleases). Manual dispatch always runs.
-    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-') }}
+    # Gate on the release workflow's success (tag runs only —
+    # manual dispatch always runs). Also skips the Store path for
+    # prerelease tags (e.g. v1.5.2-rc.1): the Store has no
+    # prerelease channel — a submission that clears certification
+    # goes live to ALL Store users, so RC builds must stay on the
+    # GitHub/R2 side only (release.yml still ships them, marked as
+    # GitHub prereleases). head_branch carries the tag name here
+    # because workflow_run events fire from the default branch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       !contains(github.event.workflow_run.head_branch, '-'))
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_run events check out the default branch by
+          # default; fetch the release tag instead. On manual
+          # dispatch head_branch is empty and this falls back to
+          # the dispatch ref.
+          ref: ${{ github.event.workflow_run.head_branch || github.ref }}
 
       # Pin to the same Flutter version as release.yml / mise.toml for
       # reproducible builds. cache: true preserves ~/.pub-cache across
@@ -135,10 +163,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # Tag pushes: github.ref_name is e.g. "v1.2.3" (strip the
-          # "v"). Manual dispatch: take the version from the input.
+          # Tag runs (via workflow_run): the tag comes from the
+          # completed release run's head_branch (e.g. "v1.2.3",
+          # strip the "v"). Manual dispatch: take the version from
+          # the input.
           $ver = "${{ inputs.version }}"
-          if (-not $ver) { $ver = "${{ github.ref_name }}" -replace '^v','' }
+          if (-not $ver) { $ver = "${{ github.event.workflow_run.head_branch }}" -replace '^v','' }
 
           if ($ver -notmatch '^\d+\.\d+\.\d+$') {
             throw "Version '$ver' is not semver-shaped (expected X.Y.Z)"
