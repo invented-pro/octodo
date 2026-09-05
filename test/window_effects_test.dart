@@ -4,6 +4,7 @@
 // deterministic and platform-agnostic (no real `user32.dll` calls).
 
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -135,6 +136,57 @@ void main() {
       expect(acrylicMaxAttempts, greaterThanOrEqualTo(2));
       expect(acrylicMaxAttempts, lessThanOrEqualTo(10));
       expect(acrylicRetryDelay, lessThanOrEqualTo(const Duration(seconds: 1)));
+    });
+  });
+
+  group('effectiveBackgroundAlpha', () {
+    test('frosted applies the frost level where the backdrop exists', () {
+      expect(
+        effectiveBackgroundAlphaCore(
+          frosted: true,
+          frostLevel: 0.05,
+          opacity: 0.9,
+          degradeFrostToOpacity: false,
+        ),
+        0.05,
+      );
+    });
+
+    test('frosted degrades to the plain opacity where it does not', () {
+      expect(
+        effectiveBackgroundAlphaCore(
+          frosted: true,
+          frostLevel: 0.05,
+          opacity: 0.9,
+          degradeFrostToOpacity: true,
+        ),
+        0.9,
+      );
+    });
+
+    test('unfrosted always uses the plain opacity', () {
+      expect(
+        effectiveBackgroundAlphaCore(
+          frosted: false,
+          frostLevel: 0.05,
+          opacity: 0.4,
+          degradeFrostToOpacity: false,
+        ),
+        0.4,
+      );
+      expect(
+        effectiveBackgroundAlphaCore(
+          frosted: false,
+          frostLevel: 0.05,
+          opacity: 0.4,
+          degradeFrostToOpacity: true,
+        ),
+        0.4,
+      );
+    });
+
+    test('degradation gate is Linux-only', () {
+      expect(frostDegradesToOpacity, Platform.isLinux);
     });
   });
 

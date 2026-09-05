@@ -6,6 +6,7 @@
 import 'package:flutter/material.dart';
 import 'palette_context.dart';
 import 'palettes.dart';
+import '../window/window_effects.dart' show frostDegradesToOpacity;
 
 /// Builds the app's [ThemeData] for [palette].
 ///
@@ -25,10 +26,12 @@ import 'palettes.dart';
 /// acrylic backdrop (see `window_effects.dart`) then supplies the blur
 /// + tint uniformly, so the Flutter layers (grid default backgrounds,
 /// drawer, tab bar) composite over frosted desktop without double
-/// tinting. [backgroundOpacity] still carries the effective alpha
-/// (frost level when frosted, opacity otherwise) and is published via
-/// [BackgroundAlphaExtension] so chrome widgets can track it without
-/// reading the settings store directly.
+/// tinting. On Linux, where no native backdrop exists, frosted
+/// degrades (`frostDegradesToOpacity`): the scaffold keeps the plain
+/// `surface0` @ alpha treatment. [backgroundOpacity] still carries
+/// the effective alpha (frost level when frosted, opacity otherwise)
+/// and is published via [BackgroundAlphaExtension] so chrome widgets
+/// can track it without reading the settings store directly.
 ///
 /// Hover state is intentionally aggressive: every focusable Material
 /// widget ([TextButton], [FilledButton], [IconButton], …) gets the
@@ -48,10 +51,15 @@ ThemeData buildAppTheme({
   final hoverOverlay = palette.hoverOverlay;
   final focusOverlay = palette.focusOverlay;
   final alpha = backgroundOpacity.clamp(0.0, 1.0);
+  // Frosted only removes the in-app tint where a native backdrop
+  // will supply it; on Linux the frosted toggle degrades to the
+  // plain translucent treatment.
+  final frostedEffective = frosted && !frostDegradesToOpacity;
   return base.copyWith(
     // The scaffold is the single uniform terminal background layer.
-    //  • Frosted: made fully transparent so the native acrylic backdrop
-    //    (blur + tint) shows through without double tinting.
+    //  • Frosted (effective): made fully transparent so the native
+    //    acrylic backdrop (blur + tint) shows through without double
+    //    tinting.
     //  • Plain: paints `surface0` at `backgroundOpacity` alpha so the
     //    desktop (reached through the transparent-gradient native window)
     //    shows through uniformly — including pane gutters / borders /
@@ -59,7 +67,7 @@ ThemeData buildAppTheme({
     //    default-background cells are left transparent in transparent
     //    mode). The drawer / tab bar paint their own surfaces on top.
     scaffoldBackgroundColor:
-        frosted ? Colors.transparent : palette.surface0.withValues(alpha: alpha),
+        frostedEffective ? Colors.transparent : palette.surface0.withValues(alpha: alpha),
     extensions: [
       ThemePaletteExtension(palette),
       BackgroundAlphaExtension(alpha),
@@ -185,7 +193,8 @@ ThemeData buildAppTheme({
 }
 
 /// Carries the effective background alpha (the frost level when
-/// [buildAppTheme] was called with `frosted: true`, the opacity
+/// [buildAppTheme] was called with `frosted: true` — except on
+/// Linux, where frosted degrades to the plain opacity — the opacity
 /// otherwise) on the [ThemeData] so chrome widgets (drawer, tab bar)
 /// can render at the same translucency as the terminal background
 /// without each having to read the settings store. Installed by

@@ -25,6 +25,40 @@ static void my_application_activate(GApplication* application) {
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
+  // Transparent-window support. The terminal scene renders with
+  // alpha whenever appearance.backgroundOpacity < 1.0, and the
+  // engine clears the GL buffer behind it with the FlView
+  // background color set below. For that alpha to reach the
+  // screen two native pieces must be in place before the window
+  // is realized:
+  //
+  //   * X11: the toplevel GdkWindow must have a 32-bit RGBA visual —
+  //     GTK will not pick one from CSS background alpha alone, and
+  //     without it the compositor receives an opaque buffer. On X11
+  //     sessions *without* a compositor (rare; some tiling WMs) the
+  //     transparent regions composite to black — a pre-existing
+  //     limitation, identical to the old opaque-black behavior.
+  //   * app-paintable, so GTK doesn't paint the theme's opaque
+  //     window background behind the Flutter surface. Note this
+  //     also suppresses the CSS that window_manager's
+  //     setBackgroundColor installs (GTK only renders a window's
+  //     CSS background when not app-paintable), making that call
+  //     visually inert on Linux — the scene alpha and the clear
+  //     color below are the sole source of transparency.
+  //
+  // On Wayland every surface is ARGB, so only the app-paintable
+  // flag (and the FlView clear color below) matters there.
+  gtk_widget_set_app_paintable(GTK_WIDGET(window), TRUE);
+#ifdef GDK_WINDOWING_X11
+  GdkScreen* screen = gtk_window_get_screen(window);
+  if (GDK_IS_X11_SCREEN(screen)) {
+    GdkVisual* rgba_visual = gdk_screen_get_rgba_visual(screen);
+    if (rgba_visual != nullptr) {
+      gtk_widget_set_visual(GTK_WIDGET(window), rgba_visual);
+    }
+  }
+#endif
+
   // Use a header bar when running in GNOME as this is the common style used
   // by applications and is the setup most users will be using (e.g. Ubuntu
   // desktop).
@@ -34,7 +68,6 @@ static void my_application_activate(GApplication* application) {
   // if future cases occur).
   gboolean use_header_bar = TRUE;
 #ifdef GDK_WINDOWING_X11
-  GdkScreen* screen = gtk_window_get_screen(window);
   if (GDK_IS_X11_SCREEN(screen)) {
     const gchar* wm_name = gdk_x11_screen_get_window_manager_name(screen);
     if (g_strcmp0(wm_name, "GNOME Shell") != 0) {
@@ -59,10 +92,13 @@ static void my_application_activate(GApplication* application) {
       project, self->dart_entrypoint_arguments);
 
   FlView* view = fl_view_new(project);
-  GdkRGBA background_color;
-  // Background defaults to black, override it here if necessary, e.g. #00000000
-  // for transparent.
-  gdk_rgba_parse(&background_color, "#000000");
+  // The engine clears the GL buffer with this color behind the
+  // Flutter scene (fl_renderer_render → glClearColor). The template
+  // default is opaque black, which showed through the translucent
+  // terminal as a solid dark background — the clear color must be
+  // fully transparent so the desktop is composited through the
+  // alpha the scene leaves behind.
+  GdkRGBA background_color = {0.0, 0.0, 0.0, 0.0};
   fl_view_set_background_color(view, &background_color);
   gtk_widget_show(GTK_WIDGET(view));
   gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));

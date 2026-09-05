@@ -30,6 +30,8 @@ import '../notifications/notification_hub.dart'
 import '../notifications/osc133_scanner.dart';
 import '../shortcuts/app_shortcuts.dart';
 import '../theme/palette_context.dart';
+import '../window/window_effects.dart'
+    show effectiveBackgroundAlpha;
 import 'pane_tree.dart' show Surface;
 import 'csi_mode_scanner.dart';
 import 'osc7_scanner.dart';
@@ -743,17 +745,23 @@ class TerminalViewState extends State<TerminalView> {
     // Background alpha is a General (appearance) concern, not part of
     // TerminalSettings, so read it straight from the store and subscribe
     // for live slider/toggle changes. The effective value is the frost
-    // level while frosted acrylic is on, the plain opacity otherwise.
+    // level while frosted acrylic is on — except on Linux, where the
+    // frosted backdrop is unavailable and the toggle degrades to the
+    // plain opacity — and the plain opacity otherwise.
     final runtime = SettingsRuntime.instance;
     double effectiveAlpha() {
       final frosted = runtime.store.get<bool>(
         runtime.catalog.general.frostedBackground,
       );
-      return frosted
-          ? runtime.store.get<double>(runtime.catalog.general.frostLevel)
-          : runtime.store.get<double>(
-              runtime.catalog.general.backgroundOpacity,
-            );
+      return effectiveBackgroundAlpha(
+        frosted: frosted,
+        frostLevel: runtime.store.get<double>(
+          runtime.catalog.general.frostLevel,
+        ),
+        opacity: runtime.store.get<double>(
+          runtime.catalog.general.backgroundOpacity,
+        ),
+      );
     }
 
     void onAlphaChanged(_) {

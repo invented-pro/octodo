@@ -22,6 +22,43 @@ import '../log.dart';
 
 final Logger _log = moduleLogger('window.effects');
 
+/// Whether the frosted-background setting must degrade to the plain
+/// background opacity on this platform (Linux only). There, no native
+/// blur exists behind the window for the frost tint to ride on, so
+/// dropping the in-app background to the frost level (default 0.05)
+/// leaves the desktop showing almost unobstructed. macOS and Windows
+/// keep their established frosted behavior (tinted translucency and
+/// native acrylic respectively).
+bool get frostDegradesToOpacity => Platform.isLinux;
+
+/// In-app background alpha for the live appearance settings: the
+/// frost level applies while frosted, except on platforms where the
+/// frosted backdrop is unavailable and the toggle degrades to the
+/// plain background opacity (see [frostDegradesToOpacity]).
+double effectiveBackgroundAlpha({
+  required bool frosted,
+  required double frostLevel,
+  required double opacity,
+}) =>
+    effectiveBackgroundAlphaCore(
+      frosted: frosted,
+      frostLevel: frostLevel,
+      opacity: opacity,
+      degradeFrostToOpacity: frostDegradesToOpacity,
+    );
+
+/// Pure core of [effectiveBackgroundAlpha], parameterized on the
+/// degradation flag so tests can pin both branches on any host
+/// (the production getter reads `Platform.isLinux` directly).
+@visibleForTesting
+double effectiveBackgroundAlphaCore({
+  required bool frosted,
+  required double frostLevel,
+  required double opacity,
+  required bool degradeFrostToOpacity,
+}) =>
+    frosted ? (degradeFrostToOpacity ? opacity : frostLevel) : opacity;
+
 // Win32 accent state: acrylic / blur-behind (winuser.h, undocumented).
 const int _accentEnableAcrylicBlurBehind = 4;
 

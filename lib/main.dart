@@ -60,9 +60,10 @@ final Logger _log = moduleLogger('main');
 /// defeated the "theme change retints the terminal" goal, since an
 /// explicit override always won over the palette). When
 /// `appearance.backgroundOpacity` is below 1.0 (or frosted acrylic is
-/// on) this returns [Colors.transparent] so the native window lets the
-/// desktop through; `_OctodoAppState` then layers the acrylic blur on
-/// top when frosted.
+/// effectively on — not the case on Linux, where frosted degrades to
+/// the plain opacity) this returns [Colors.transparent] so the native
+/// window lets the desktop through; `_OctodoAppState` then layers the
+/// acrylic blur on top when frosted.
 Color get kTerminalBackground {
   final runtime = SettingsRuntime.instance;
   final store = runtime.store;
@@ -74,10 +75,17 @@ Color get kTerminalBackground {
 }
 
 /// Native window background for [palette]: opaque `surface0` only when
-/// fully opaque AND not frosted; transparent otherwise (so the desktop
-/// is reachable behind the terminal grid / acrylic backdrop).
+/// fully opaque AND not (effectively) frosted; transparent otherwise (so
+/// the desktop is reachable behind the terminal grid / acrylic backdrop).
+/// Frosted is ineffective only on Linux, where it degrades to the plain
+/// opacity and must keep the window opaque at 1.0. (On Linux this value
+/// feeds window_manager's window CSS, which the runner's app-paintable
+/// flag suppresses — see linux/runner/my_application.cc — so the opaque
+/// branch is belt-and-braces in case that ever changes.)
 Color _windowBackground(ThemePalette palette, double opacity, bool frosted) =>
-    (opacity >= 1.0 && !frosted) ? palette.surface0 : Colors.transparent;
+    (opacity >= 1.0 && !(frosted && !frostDegradesToOpacity))
+        ? palette.surface0
+        : Colors.transparent;
 
 Future<void> main() async {
   // Helper-mode entry: octodo.exe was spawned with
@@ -259,9 +267,10 @@ class _OctodoAppState extends State<OctodoApp> {
 
   /// Push the right native window backdrop for the live settings.
   /// Frosted → acrylic blur of the desktop (tinted `surface0` at the
-  /// effective alpha). Otherwise → opaque `surface0` at full opacity,
-  /// transparent below it (`window_manager` maps `Colors.transparent`
-  /// to `ACCENT_ENABLE_TRANSPARENTGRADIENT`).
+  /// effective alpha) on Windows, tinted translucency elsewhere —
+  /// except on Linux, where frosted degrades to this plain path and
+  /// `_windowBackground` ignores the toggle. Otherwise → opaque
+  /// `surface0` at full opacity, transparent below it.
   void _applyBackdrop() {
     final runtime = SettingsRuntime.instance;
     final store = runtime.store;
@@ -270,8 +279,12 @@ class _OctodoAppState extends State<OctodoApp> {
     final opacity = store.get<double>(catalog.general.backgroundOpacity);
     final frosted = store.get<bool>(catalog.general.frostedBackground);
     final frostLevel = store.get<double>(catalog.general.frostLevel);
-    final alpha = frosted ? frostLevel : opacity;
-    if (frosted) {
+    final alpha = effectiveBackgroundAlpha(
+      frosted: frosted,
+      frostLevel: frostLevel,
+      opacity: opacity,
+    );
+    if (frosted && !frostDegradesToOpacity) {
       // Fire-and-forget: enableAcrylic now retries its window lookup
       // internally, so a late window title resolves itself.
       unawaited(enableAcrylic(title: kAppName, tint: palette.surface0, alpha: alpha));
@@ -306,10 +319,16 @@ class _OctodoAppState extends State<OctodoApp> {
     final frostLevel = runtime.store.get<double>(
       runtime.catalog.general.frostLevel,
     );
-    // Effective background alpha: frost level wins while frosted, the
-    // plain opacity slider otherwise. Drives the scaffold, chrome
-    // (via BackgroundAlphaExtension) and the grid's transparent mode.
-    final alpha = frosted ? frostLevel : opacity;
+    // Effective background alpha: frost level wins while frosted —
+    // except on Linux, where the frosted backdrop is unavailable and
+    // the toggle degrades to the plain opacity (see
+    // effectiveBackgroundAlpha). Drives the scaffold, chrome (via
+    // BackgroundAlphaExtension) and the grid's transparent mode.
+    final alpha = effectiveBackgroundAlpha(
+      frosted: frosted,
+      frostLevel: frostLevel,
+      opacity: opacity,
+    );
     // The same palette is provided to both `theme` and `darkTheme`;
     // Material picks which one to use based on `themeMode`, which
     // we derive from the palette's brightness.

@@ -211,24 +211,28 @@ class GeneralSettingsSection {
   /// the whole window. When on, the window backdrop is blurred instead
   /// of sharp; [frostLevel] controls the tint strength. Implemented via
   /// `SetWindowCompositionAttribute` (ACCENT_ENABLE_ACRYLICBLURBEHIND),
-  /// so Windows 10 1809+ / Windows 11 only — no-op elsewhere.
+  /// so the blur is Windows 10 1809+ / Windows 11 only — on macOS the
+  /// frosted toggle renders the frost-tinted translucency without a
+  /// native blur, and on Linux it degrades to the plain background
+  /// opacity (see `effectiveBackgroundAlpha` in window_effects.dart).
   final frostedBackground = BoolSetting(
     'appearance.frostedBackground',
     defaultValue: false,
     title: 'Frosted background',
-    subtitle: 'Blur the desktop behind the window (native acrylic).',
+    subtitle: 'Blur the desktop behind the window (Windows/macOS only).',
     icon: Icons.blur_on,
   );
 
   /// Tint strength of the acrylic blur (0 = clear blur, 1 = opaque
-  /// tint). Only takes effect while [frostedBackground] is on.
+  /// tint). Only takes effect while [frostedBackground] is on (and
+  /// not on Linux, where the frosted toggle degrades).
   final frostLevel = DoubleSetting(
     'appearance.frostLevel',
     defaultValue: 0.05,
     min: 0.0,
     max: 1.0,
     title: 'Frost level',
-    subtitle: 'Tint strength of the acrylic blur (frosted background on).',
+    subtitle: 'Tint strength of the acrylic blur (Windows/macOS only).',
     icon: Icons.blur_linear,
   );
 
