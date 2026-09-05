@@ -781,24 +781,36 @@ jobs:
           # session bus the notification backend no-ops by design,
           # so headless still proves the GUI comes up. Uses
           # EXTRACT_AND_RUN so no FUSE is needed on the runner.
-          # The app must be alive at BOTH probes (1 s and 6 s) — a
-          # build that crashes after GTK init must fail the release,
-          # not pass on first sighting. NOTE: "$PWD/$AI", not "$AI" —
-          # a bare filename is PATH-searched by xvfb-run's shell and
-          # fails with "not found" even though the file exists.
+          #
+          # First sighting is POLLED (up to 20 s), not probed once
+          # at 1 s: with EXTRACT_AND_RUN the runtime must unpack
+          # the whole squashfs to a temp dir before the real
+          # octodo binary even execs (observed ~2-3 s on the
+          # runner, so a fixed 1 s probe raced startup and failed
+          # v3.0.1). Once seen, the app must STILL be alive 5 s
+          # later — a build that crashes after GTK init must fail
+          # the release, not pass on first sighting. NOTE:
+          # "$PWD/$AI", not "$AI" — a bare filename is
+          # PATH-searched by xvfb-run's shell and fails with
+          # "not found" even though the file exists.
           # ----------------------------------------------------------
           echo "==> launch smoke test (xvfb)"
           APPIMAGE_EXTRACT_AND_RUN=1 GDK_BACKEND=x11 \
             xvfb-run -a -s "-screen 0 1280x800x24" "$PWD/$AI" &
-          alive=0
-          for attempt in 1 2; do
-            sleep $(( attempt == 1 ? 1 : 5 ))
-            if ! pgrep -x octodo >/dev/null 2>&1; then
+          seen=0
+          for attempt in $(seq 1 40); do
+            if pgrep -x octodo >/dev/null 2>&1; then
+              seen=1
               break
             fi
-            alive=$attempt
+            sleep 0.5
           done
-          if [[ "$alive" != "2" ]]; then
+          if [[ "$seen" != "1" ]]; then
+            echo "Smoke test failed: octodo never came up inside the AppImage" >&2
+            exit 1
+          fi
+          sleep 5
+          if ! pgrep -x octodo >/dev/null 2>&1; then
             echo "Smoke test failed: octodo did not stay up inside the AppImage" >&2
             exit 1
           fi
