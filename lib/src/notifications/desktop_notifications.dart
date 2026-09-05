@@ -2,27 +2,29 @@
 //
 // Method surface (Dart → native):
 //   * requestAuth — macOS UNUserNotificationCenter authorization
-//     (no-op elsewhere; Windows toasts need no runtime grant).
+//     (no-op elsewhere; Windows and Linux need no runtime grant).
 //   * show { id, title, body, thread } — post a native desktop
 //     notification. `thread` groups notifications in Notification
-//     Center (macOS threadIdentifier = workspace id); Windows stacks.
+//     Center (macOS threadIdentifier = workspace id); Windows and
+//     Linux stack (freedesktop has no cross-DE grouping standard).
 //   * dismiss { id } — remove a delivered notification from
-//     Notification Center / Action Center.
+//     Notification Center / Action Center / the shell's history.
 //   * setBadge { count } — macOS dock badge label (capped "99+");
-//     Windows taskbar overlay dot; Linux no-op.
+//     Windows taskbar overlay dot; Linux best-effort X11 urgency
+//     hint (no cross-DE badge-count API exists).
 //   * activate — bring the app window to the foreground (used right
 //     after a notification click before Dart-side navigation).
 //
 // Native → Dart:
 //   * onActivation { id } — the user clicked a native notification.
 //   * onDismissed { id } — the user swiped a native banner away
-//     (macOS only, via a `customDismissAction` notification category;
+//     (macOS via a `customDismissAction` notification category;
+//     Linux via the freedesktop NotificationClosed reason-2 signal;
 //     Windows toasts don't report plain dismissals).
 //
-// Every Dart→native call is best-effort: on Linux (no runner yet) and
-// in `flutter test` the channel has no handler and
-// [MissingPluginException] is swallowed — in-app unread indicators
-// keep working everywhere regardless.
+// Every Dart→native call is best-effort: in `flutter test` the
+// channel has no handler and [MissingPluginException] is swallowed
+// — in-app unread indicators keep working everywhere regardless.
 
 import 'dart:async';
 
@@ -104,7 +106,7 @@ class DesktopNotifications {
   Future<void> requestAuthorization() => _invoke('requestAuth');
 
   /// Post a desktop notification. [thread] groups per workspace on
-  /// macOS (Notification Center threads); ignored on Windows.
+  /// macOS (Notification Center threads); ignored on Windows/Linux.
   Future<void> show({
     required String id,
     required String title,
@@ -121,7 +123,9 @@ class DesktopNotifications {
   Future<void> dismiss(String id) => _invoke('dismiss', {'id': id});
 
   /// Set the native badge: macOS dock label (count, capped at "99+"),
-  /// Windows taskbar overlay dot (presence only), Linux no-op.
+  /// Windows taskbar overlay dot (presence only), Linux best-effort
+  /// X11 urgency hint (KDE taskbar flashes; GNOME ignores it; no
+  /// cross-DE badge-count API exists).
   Future<void> setBadge(int count) => _invoke('setBadge', {'count': count});
 
   /// Bring the app to the foreground (macOS: activate + makeKey;

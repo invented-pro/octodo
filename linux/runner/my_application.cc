@@ -1,6 +1,8 @@
 #include "my_application.h"
 
 #include <flutter_linux/flutter_linux.h>
+
+#include "notifications.h"
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
@@ -110,6 +112,9 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+
+  // Desktop-notification backend (octodo/notifications channel).
+  octodo_notifications_register(fl_view_get_engine(view), window);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

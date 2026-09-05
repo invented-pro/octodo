@@ -408,6 +408,9 @@ class _Detail extends StatelessWidget {
                 subtitle: Platform.isMacOS
                     ? 'Switch Octodo to "Alerts" so banners stay on screen '
                           'until dismissed.'
+                    : Platform.isLinux
+                    ? 'Adjust how your desktop shows Octodo notifications '
+                          '(GNOME Settings or KDE System Settings).'
                     : 'Adjust how Windows shows Octodo toasts.',
                 onTap: () => DesktopNotifications().openSystemSettings(),
               ),

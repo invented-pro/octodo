@@ -7,7 +7,11 @@ project(runner LANGUAGES CXX)
 set(BINARY_NAME "octodo")
 # The unique GTK application identifier for this application. See:
 # https://wiki.gnome.org/HowDoI/ChooseApplicationID
-set(APPLICATION_ID "com.example.octodo")
+# The application ID follows the reverse-DNS convention and matches
+# the Windows AUMID (com.sudo8.octodo, windows/runner/notifications.cpp).
+# The stock flutter-create default (com.example.<name>) was never renamed
+# until the Linux notification backend needed a resolvable .desktop id.
+set(APPLICATION_ID "com.sudo8.octodo")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
