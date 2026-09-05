@@ -631,9 +631,12 @@ void main() {
   group('StagedApply.run bundle swap (macOS layout)', () {
     // End-to-end through the real zip path: a ditto-created zip
     // (symlinks + modes preserved, Unix creator bytes) is decoded,
-    // extracted, and swapped over a fake install. Skipped on
-    // Windows hosts — ditto and the bundle layout don't exist
-    // there, and the per-file path is covered above.
+    // extracted, and swapped over a fake install. Tests that shell
+    // out to macOS-only tools (ditto, Launch Services `open`) skip
+    // on non-macOS hosts — ditto doesn't exist there, and Linux
+    // aliases /usr/bin/open to xdg-open, which exits 0 without
+    // launching the bundle. The archive-package-built tests below
+    // run cross-platform, and the per-file path is covered above.
     late Directory workDir;
     late Directory appsDir;
 
@@ -706,7 +709,7 @@ void main() {
 
     test('swaps the bundle, restores symlinks + exec bits, cleans aside',
         () async {
-      if (Platform.isWindows) return;
+      if (!Platform.isMacOS) return;
       final zip = await buildPayloadZip('octodo-v1.2.3-macos-arm64.zip');
       final paths = await buildPaths(zip);
 
@@ -885,7 +888,7 @@ void main() {
 
     test('relaunches the swapped bundle via Launch Services (open)',
         () async {
-      if (Platform.isWindows) return;
+      if (!Platform.isMacOS) return;
       // A stub .app whose "binary" is a shell script that drops
       // marker files. relaunchBundleForTest must hand the bundle to
       // Launch Services with a scrubbed environment — modern macOS
