@@ -7,8 +7,10 @@
 //     pre-releases, so this is the strict-stable case in practice).
 //   * `published_at` (display only).
 //   * `html_url` (release notes page).
-//   * The asset matching `^octodo-v<ver>-<assetToken>\.zip$` (zip).
-//   * Sibling asset matching `^octodo-v<ver>-<assetToken>\.zip\.sha256$`
+//   * The asset matching `^octodo-v<ver>-<assetToken>\.zip$` (zip) —
+//     or `^octodo-v<ver>-<assetToken>\.AppImage$` for the Linux
+//     tokens, whose payload is a raw AppImage rather than a zip.
+//   * Sibling asset matching the same name + `.sha256`
 //     (digest sidecar, optional — older releases may lack it).
 //   * Sibling asset matching `^octodo-v<ver>-manifest\.sig$`
 //     (Ed25519 signature over version|asset|digest — see
@@ -40,15 +42,28 @@ const String kDefaultAssetToken = 'windows-x64';
 /// Strict regex matching the install asset filename for [token].
 /// Captures the "X.Y.Z" or "X.Y.Z-prerelease" version portion for
 /// cross-checking against the release tag.
-RegExp assetPatternFor(String token) => RegExp(
-      '^octodo-v(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?)-$token\\.zip\$',
-    );
+///
+/// [ext] selects the payload-family suffix: zip tokens
+/// ("windows-x64", "macos-arm64", …) use the default `\.zip`;
+/// AppImage tokens ("linux-x64", "linux-arm64") pass `\.AppImage`
+/// — see [isAppImageToken].
+RegExp assetPatternFor(String token, {String ext = r'\.zip'}) =>
+    RegExp('^octodo-v(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?)-$token$ext\$');
 
 /// Strict regex matching the digest sidecar asset for [token].
-/// Captures the same version portion.
-RegExp assetSha256PatternFor(String token) => RegExp(
-      '^octodo-v(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?)-$token\\.zip\\.sha256\$',
-    );
+/// Captures the same version portion. [ext] mirrors
+/// [assetPatternFor] (the sidecar is `<asset><ext>.sha256`'s
+/// sibling — i.e. `.zip.sha256` / `.AppImage.sha256`).
+RegExp assetSha256PatternFor(String token, {String ext = r'\.zip'}) =>
+    RegExp(
+        '^octodo-v(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?)-$token$ext\\.sha256\$');
+
+/// True for tokens whose release asset is a raw AppImage rather
+/// than a zip ("linux-x64", "linux-arm64"). Selects the payload
+/// regex family in [resolveReleaseMap]; everything else about the
+/// resolution (version cross-check, sidecar, signature) is
+/// family-agnostic.
+bool isAppImageToken(String token) => token.startsWith('linux-');
 
 /// Strict regex matching the per-release Ed25519 manifest-signature
 /// asset (`octodo-v<ver>-manifest.sig`). One file covers every
@@ -66,9 +81,14 @@ RegExp assetSignaturePattern() => RegExp(
 /// Windows → "windows-x64" (the only Windows build published).
 /// macOS → "macos-arm64" on Apple Silicon, "macos-x64" on Intel —
 /// matching the asset naming contract the release workflow emits.
+/// Linux → "linux-arm64" on aarch64 hosts, "linux-x64" otherwise
+/// (AppImage assets; one per architecture).
 String currentAssetToken() {
   if (Platform.isMacOS) {
     return Abi.current() == Abi.macosArm64 ? 'macos-arm64' : 'macos-x64';
+  }
+  if (Platform.isLinux) {
+    return Abi.current() == Abi.linuxArm64 ? 'linux-arm64' : 'linux-x64';
   }
   return kDefaultAssetToken;
 }
@@ -234,8 +254,9 @@ ReleaseInfo resolveReleaseMap(
   Uri? signatureUrl;
   String? zipAssetName;
 
-  final zipPattern = assetPatternFor(assetToken);
-  final shaPattern = assetSha256PatternFor(assetToken);
+  final payloadExt = isAppImageToken(assetToken) ? r'\.AppImage' : r'\.zip';
+  final zipPattern = assetPatternFor(assetToken, ext: payloadExt);
+  final shaPattern = assetSha256PatternFor(assetToken, ext: payloadExt);
   final sigPattern = assetSignaturePattern();
 
   for (final entry in assetsRaw) {

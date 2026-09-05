@@ -161,4 +161,37 @@ void main() {
       });
     });
   });
+
+  group('appImageFromEnvironment', () {
+    test('returns the value when APPIMAGE is set non-empty', () {
+      expect(
+        appImageFromEnvironment(
+            const <String, String>{'APPIMAGE': '/home/u/Octodo.AppImage'}),
+        '/home/u/Octodo.AppImage',
+      );
+    });
+
+    test('returns null when APPIMAGE is absent', () {
+      expect(appImageFromEnvironment(const <String, String>{}), isNull);
+    });
+
+    test('returns null when APPIMAGE is empty', () {
+      expect(
+        appImageFromEnvironment(const <String, String>{'APPIMAGE': ''}),
+        isNull,
+      );
+    });
+
+    test('ignores the sibling AppImage-runtime variables', () {
+      // APPDIR/OWNS exist in every AppImage process; only APPIMAGE
+      // carries the file path the apply step swaps.
+      expect(
+        appImageFromEnvironment(const <String, String>{
+          'APPDIR': '/tmp/mount',
+          'OWNS': 'yes',
+        }),
+        isNull,
+      );
+    });
+  });
 }

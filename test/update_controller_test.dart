@@ -1907,6 +1907,10 @@ void main() {
         skipListFileFactory: () => skipListFile,
         retryDelayFactor: Duration.zero,
         minCheckDisplay: Duration.zero,
+        // Pin the environment so the Linux AppImage gate is
+        // deterministic even when the suite runs inside an
+        // AppImage-hosted dev environment.
+        environmentFactory: () => const <String, String>{},
       );
       await controller.start();
       await _waitFor(() => portableModel.state == UpdateState.updateAvailable);
@@ -1938,6 +1942,9 @@ void main() {
       expect(portableModel.state, UpdateState.error);
       if (Platform.isMacOS) {
         expect(portableModel.error?.message, contains('.app'));
+      } else if (Platform.isLinux) {
+        // The AppImage gate fires before the helper lookup.
+        expect(portableModel.error?.message, contains('AppImage'));
       } else {
         expect(portableModel.error?.message, contains('helper is missing'));
       }
@@ -2464,6 +2471,144 @@ void main() {
       controller.dispose();
     });
 
+    // Linux AppImage pre-apply gate. These tests only exercise
+    // their platform-conditional branch on a Linux host (the
+    // apply itself is /bin/sh + coreutils); the staged-zip check
+    // above covers the all-platforms path everywhere.
+    if (Platform.isLinux) {
+      test('applyDownloaded refuses on Linux without APPIMAGE',
+          () async {
+        final model = UpdateStateModel(
+          currentVersion: '1.0.0',
+          distribution: InstallDistribution.portable,
+        );
+        final controller = UpdateController(
+          model: model,
+          settings: catalog.update,
+          userAgentVersion: '1.0.0',
+          skipListFileFactory: () => skipListFile,
+          retryDelayFactor: Duration.zero,
+          minCheckDisplay: Duration.zero,
+          // No APPIMAGE — simulates a dev build / distro package.
+          environmentFactory: () => const <String, String>{},
+        );
+        // A staged payload that EXISTS so the all-platforms
+        // staged-zip check passes and the AppImage gate decides.
+        final staged = File(p.join(tmp.path, 'staged.AppImage'));
+        await staged.writeAsString('payload');
+        model.setDownloaded(DownloadedPayload(
+          version: '9.9.9',
+          zipPath: staged,
+          sizeBytes: 1,
+          digestVerified: true,
+        ));
+
+        await controller.applyDownloaded();
+
+        expect(model.state, UpdateState.error);
+        expect(model.error?.message, contains('AppImage'));
+        expect(model.error?.technicalDetails,
+            contains(kAppRepositoryReleases));
+        expect(model.state, isNot(UpdateState.installing));
+        controller.dispose();
+      });
+
+      test('applyDownloaded refuses when APPIMAGE points at a '
+          'missing file', () async {
+        final model = UpdateStateModel(
+          currentVersion: '1.0.0',
+          distribution: InstallDistribution.portable,
+        );
+        final controller = UpdateController(
+          model: model,
+          settings: catalog.update,
+          userAgentVersion: '1.0.0',
+          skipListFileFactory: () => skipListFile,
+          retryDelayFactor: Duration.zero,
+          minCheckDisplay: Duration.zero,
+          environmentFactory: () => const <String, String>{
+            'APPIMAGE': '/nonexistent/Octodo.AppImage',
+          },
+        );
+        final staged = File(p.join(tmp.path, 'staged.AppImage'));
+        await staged.writeAsString('payload');
+        model.setDownloaded(DownloadedPayload(
+          version: '9.9.9',
+          zipPath: staged,
+          sizeBytes: 1,
+          digestVerified: true,
+        ));
+
+        await controller.applyDownloaded();
+
+        expect(model.state, UpdateState.error);
+        expect(model.error?.message, contains('could not be found'));
+        controller.dispose();
+      });
+
+      test('applyDownloaded spawns the sh apply when APPIMAGE is '
+          'valid', () async {
+        final appImage = File(p.join(tmp.path, 'Octodo.AppImage'));
+        await appImage.writeAsString('old image');
+
+        var spawned = <String>[];
+        var exited = 0;
+        final model = UpdateStateModel(
+          currentVersion: '1.0.0',
+          distribution: InstallDistribution.portable,
+        );
+        final controller = UpdateController(
+          model: model,
+          settings: catalog.update,
+          userAgentVersion: '1.0.0',
+          skipListFileFactory: () => skipListFile,
+          retryDelayFactor: Duration.zero,
+          minCheckDisplay: Duration.zero,
+          environmentFactory: () => <String, String>{
+            'APPIMAGE': appImage.path,
+          },
+          // Intercept the /bin/sh spawn (the real one is detached
+          // and would outlive the test).
+          processStartFactory: (
+            String executable,
+            List<String> arguments, {
+            required Map<String, String> environment,
+            required ProcessStartMode mode,
+          }) async {
+            spawned = [executable, ...arguments];
+            return _StubProcess();
+          },
+          exitFactory: (code) => exited = code,
+        );
+        final staged = File(p.join(tmp.path, 'staged.AppImage'));
+        await staged.writeAsString('new image');
+        model.setDownloaded(DownloadedPayload(
+          version: '9.9.9',
+          zipPath: staged,
+          sizeBytes: 1,
+          digestVerified: true,
+          expectedDigestHex: 'a'.padRight(64, 'a'),
+        ));
+
+        await controller.applyDownloaded();
+
+        // Installing state shown, /bin/sh spawned with the apply
+        // script + 5 argv values, process exited 0.
+        expect(model.state, UpdateState.installing);
+        expect(spawned.first, '/bin/sh');
+        expect(spawned.last, 'a'.padRight(64, 'a'));
+        // argv: <script> <pid> <staged> <target> <sentinel> <sha>.
+        // apply.sh lands in the staging dir next to the asset;
+        // target must be the APPIMAGE from the injected env.
+        expect(spawned[1], p.join(staged.parent.path, 'apply.sh'));
+        expect(spawned[3], staged.path);
+        expect(spawned[4], appImage.path);
+        expect(int.parse(spawned[2]), greaterThan(0));
+        expect(exited, 0);
+        controller.dispose();
+      });
+    }
+
     test('manual check holds the checking state for the minimum '
         'display duration', () async {
       // cmux-style UX floor: a sub-100 ms probe response must not
@@ -2519,4 +2664,12 @@ List<int> _buildStubZip() {
 /// "compute the digest of these bytes" use case.
 String _sha256HexOfBytes(List<int> bytes) {
   return sha256.convert(bytes).toString();
+}
+
+/// Minimal [Process] stand-in for processStartFactory injections —
+/// the controller only stores the returned handle; nothing ever
+/// awaits its streams or exit code in these tests.
+class _StubProcess implements Process {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
 }

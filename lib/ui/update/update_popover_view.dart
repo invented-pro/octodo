@@ -238,8 +238,8 @@ class _AvailableBody extends StatelessWidget {
                         : 'Updates for the Store version are delivered '
                             'by Microsoft Store.')
                     : 'The download is fetched from GitHub. The SHA-256 of '
-                        'the zip is checked against the sidecar before the '
-                        'running app is replaced.',
+                        'the download is checked against the sidecar before '
+                        'the running app is replaced.',
                 style: TextStyle(
                     color: palette.textSecondary, fontSize: 11),
               ),

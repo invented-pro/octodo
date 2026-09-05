@@ -22,6 +22,7 @@ import '../settings/settings_runtime.dart';
 import 'digest.dart';
 import 'distribution.dart';
 import 'installer/crash_sentinel.dart';
+import 'installer/linux_apply_script.dart';
 import 'installer/macos_codesign.dart';
 import 'installer/posix_apply_script.dart';
 import 'manifest_signature.dart';
@@ -224,6 +225,17 @@ class UpdateController {
   /// torn down before subsequent tests can run.)
   final void Function(int code)? exitFactory;
 
+  /// Optional override for the process environment map read by
+  /// the Linux AppImage gates (see [_preApplyCheck] /
+  /// [_spawnLinuxApply]). Production leaves this null and reads
+  /// [Platform.environment]; tests inject a controlled map so the
+  /// APPIMAGE-present / APPIMAGE-absent branches can be pinned on
+  /// any host.
+  final Map<String, String> Function()? environmentFactory;
+
+  Map<String, String> get _environment =>
+      environmentFactory?.call() ?? Platform.environment;
+
   /// Base for the exponential backoff between retry attempts.
   /// Production: 200 ms (the `package:retry` default — yields
   /// 400 ms / 800 ms gaps between attempts, ±25% jitter).
@@ -258,6 +270,7 @@ class UpdateController {
     this.helperExeFactory,
     this.processStartFactory,
     this.exitFactory,
+    this.environmentFactory,
     this.retryDelayFactor = const Duration(milliseconds: 200),
     this.minCheckDisplay = const Duration(milliseconds: 600),
     this.probeTimeout = const Duration(seconds: 20),
@@ -1037,6 +1050,10 @@ class UpdateController {
   ///     bundle (see [_spawnPosixApply] and
   ///     posix_apply_script.dart for why the bundled Dart helper
   ///     cannot be used there).
+  ///   * Linux — `/bin/sh` + a generated script swaps the single
+  ///     AppImage file over $APPIMAGE (see [_spawnLinuxApply] and
+  ///     linux_apply_script.dart; no helper binary — coreutils
+  ///     does everything the zip/bundle paths needed tools for).
   ///
   /// Sequence:
   ///   1. pre-apply checks — everything that can fail WITHOUT
@@ -1105,6 +1122,50 @@ class UpdateController {
         onRetry: () => model.reset(),
         onDismiss: () => model.reset(),
       );
+    }
+    if (Platform.isLinux) {
+      // AppImage gate: the file-swap apply is only defined when
+      // the running process came from an AppImage (the runtime
+      // exports APPIMAGE with its absolute path). Dev builds and
+      // distro packages have no self-update target — same shape
+      // as the macOS non-bundle refusal below.
+      final appImage = appImageFromEnvironment(_environment);
+      if (appImage == null) {
+        return UpdateErrorPayload(
+          message: 'Octodo must run from its AppImage to '
+              'self-update. Download the new version from the '
+              'release page.',
+          technicalDetails: 'APPIMAGE is not set in the process '
+              'environment (dev build or distro package):\n'
+              '${Platform.resolvedExecutable}\n'
+              'Manual download: $kAppRepositoryReleases',
+          onRetry: () => model.reset(),
+          onDismiss: () => model.reset(),
+        );
+      }
+      if (!File(appImage).existsSync()) {
+        return UpdateErrorPayload(
+          message: 'The Octodo AppImage could not be found. '
+              'Download the new version from the release page.',
+          technicalDetails: 'APPIMAGE=$appImage does not exist.\n'
+              'Manual download: $kAppRepositoryReleases',
+          onRetry: () => model.reset(),
+          onDismiss: () => model.reset(),
+        );
+      }
+      final installDir = p.dirname(appImage);
+      if (!_isDirectoryWritable(installDir)) {
+        return UpdateErrorPayload(
+          message: 'Octodo cannot update automatically — the folder '
+              'holding the AppImage is not writable. Download the '
+              'new version manually.',
+          technicalDetails: 'Install dir not writable: $installDir\n'
+              'Manual download: $kAppRepositoryReleases',
+          onRetry: applyDownloaded,
+          onDismiss: () => model.reset(),
+        );
+      }
+      return null;
     }
     if (!Platform.isMacOS) return null;
 
@@ -1316,6 +1377,9 @@ final helperAssetName = helperAssetNameForCurrentPlatform();
     required int pid,
     required String? expectedDigestHex,
   }) async {
+    if (Platform.isLinux) {
+      return _spawnLinuxApply(pid: pid);
+    }
     if (Platform.isMacOS) {
       return _spawnPosixApply(pid: pid);
     }
@@ -1478,6 +1542,80 @@ final helperAssetName = helperAssetNameForCurrentPlatform();
         // OCTODO_UPDATE_DIGEST_HEX does.
         expectedDigestHex: d.expectedDigestHex,
         codeSignRequirement: codeSignRequirement,
+      );
+      return true;
+    } catch (e) {
+      model.setError(UpdateErrorPayload(
+        message: 'Could not start the update helper.',
+        technicalDetails: e.toString(),
+        // Hand the user a way back — without `onRetry` the error
+        // body's Retry button is hidden and the user is stuck
+        // after pressing "Restart to install".
+        onRetry: applyDownloaded,
+        onDismiss: () => model.reset(),
+      ));
+      return false;
+    }
+  }
+
+  /// Linux apply: write the AppImage swap script into the staging
+  /// dir and spawn `/bin/sh` detached with the runtime values as
+  /// argv. The script (see linux_apply_script.dart) waits for our
+  /// pid to exit, re-hashes the staged AppImage, swaps it over the
+  /// running AppImage ($APPIMAGE), and relaunches it with the
+  /// inherited session environment.
+  ///
+  /// Any failure here (script write, spawn) surfaces an error
+  /// payload while the GUI is still alive — same contract as the
+  /// Windows helper path and the macOS POSIX apply.
+  Future<bool> _spawnLinuxApply({required int pid}) async {
+    final d = model.downloaded;
+    if (d == null) return false;
+    final appImage = appImageFromEnvironment(_environment);
+    // Defensive: _preApplyCheck already refused non-AppImage Linux
+    // runs before we get here.
+    if (appImage == null) {
+      model.setError(UpdateErrorPayload(
+        message: 'Octodo must run from its AppImage to '
+            'self-update. Download the new version from the '
+            'release page.',
+        technicalDetails: 'APPIMAGE is not set in the process '
+            'environment (dev build or distro package):\n'
+            '${Platform.resolvedExecutable}\n'
+            'Manual download: $kAppRepositoryReleases',
+        onRetry: () => model.reset(),
+        onDismiss: () => model.reset(),
+      ));
+      return false;
+    }
+    final stagingDir = d.zipPath.parent;
+    try {
+      // Route the spawn through the controller's processStart
+      // seam when injected (tests), so no detached /bin/sh ever
+      // escapes into a test run; production uses the script
+      // module's default starter (inherits the session env).
+      final injected = processStartFactory;
+      await spawnLinuxApply(
+        pid: pid,
+        stagedFile: d.zipPath,
+        targetFile: File(appImage),
+        scriptFile: File(p.join(stagingDir.path, 'apply.sh')),
+        sentinelFile: resolveHelperCrashSentinelFile(),
+        // The sh script re-hashes the staged AppImage (sha256sum)
+        // right before the swap — closes the download→apply TOCTOU
+        // the same way the Windows helper's OCTODO_UPDATE_DIGEST_HEX
+        // and the macOS script's shasum re-hash do.
+        expectedDigestHex: d.expectedDigestHex,
+        starter: injected == null
+            ? null
+            : (String executable, List<String> arguments) async {
+                await injected(
+                  executable,
+                  arguments,
+                  environment: const <String, String>{},
+                  mode: ProcessStartMode.detached,
+                );
+              },
       );
       return true;
     } catch (e) {
@@ -1717,7 +1855,8 @@ final helperAssetName = helperAssetNameForCurrentPlatform();
   }
 
   // -- staging paths (Windows: %LOCALAPPDATA%; macOS: ~/Library/
-  // Application Support; other POSIX: ~/.octodo best-effort) --
+  // Application Support; Linux: $XDG_CACHE_HOME|~/.cache/octodo;
+  // other POSIX: ~/.octodo best-effort) --
 
   Directory _resolveStagingDir(String version) {
     final base = _resolveAppLocalDir();
@@ -1745,6 +1884,23 @@ final helperAssetName = helperAssetNameForCurrentPlatform();
         return Directory(p.join(local, 'octodo'));
       }
     }
+    if (Platform.isLinux) {
+      // XDG-conformant cache location for the NEW Linux platform —
+      // no legacy users to migrate, so we start at the spec'd path
+      // instead of the generic ~/.octodo fallback below. Staged
+      // downloads are cache-like: disposable, never user-facing.
+      // Relative values are ignored per the XDG base-dir spec (a
+      // CWD-relative staging dir would be unpredictable for a GUI
+      // app).
+      final xdg = env['XDG_CACHE_HOME'];
+      if (xdg != null && xdg.isNotEmpty && p.isAbsolute(xdg)) {
+        return Directory(p.join(xdg, 'octodo'));
+      }
+      final home = env['HOME'];
+      if (home != null && home.isNotEmpty) {
+        return Directory(p.join(home, '.cache', 'octodo'));
+      }
+    }
     final home = env['HOME'];
     if (home != null && home.isNotEmpty) {
       return Directory(p.join(home, '.octodo'));
@@ -1766,6 +1922,19 @@ final helperAssetName = helperAssetNameForCurrentPlatform();
       final roaming = env['APPDATA'];
       if (roaming != null && roaming.isNotEmpty) {
         return Directory(p.join(roaming, 'octodo'));
+      }
+    }
+    if (Platform.isLinux) {
+      // Skip-list is config-like state → XDG_CONFIG_HOME per the
+      // same rationale as _resolveAppLocalDir's Linux branch
+      // (including the ignore-relative-values rule).
+      final xdg = env['XDG_CONFIG_HOME'];
+      if (xdg != null && xdg.isNotEmpty && p.isAbsolute(xdg)) {
+        return Directory(p.join(xdg, 'octodo'));
+      }
+      final home = env['HOME'];
+      if (home != null && home.isNotEmpty) {
+        return Directory(p.join(home, '.config', 'octodo'));
       }
     }
     final home = env['HOME'];

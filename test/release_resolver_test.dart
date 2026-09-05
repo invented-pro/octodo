@@ -313,4 +313,86 @@ void main() {
       expect(r.zipUrl.scheme, 'https');
     });
   });
+
+  group('linux AppImage tokens', () {
+    Map<String, dynamic> releaseWithAssets(List<String> names) =>
+        <String, dynamic>{
+          'tag_name': 'v1.2.3',
+          'prerelease': false,
+          'html_url': 'https://github.com/owner/repo/releases/tag/v1.2.3',
+          'assets': [
+            for (final n in names)
+              <String, dynamic>{
+                'name': n,
+                'size': 1,
+                'browser_download_url':
+                    'https://github.com/owner/repo/releases/download/v1.2.3/$n',
+              }
+          ],
+        };
+
+    test('resolves the linux-x64 AppImage + sha256 sidecar', () {
+      final r = resolveReleaseMap(
+        releaseWithAssets([
+          'octodo-v1.2.3-linux-x64.AppImage',
+          'octodo-v1.2.3-linux-x64.AppImage.sha256',
+          'octodo-v1.2.3-windows-x64.zip', // wrong family — must not match
+        ]),
+        assetToken: 'linux-x64',
+      );
+      expect(r.version, '1.2.3');
+      expect(r.assetName, 'octodo-v1.2.3-linux-x64.AppImage');
+      expect(r.zipUrl.path, endsWith('/octodo-v1.2.3-linux-x64.AppImage'));
+      expect(
+        r.digestUrl?.path,
+        endsWith('/octodo-v1.2.3-linux-x64.AppImage.sha256'),
+      );
+    });
+
+    test('resolves the linux-arm64 AppImage', () {
+      final r = resolveReleaseMap(
+        releaseWithAssets(['octodo-v1.2.3-linux-arm64.AppImage']),
+        assetToken: 'linux-arm64',
+      );
+      expect(r.assetName, 'octodo-v1.2.3-linux-arm64.AppImage');
+    });
+
+    test('linux token refuses a zip-named asset', () {
+      expect(
+        () => resolveReleaseMap(
+          releaseWithAssets(['octodo-v1.2.3-linux-x64.zip']),
+          assetToken: 'linux-x64',
+        ),
+        throwsA(isA<ResolverException>()),
+      );
+    });
+
+    test('isAppImageToken classifies by prefix', () {
+      expect(isAppImageToken('linux-x64'), isTrue);
+      expect(isAppImageToken('linux-arm64'), isTrue);
+      expect(isAppImageToken('windows-x64'), isFalse);
+      expect(isAppImageToken('macos-arm64'), isFalse);
+    });
+
+    test('zip token patterns are byte-identical to the legacy contract',
+        () {
+      // Regression pin: the AppImage generalization must not have
+      // changed the zip-family patterns existing releases depend on.
+      expect(assetPatternFor('windows-x64').pattern,
+          r'^octodo-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-windows-x64\.zip$');
+      expect(
+        assetSha256PatternFor('macos-arm64').pattern,
+        r'^octodo-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-macos-arm64\.zip\.sha256$',
+      );
+    });
+
+    test('AppImage patterns capture the version for tag cross-checks', () {
+      final m = assetPatternFor('linux-x64', ext: r'\.AppImage')
+          .firstMatch('octodo-v1.2.3-rc.1-linux-x64.AppImage');
+      expect(m?.group(1), '1.2.3-rc.1');
+      final sha = assetSha256PatternFor('linux-x64', ext: r'\.AppImage')
+          .firstMatch('octodo-v1.2.3-linux-x64.AppImage.sha256');
+      expect(sha?.group(1), '1.2.3');
+    });
+  });
 }

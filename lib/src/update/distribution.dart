@@ -55,6 +55,24 @@ typedef PackageFullNameProbe = String? Function();
 /// stub so the receipt path can be pinned without touching disk.
 typedef MasReceiptProbe = bool Function(String path);
 
+/// The env var the AppImage type-2 runtime exports, carrying the
+/// absolute path of the running .AppImage file. Presence of this
+/// variable is how the updater distinguishes an AppImage launch
+/// from a dev-build / distro-package run — the Linux analogue of
+/// the macOS `.app`-bundle check (`macAppBundleRoot`).
+const String kAppImageEnvVar = 'APPIMAGE';
+
+/// Pure [kAppImageEnvVar] lookup over [env] (production passes
+/// [Platform.environment]). Returns the variable's non-empty value
+/// (the AppImage runtime always exports an absolute path) or null.
+/// File-existence / directory-writability checks live in the
+/// controller's pre-apply gate; this stays a pure string lookup so
+/// it is testable on any host.
+String? appImageFromEnvironment(Map<String, String> env) {
+  final v = env[kAppImageEnvVar];
+  return (v == null || v.isEmpty) ? null : v;
+}
+
 /// Resolve the .app bundle root from an executable path, or null
 /// when the path isn't inside a `.app` bundle.
 ///

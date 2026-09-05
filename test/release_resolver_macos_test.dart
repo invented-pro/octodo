@@ -115,7 +115,8 @@ void main() {
     test('returns a token from the published naming contract', () {
       expect(
         currentAssetToken(),
-        anyOf('windows-x64', 'macos-arm64', 'macos-x64'),
+        anyOf('windows-x64', 'macos-arm64', 'macos-x64',
+            'linux-x64', 'linux-arm64'),
       );
     });
   });
