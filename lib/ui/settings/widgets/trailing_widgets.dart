@@ -775,7 +775,8 @@ const double _kFontDropdownItemWidth = 220;
 ///
 /// On Windows and macOS the scanner uses the platform-native
 /// font APIs (DirectWrite / CoreText, via `just_font_scan`); on
-/// Linux the worker returns an empty list and the dropdown
+/// Linux it shells out to fontconfig's `fc-list`. If no backend
+/// is available the worker returns an empty list and the dropdown
 /// falls through to the curated fallback. While the scan is in
 /// flight the dropdown shows the curated fallback list
 /// (well-known monospace + CJK faces the terminal relies on)

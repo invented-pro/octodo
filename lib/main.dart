@@ -16,6 +16,7 @@ import 'src/settings/paths.dart';
 import 'src/settings/settings_runtime.dart';
 import 'src/log.dart';
 import 'src/shortcuts/app_shortcuts.dart';
+import 'src/terminal/font_family_options.dart';
 import 'src/terminal/shell_profiles.dart';
 import 'src/terminal/terminal_workspace.dart';
 import 'src/update/installer/apply_main.dart';
@@ -115,6 +116,11 @@ Future<void> main() async {
   // "RustLib has not been initialized"). Safe to call after
   // ensureInitialized() and before runApp().
   await RustLib.init();
+  // Resolve the Linux monospace default off the UI isolate before
+  // the settings runtime is constructed — the `terminal.fontFamily`
+  // catalog default reads it eagerly, and the resolution forks
+  // `fc-match`. No-op on Windows / macOS.
+  await warmDefaultPlatformMonospace();
   // Settings must be live before windowManager so the native window
   // background picks up the active palette's `surface0` — the same
   // value drives the alacritty renderer (see TerminalView._buildConfig)

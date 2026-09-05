@@ -56,7 +56,9 @@ class TerminalSettingsSection {
     // Per-platform default lives in font_family_options.dart (explicit
     // Platform.isWindows / isMacOS / else branches) so the platform
     // dispatch has exactly one home and Windows picks Cascadia Code,
-    // macOS picks Menlo, Linux picks the generic CSS keyword.
+    // macOS picks Menlo, Linux picks the fontconfig-resolved concrete
+    // monospace family (e.g. DejaVu Sans Mono) — warmed off the UI
+    // isolate in main() via warmDefaultPlatformMonospace().
     defaultValue: defaultPlatformMonospaceFont,
     title: 'Font family',
     subtitle: 'Take effect for new workspace.',

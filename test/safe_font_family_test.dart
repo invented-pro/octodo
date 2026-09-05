@@ -14,10 +14,11 @@
 //   * Latin pick  → use the pick as the primary
 //   * non-Latin   → pin to `safeFontFamilyFallback` (the
 //                   platform's known-good monospace Latin face:
-//                   Cascadia Code on Windows, Menlo on macOS,
-//                   generic 'monospace' on Linux); the pick is
-//                   added to the fallback list so it still covers
-//                   the script it actually has glyphs for.
+//                   Cascadia Code on Windows, Menlo on macOS, the
+//                   fontconfig-resolved concrete monospace default
+//                   on Linux); the pick is added to the fallback
+//                   list so it still covers the script it actually
+//                   has glyphs for.
 //
 // `hasLatinAdvance(family)` is the detection primitive. It
 // compares the rendered advance of "Wi" in the test family against
@@ -38,7 +39,7 @@
 // pattern `pty_launch_args_test.dart` uses for its per-platform
 // contract.
 
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, Process;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -57,14 +58,16 @@ void main() {
       // guaranteed-present monospace Latin face. Per-platform:
       //   Windows → 'Cascadia Code' (shipped on Win 10/11)
       //   macOS   → 'Menlo'         (shipped since 10.6)
-      //   Linux   → 'monospace'     (CSS generic, resolves to a
-      //                              Latin face on every Flutter
-      //                              Linux target)
+      //   Linux   → the fontconfig-resolved concrete monospace
+      //             default (e.g. 'DejaVu Sans Mono') — the bare
+      //             'monospace' generic is NOT reliably parsed by
+      //             the engine's desktop font resolver, so the
+      //             getter resolves it via `fc-match` at first use.
       final expected = Platform.isWindows
           ? 'Cascadia Code'
           : Platform.isMacOS
               ? 'Menlo'
-              : 'monospace';
+              : _fcMatchMonospace() ?? 'monospace';
       expect(
         TerminalViewState.safeFontFamilyFallback,
         equals(expected),
@@ -209,4 +212,27 @@ void main() {
   test('widgets import is wired up', () {
     expect(WidgetsBinding, isNotNull);
   });
+}
+
+/// Mirror of the production `fc-match --format=%{family} monospace`
+/// resolution (see `defaultPlatformMonospaceFont`), used to compute
+/// the expected Linux value independently of the code under test.
+/// Returns null when `fc-match` isn't available (non-Linux runners,
+/// minimal containers) — callers then expect the 'monospace' literal
+/// fallback.
+String? _fcMatchMonospace() {
+  try {
+    final result = Process.runSync(
+      'fc-match',
+      const ['--format=%{family}', 'monospace'],
+    );
+    if (result.exitCode != 0) return null;
+    var name = (result.stdout as String).trim();
+    final comma = name.indexOf(',');
+    if (comma >= 0) name = name.substring(0, comma);
+    name = name.trim();
+    return name.isEmpty ? null : name;
+  } catch (_) {
+    return null;
+  }
 }

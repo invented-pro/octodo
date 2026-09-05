@@ -1656,7 +1656,10 @@ class TerminalViewState extends State<TerminalView> {
               SelectableText(
                 target.toString(),
                 style: TextStyle(
-                  fontFamily: 'monospace',
+                  // Resolved concrete mono default — the bare
+                  // 'monospace' literal isn't reliably parsed as a
+                  // family by the engine's desktop font resolver.
+                  fontFamily: defaultPlatformMonospaceFont,
                   fontSize: 12,
                   color: palette.textPrimary,
                 ),
