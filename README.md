@@ -48,7 +48,7 @@ English | [中文简体](./README.zh-CN.md)
 | 1   | Windows               | ✅             |
 | 2   | macOS (Apple Silicon) | ✅             |
 | 3   | Linux (x64)           | ✅             |
-| 4   | Linux (arm64)         | ⏳ Coming Soon |
+| 4   | Linux (arm64)         | ✅             |
 
 ---
 

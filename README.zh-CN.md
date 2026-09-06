@@ -48,7 +48,7 @@
 | 1   | Windows               | ✅            |
 | 2   | macOS (Apple Silicon) | ✅            |
 | 3   | Linux (x64)           | ✅            |
-| 4   | Linux (arm64)         | ⏳ 即将推出   |
+| 4   | Linux (arm64)         | ✅            |
 
 ---
 
