@@ -762,6 +762,7 @@ jobs:
           cat > AppDir/AppRun <<'APPRUN'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "$0")")"
+          export APPDIR="${HERE}"
           export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/bin/lib:${LD_LIBRARY_PATH}"
           exec "${HERE}/usr/bin/octodo" "$@"
           APPRUN

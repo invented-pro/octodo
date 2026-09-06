@@ -8,6 +8,7 @@ import '../settings/settings_runtime.dart';
 import '../theme/palettes.dart';
 import '../log.dart';
 import '../shortcuts/app_shortcuts.dart';
+import 'appimage_spawn_env.dart';
 import 'pane_tree.dart';
 import 'fresh_environment.dart';
 import 'shell_cwd.dart';
@@ -585,6 +586,22 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     if (Platform.isWindows) {
       final fresh = await FreshEnvironment.read();
       if (fresh != null) env.addAll(fresh);
+    }
+
+    // AppImage runs must not leak the bundle's LD_LIBRARY_PATH into
+    // spawned shells: the AppRun prepends the squashfs mount's lib
+    // dirs to make the bundled GTK stack resolve, and once inherited
+    // by a user shell those entries shadow host libraries for system
+    // tools (Debian 13's `w` dies on the bundled, older libsystemd
+    // with `LIBSYSTEMD_254 not found`). See appimage_spawn_env.dart.
+    // No-op outside an AppImage (`APPIMAGE` unset in dev / deb /
+    // tarball builds).
+    if (Platform.isLinux) {
+      final sanitizedLd = sanitizeAppImageLdLibraryPath(
+        environment: Platform.environment,
+        resolvedExecutable: Platform.resolvedExecutable,
+      );
+      if (sanitizedLd != null) env['LD_LIBRARY_PATH'] = sanitizedLd;
     }
 
     // Resolve the home path (used by Surface._isAtHome) and, for WSL,
