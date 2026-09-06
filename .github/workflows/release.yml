@@ -755,12 +755,21 @@ jobs:
           git -C "$HOME/flutter" checkout --detach "$sha"
           echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
           export PATH="$PATH:$HOME/flutter/bin"
-          first_line="$(flutter --version | head -1)"
+          # Bootstrap run must be BARE (no `| head`): during bootstrap
+          # flutter_tools prints progress for ~30 s; a `head -1`
+          # reader exits after the first line and the still-writing
+          # tool dies on a broken pipe (FileSystemException, exit
+          # 255 under pipefail). Capture the full output, then slice
+          # the first line in the shell. The version guard makes any
+          # mise.toml parse drift fail HERE, not mid-build.
+          flutter --version
+          out="$(flutter --version)"
+          first_line="${out%%$'\n'*}"
           echo "$first_line"
           [[ "$first_line" == "Flutter $ver "* ]] || {
             echo "flutter reports wrong version (expected $ver)" >&2
             exit 1
-           }
+          }
 
       # Same rationale as the Windows/macOS jobs: flutter_alacritty
       # compiles a Rust cdylib during `flutter build linux`
