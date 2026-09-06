@@ -76,9 +76,9 @@
     >> xattr -dr com.apple.quarantine /Applications/Octodo.app
     >> ```
 
-### Linux（x64）
+### Linux（x64 / arm64）
 
-- 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `octodo-v<version>-linux-x64.AppImage`。
+- 从 [最新发布](https://github.com/invented-pro/octodo/releases/latest) 下载 `octodo-v<version>-linux-x64.AppImage`（x86_64）或 `octodo-v<version>-linux-arm64.AppImage`（aarch64）。
 - 添加可执行权限后运行：
     ```bash
     chmod +x octodo-v<version>-linux-x64.AppImage
@@ -86,7 +86,6 @@
     ```
     >- 若 AppImage 无法启动，请通过包管理器安装 **FUSE 2**（`libfuse2`），或改用 `--appimage-extract-and-run` 运行。
     >- 可选：对照发布侧附带的 `.sha256` 校验文件验证下载。
-    >- arm64 版本即将推出——受限于 Flutter 尚未发布 linux-arm64 SDK。
 
 ---
 

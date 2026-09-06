@@ -7,6 +7,7 @@ name: release
 #   - octodo-v1.2.3-macos-arm64.zip       + .sha256   (macOS assets)
 #   - Octodo-v1.2.3-macos-arm64.dmg                   (macOS first-install)
 #   - octodo-v1.2.3-linux-x64.AppImage   + .sha256    (Linux assets)
+#   - octodo-v1.2.3-linux-arm64.AppImage + .sha256    (Linux ARM64 assets)
 #   - manifest.json                      (R2 mirror only — built by the
 #     publish-manifest job AFTER both platform jobs finish, so a single
 #     multi-platform manifest describes the release; no per-job races)
@@ -18,7 +19,41 @@ permissions:
   contents: write   # softprops/action-gh-release creates the release
 
 jobs:
+  # ---------------------------------------------------------------
+  # Single source of truth for the Flutter version: mise.toml.
+  # Every build job consumes flutter_version from here, so bumping
+  # the version in mise.toml is the ONLY change a toolchain upgrade
+  # needs — no hardcoded versions anywhere in this workflow.
+  # ---------------------------------------------------------------
+  resolve-config:
+    runs-on: ubuntu-latest
+    outputs:
+      flutter_version: ${{ steps.cfg.outputs.flutter_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse Flutter version from mise.toml
+        id: cfg
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, sys
+          src = open('mise.toml').read()
+          # The flutter entry is a one-line TOML inline table; match
+          # its version field without needing a TOML parser.
+          found = re.findall(r'flutter\s*=\s*\{[^}]*?version\s*=\s*"([^"]+)"', src)
+          if len(found) != 1:
+              sys.exit(f'expected exactly 1 flutter version in mise.toml, found {len(found)}')
+          ver = found[0]
+          if not re.fullmatch(r'\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?', ver):
+              sys.exit(f'flutter version {ver!r} in mise.toml is not semver-shaped')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'flutter_version={ver}\n')
+          print(f'flutter_version={ver}')
+          PY
+
   build-windows:
+    needs: resolve-config
     runs-on: windows-latest
     env:
       # Non-secret: the public URL the in-app R2UpdateFeed will GET.
@@ -37,10 +72,11 @@ jobs:
 
       # Pin to a version that matches your dev environment for
       # reproducible builds. cache: true preserves ~/.pub-cache across
-      # runs of the same Flutter version.
+      # runs of the same Flutter version. The version comes from
+      # mise.toml via the resolve-config job.
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.4'
+          flutter-version: ${{ needs.resolve-config.outputs.flutter_version }}
           channel: stable
           cache: true
 
@@ -222,6 +258,7 @@ jobs:
             octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
 
   build-macos:
+    needs: resolve-config
     # arm64 (Apple Silicon) runner. Newer image than macos-14 so the
     # launch smoke test enforces code-signing rules like modern user
     # macOS does (a macos-14 runner happily launched a build that
@@ -242,7 +279,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.4'
+          flutter-version: ${{ needs.resolve-config.outputs.flutter_version }}
           channel: stable
           cache: true
 
@@ -579,23 +616,29 @@ jobs:
           security delete-keychain "$KEYCHAIN" || true
 
   # -----------------------------------------------------------------
-  # Linux AppImages (x86_64 only). The AppImage IS the Linux
-  # distribution: the in-app updater downloads it directly (token
-  # "linux-x64") and swaps it over $APPIMAGE via
+  # Linux AppImages (x86_64 + aarch64). The AppImage IS the Linux
+  # distribution: the in-app updater downloads it directly (tokens
+  # "linux-x64" / "linux-arm64") and swaps it over $APPIMAGE via
   # lib/src/update/installer/linux_apply_script.dart.
   #
   # Ubuntu 22.04 pins the glibc baseline (2.35) so older
   # distributions stay supported; ubuntu-latest (24.04) would
-  # silently raise it to 2.39.
+  # silently raise it to 2.39. The arm64 legs use the free
+  # ubuntu-22.04-arm runners (public repos) — same image family,
+  # same glibc baseline.
   #
-  # NOTE: no arm64 leg. Flutter does not publish linux-arm64 SDK
-  # artifacts (releases_linux.json carries no dart_sdk_arch=arm64
+  # arm64 SDK caveat: Flutter does not publish linux-arm64 SDK
+  # archives (releases_linux.json carries no dart_sdk_arch=arm64
   # entries), so subosito/flutter-action cannot resolve an SDK on
-  # ubuntu-22.04-arm ("Unable to determine Flutter version ...
-  # architecture: arm64"). Re-add the matrix leg + aarch64 SHA
-  # pins when Flutter ships arm64 Linux SDKs.
+  # an arm64 host. That leg installs the SDK from the flutter/flutter
+  # git repo instead, pinned by the release tag → commit SHA
+  # resolved and cross-verified at run time (see the arm64-only
+  # steps below). The engine artifacts (arm64 dart-sdk, gen_snapshot,
+  # flutter_tester) ARE published per-commit, so `flutter build` /
+  # `flutter test` bootstrap natively once the git checkout exists.
   # -----------------------------------------------------------------
   build-linux:
+    needs: resolve-config
     strategy:
       fail-fast: false
       matrix:
@@ -604,6 +647,10 @@ jobs:
             arch: x86_64
             runs-on: ubuntu-22.04
             token: linux-x64
+          - flutter_arch: arm64
+            arch: aarch64
+            runs-on: ubuntu-22.04-arm
+            token: linux-arm64
     runs-on: ${{ matrix.runs-on }}
     env:
       R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
@@ -623,14 +670,101 @@ jobs:
             clang cmake ninja-build pkg-config libgtk-3-dev \
             liblzma-dev xvfb libgtk-3-0
 
-      - uses: subosito/flutter-action@v2
+      # x64 leg: the official tarball exists, so the action resolves
+      # and caches it as usual (version flows from mise.toml via
+      # resolve-config, same as the Windows/macOS jobs).
+      - name: Install Flutter SDK (official tarball)
+        if: matrix.flutter_arch == 'x64'
+        uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.4'
+          flutter-version: ${{ needs.resolve-config.outputs.flutter_version }}
           channel: stable
           cache: true
 
+      # arm64 leg, step 1 of 3 — resolve the release commit. The
+      # version's tag is mapped to a commit SHA via TWO independent
+      # endpoints (git smart protocol + REST API); both must agree
+      # or the job refuses. Flutter release tags are immutable in
+      # practice, so this pins the exact source the SDK is built
+      # from without hardcoding a SHA (which would drift the moment
+      # mise.toml is bumped).
+      - name: Resolve Flutter release commit (tag → SHA, cross-checked)
+        if: matrix.flutter_arch == 'arm64'
+        id: flutter_sha
+        env:
+          # Authenticated API call: unauthenticated requests share a
+          # per-IP budget on GitHub runner ranges and can 403.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver="${{ needs.resolve-config.outputs.flutter_version }}"
+          sha_git="$(git ls-remote https://github.com/flutter/flutter.git \
+            "refs/tags/$ver" | cut -f1)"
+          sha_api="$(curl -sSf --retry 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/flutter/flutter/git/ref/tags/$ver" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')"
+          if [[ -z "$sha_git" || "$sha_git" != "$sha_api" ]]; then
+            echo "refs/tags/$ver resolved differently via git ($sha_git) and API ($sha_api); refusing" >&2
+            exit 1
+          fi
+          echo "sha=$sha_git" >> "$GITHUB_OUTPUT"
+          echo "FLUTTER_SHA=$sha_git" >> "$GITHUB_ENV"
+          echo "flutter $ver -> commit $sha_git"
+
+      # arm64 leg, step 2 of 3 — cache the SDK checkout + pub cache.
+      # Keyed on the RESOLVED commit SHA, so any mise.toml bump (or a
+      # re-pointed tag) invalidates the cache automatically.
+      - name: Cache Flutter SDK (git checkout) + pub cache
+        if: matrix.flutter_arch == 'arm64'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/flutter
+            ~/.pub-cache
+          key: flutter-git-linux-arm64-${{ env.FLUTTER_SHA }}
+
+      # arm64 leg, step 3 of 3 — materialize the SDK. Shallow-fetch
+      # the tag ref, verify the fetched commit is the cross-checked
+      # SHA, detach onto it, and put bin/ on PATH for later steps
+      # (GITHUB_PATH only affects subsequent steps, hence the inline
+      # export). The first `flutter` invocation bootstraps the
+      # arm64 dart-sdk + flutter_tools snapshot; the version guard
+      # makes any mise.toml parse drift fail HERE, not mid-build.
+      # NOTE: deliberately NO `rm -rf bin/cache` — a fresh checkout
+      # has no stale cache, and deleting it would only throw away
+      # the artifacts bootstrap just downloaded. Cache purge is a
+      # dev-machine concern when re-pinning an existing SDK.
+      - name: Install Flutter SDK (git checkout @ release tag)
+        if: matrix.flutter_arch == 'arm64'
+        run: |
+          set -euo pipefail
+          ver="${{ needs.resolve-config.outputs.flutter_version }}"
+          sha="${{ steps.flutter_sha.outputs.sha }}"
+          if [[ ! -d "$HOME/flutter/.git" ]]; then
+            git init "$HOME/flutter"
+            git -C "$HOME/flutter" remote add origin \
+              https://github.com/flutter/flutter.git
+          fi
+          git -C "$HOME/flutter" fetch --depth 1 origin "refs/tags/$ver"
+          got="$(git -C "$HOME/flutter" rev-parse FETCH_HEAD)"
+          if [[ "$got" != "$sha" ]]; then
+            echo "fetched commit $got != cross-checked SHA $sha" >&2
+            exit 1
+          fi
+          git -C "$HOME/flutter" checkout --detach "$sha"
+          echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
+          export PATH="$PATH:$HOME/flutter/bin"
+          first_line="$(flutter --version | head -1)"
+          echo "$first_line"
+          [[ "$first_line" == "Flutter $ver "* ]] || {
+            echo "flutter reports wrong version (expected $ver)" >&2
+            exit 1
+           }
+
       # Same rationale as the Windows/macOS jobs: flutter_alacritty
-      # compiles a Rust cdylib during `flutter build linux`.
+      # compiles a Rust cdylib during `flutter build linux`
+      # (aarch64-unknown-linux-gnu on the arm64 leg).
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -715,12 +849,15 @@ jobs:
           arch="${{ matrix.arch }}"
           declare -A LINUXDEPLOY_SHA=(
             [x86_64]=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+            [aarch64]=620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff
           )
           declare -A APPIMAGETOOL_SHA=(
             [x86_64]=df3baf5ca5facbecfc2f3fa6713c29ab9cefa8fd8c1eac5d283b79cab33e4acb
+            [aarch64]=334e77beb67fc1e71856c29d5f3f324ca77b0fde7a840fdd14bd3b88c25c341f
           )
           declare -A RUNTIME_SHA=(
             [x86_64]=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+            [aarch64]=00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
           )
           LINUXDEPLOY_TAG="1-alpha-20251107-1"
           APPIMAGETOOL_TAG="13"
@@ -1060,6 +1197,7 @@ jobs:
                   ("macos-arm64", ".zip", "application/zip"),
                   ("macos-x64", ".zip", "application/zip"),
                   ("linux-x64", ".AppImage", "application/vnd.appimage"),
+                  ("linux-arm64", ".AppImage", "application/vnd.appimage"),
               ):
                   for suffix, sctype in (
                       (payload_ext, ctype),
@@ -1083,6 +1221,7 @@ jobs:
               ("windows-x64", ".zip"),
               ("macos-arm64", ".zip"),
               ("linux-x64", ".AppImage"),
+              ("linux-arm64", ".AppImage"),
           ):
               for suffix in (payload_ext, payload_ext + ".sha256"):
                   if f"octodo-v{ver}-{platform}{suffix}" not in got:
