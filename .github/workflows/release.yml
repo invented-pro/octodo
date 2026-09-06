@@ -384,12 +384,21 @@ jobs:
           # ----------------------------------------------------------
 
           # 1. The bundle's marketed version must match the tag.
+          #    Xcode sanitizes CFBundleShortVersionString by stripping
+          #    every character outside [0-9.]: a prerelease tag like
+          #    1.2.0-rc.1 lands in the built plist as "1.2.0.1"
+          #    (observed: 0.0.0-arm64.4 -> "0.0.064.4"), so strict
+          #    equality made EVERY prerelease release fail this guard.
+          #    Accept the Xcode-sanitized form too; for stable tags it
+          #    equals $ver, so only prerelease behavior changes. A
+          #    wrong base version or missing digits still fails.
           bundle_ver="$(/usr/libexec/PlistBuddy -c \
             'Print :CFBundleShortVersionString' \
             "$APP/Contents/Info.plist")"
-          if [[ "$bundle_ver" != "$ver" ]]; then
+          sanitized_ver="$(printf '%s' "$ver" | tr -cd '0-9.')"
+          if [[ "$bundle_ver" != "$ver" && "$bundle_ver" != "$sanitized_ver" ]]; then
             echo "Bundle CFBundleShortVersionString ('$bundle_ver') " \
-                 "does not match tag ($ver)" >&2
+                 "does not match tag ($ver; Xcode-sanitized: '$sanitized_ver')" >&2
             exit 1
           fi
 
