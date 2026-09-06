@@ -759,17 +759,21 @@ jobs:
           # flutter_tools prints progress for ~30 s; a `head -1`
           # reader exits after the first line and the still-writing
           # tool dies on a broken pipe (FileSystemException, exit
-          # 255 under pipefail). Capture the full output, then slice
-          # the first line in the shell. The version guard makes any
-          # mise.toml parse drift fail HERE, not mid-build.
+          # 255 under pipefail).
           flutter --version
-          out="$(flutter --version)"
-          first_line="${out%%$'\n'*}"
-          echo "$first_line"
-          [[ "$first_line" == "Flutter $ver "* ]] || {
-            echo "flutter reports wrong version (expected $ver)" >&2
+          # Version guard: on a detached git checkout `flutter
+          # --version` prints "Flutter • channel [user-branch] •
+          # unknown source" — no version number — so assert identity
+          # via git instead: the fetched release tag must point
+          # EXACTLY at HEAD. (The commit itself was already matched
+          # against the two-endpoint cross-check above, and the
+          # --version "Framework • revision" line echoes it for the
+          # log.) Any mise.toml parse drift fails HERE, not mid-build.
+          got_tag="$(git -C "$HOME/flutter" describe --tags --exact-match HEAD)"
+          if [[ "$got_tag" != "$ver" ]]; then
+            echo "flutter checkout is at tag '$got_tag', expected '$ver'" >&2
             exit 1
-          }
+          fi
 
       # Same rationale as the Windows/macOS jobs: flutter_alacritty
       # compiles a Rust cdylib during `flutter build linux`
