@@ -746,7 +746,13 @@ jobs:
             git -C "$HOME/flutter" remote add origin \
               https://github.com/flutter/flutter.git
           fi
-          git -C "$HOME/flutter" fetch --depth 1 origin "refs/tags/$ver"
+          # Fetch with a refspec MAPPING so the tag lands in local
+          # refs/tags/ (a bare `fetch refs/tags/X` only records
+          # FETCH_HEAD, and `git describe --tags` below then finds
+          # "no names"). The leading + allows re-pointing the local
+          # tag if a cached checkout already has one.
+          git -C "$HOME/flutter" fetch --depth 1 \
+            origin "+refs/tags/$ver:refs/tags/$ver"
           got="$(git -C "$HOME/flutter" rev-parse FETCH_HEAD)"
           if [[ "$got" != "$sha" ]]; then
             echo "fetched commit $got != cross-checked SHA $sha" >&2
