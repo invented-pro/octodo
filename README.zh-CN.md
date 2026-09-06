@@ -47,8 +47,7 @@
 | --- | --------------------- | ------------- |
 | 1   | Windows               | ✅            |
 | 2   | macOS (Apple Silicon) | ✅            |
-| 3   | Linux (x64)           | ✅            |
-| 4   | Linux (arm64)         | ✅            |
+| 3   | Linux (x64 / arm64)   | ✅            |
 
 ---
 
