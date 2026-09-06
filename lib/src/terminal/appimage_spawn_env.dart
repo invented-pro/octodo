@@ -2,7 +2,11 @@
 //
 // Octodo's AppRun launcher exports
 //
-//   LD_LIBRARY_PATH="<mount>/usr/lib:<mount>/usr/bin/lib:<inherited>"
+//   LD_LIBRARY_PATH="<mount>/usr/lib:<mount>/usr/bin/lib[:<inherited>]"
+//
+// (the inherited suffix is appended only when the variable was set —
+// a bare trailing ":" would be an empty entry, which ld treats as
+// "search the current working directory")
 //
 // so the app binary resolves the linuxdeploy-bundled GTK stack from
 // inside the squashfs mount. flutter_alacritty's `resolveShellSpec`

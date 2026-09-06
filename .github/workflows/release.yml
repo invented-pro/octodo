@@ -763,7 +763,14 @@ jobs:
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "$0")")"
           export APPDIR="${HERE}"
-          export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/bin/lib:${LD_LIBRARY_PATH}"
+          # Append the inherited value only when set: a bare trailing
+          # ":" would add an empty entry, which ld treats as "search
+          # the current working directory" for libraries.
+          if [ -n "${LD_LIBRARY_PATH-}" ]; then
+            export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/bin/lib:${LD_LIBRARY_PATH}"
+          else
+            export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/bin/lib"
+          fi
           exec "${HERE}/usr/bin/octodo" "$@"
           APPRUN
           chmod +x AppDir/AppRun
