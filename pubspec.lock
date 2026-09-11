@@ -170,8 +170,8 @@ packages:
     dependency: "direct main"
     description:
       path: "."
-      ref: "2026.09.11"
-      resolved-ref: "9d035265c9a77547da606a224b558d5452d4bc5a"
+      ref: "2026.09.12"
+      resolved-ref: "33e4dfab9090709eccb36c70a17981ac9fc89b86"
       url: "https://github.com/invented-pro/flutter_alacritty"
     source: git
     version: "2.1.1"
