@@ -170,8 +170,8 @@ packages:
     dependency: "direct main"
     description:
       path: "."
-      ref: "2026.09.12"
-      resolved-ref: "33e4dfab9090709eccb36c70a17981ac9fc89b86"
+      ref: "2026.09.13"
+      resolved-ref: b4350564a6a61471c9f65dfdaec5e237d1f1888e
       url: "https://github.com/invented-pro/flutter_alacritty"
     source: git
     version: "2.1.1"
@@ -445,11 +445,12 @@ packages:
   rust_lib_flutter_alacritty:
     dependency: transitive
     description:
-      name: rust_lib_flutter_alacritty
-      sha256: c277501d1372ea6863ff282d23c50d5fcd5d443c264ce5c6d6e3c60c925b8c47
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.1.0"
+      path: "."
+      ref: "v0.1.1"
+      resolved-ref: fd857d2601b486ee13f61f4a1a7b85c619f92cce
+      url: "https://github.com/invented-pro/rust_lib_flutter_alacritty"
+    source: git
+    version: "0.1.1"
   screen_retriever:
     dependency: transitive
     description:
