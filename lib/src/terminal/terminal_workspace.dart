@@ -593,15 +593,23 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     // dirs to make the bundled GTK stack resolve, and once inherited
     // by a user shell those entries shadow host libraries for system
     // tools (Debian 13's `w` dies on the bundled, older libsystemd
-    // with `LIBSYSTEMD_254 not found`). See appimage_spawn_env.dart.
-    // No-op outside an AppImage (`APPIMAGE` unset in dev / deb /
-    // tarball builds).
+    // with `LIBSYSTEMD_254 not found`). Same for the AppRun's
+    // GIO_MODULE_DIR pin (empty dir, silences host-module noise —
+    // GH #12): leaked into a tab it would disable gio modules
+    // (gvfs) for host tools; restore the host's own dir instead.
+    // See appimage_spawn_env.dart. No-op outside an AppImage
+    // (`APPIMAGE` unset in dev / deb / tarball builds).
     if (Platform.isLinux) {
       final sanitizedLd = sanitizeAppImageLdLibraryPath(
         environment: Platform.environment,
         resolvedExecutable: Platform.resolvedExecutable,
       );
       if (sanitizedLd != null) env['LD_LIBRARY_PATH'] = sanitizedLd;
+      final sanitizedGio = sanitizeAppImageGioModuleDir(
+        environment: Platform.environment,
+        resolvedExecutable: Platform.resolvedExecutable,
+      );
+      if (sanitizedGio != null) env['GIO_MODULE_DIR'] = sanitizedGio;
     }
 
     // Resolve the home path (used by Surface._isAtHome) and, for WSL,

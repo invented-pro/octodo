@@ -1,12 +1,21 @@
-// Pins sanitizeAppImageLdLibraryPath — the AppImage LD_LIBRARY_PATH
-// containment for spawned shells. Pure string logic (injected env +
-// resolved executable), so the suite is host-agnostic.
+// Pins sanitizeAppImageLdLibraryPath /
+// sanitizeAppImageGioModuleDir — the AppImage environment
+// containment for spawned shells. Pure logic (injected env +
+// resolved executable; the GIO host-dir probe takes an injectable
+// exists-predicate), so the suite is host-agnostic.
 //
-// The real-world failure mode this guards: the AppRun exports
-// LD_LIBRARY_PATH="<mount>/usr/lib:<mount>/usr/bin/lib:<inherited>";
+// The real-world failure mode LD_LIBRARY_PATH guards: the AppRun
+// exports
+// LD_LIBRARY_PATH="<mount>/usr/lib:<mount>/usr/bin/lib[:<inherited>]";
 // resolveShellSpec spreads it into every tab, and host tools linking
 // the system libsystemd (procps' `w` on Debian 13) resolve the
 // bundled, older copy and abort with `LIBSYSTEMD_254 not found`.
+// The one GIO_MODULE_DIR guards: the AppRun pins it to the bundle's
+// empty gio-modules dir (silences host-module symbol noise, GH #12);
+// leaked into tabs it would disable gio modules (gvfs, `gio open`)
+// for host tools.
+
+import 'dart:ffi' show Abi;
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -192,6 +201,181 @@ void main() {
           resolvedExecutable: exe,
         ),
         '/a:',
+      );
+    });
+  });
+
+  group('sanitizeAppImageGioModuleDir', () {
+    const mount = '/tmp/.mount_octodoFCIEId';
+    const exe = '$mount/usr/bin/octodo';
+
+    // The AppRun's pin — GIO_MODULE_DIR="<mount>/usr/lib/gio/modules".
+    Map<String, String> envWithPinned({String? appDir}) => {
+          'APPIMAGE': '/home/u/octodo-v1.2.3-linux-x64.AppImage',
+          'APPDIR': ?appDir,
+          'GIO_MODULE_DIR': '$mount/usr/lib/gio/modules',
+        };
+
+    bool Function(String) existsOnly(Set<String> dirs) =>
+        (p) => dirs.contains(p);
+
+    test('pin replaced by the first existing host modules dir', () {
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: envWithPinned(),
+          resolvedExecutable: exe,
+          pathExists: existsOnly({'/usr/lib/x86_64-linux-gnu/gio/modules'}),
+        ),
+        '/usr/lib/x86_64-linux-gnu/gio/modules',
+      );
+    });
+
+    test('falls through the multiarch candidate to lib64', () {
+      // Fedora-style host: multiarch dirs absent, lib64 present.
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: envWithPinned(),
+          resolvedExecutable: exe,
+          pathExists: existsOnly({'/usr/lib64/gio/modules'}),
+        ),
+        '/usr/lib64/gio/modules',
+      );
+    });
+
+    test('arm64 multiarch host prefers its own dir over a foreign one', () {
+      // Multiarch host: amd64 glib installed on arm64 (Wine/box64
+      // setups) has BOTH multiarch dirs. Existence alone would hand
+      // an arm64 shell wrong-ELF-class modules; the running arch's
+      // entry must win.
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: envWithPinned(),
+          resolvedExecutable: exe,
+          hostAbi: Abi.linuxArm64,
+          pathExists: existsOnly({
+            '/usr/lib/x86_64-linux-gnu/gio/modules',
+            '/usr/lib/aarch64-linux-gnu/gio/modules',
+          }),
+        ),
+        '/usr/lib/aarch64-linux-gnu/gio/modules',
+      );
+    });
+
+    test('x64 multiarch host prefers its own dir over a foreign one', () {
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: envWithPinned(),
+          resolvedExecutable: exe,
+          hostAbi: Abi.linuxX64,
+          pathExists: existsOnly({
+            '/usr/lib/x86_64-linux-gnu/gio/modules',
+            '/usr/lib/aarch64-linux-gnu/gio/modules',
+          }),
+        ),
+        '/usr/lib/x86_64-linux-gnu/gio/modules',
+      );
+    });
+
+    test('empty-string override when no host dir is locatable', () {
+      // NOT null: resolveShellSpec spreads the launch env underneath
+      // the overlay, so an absent override would let the pin leak.
+      // '' loads no modules — containment, never wrong-modules.
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: envWithPinned(),
+          resolvedExecutable: exe,
+          pathExists: existsOnly(const {}),
+        ),
+        '',
+      );
+    });
+
+    test('null without APPIMAGE (dev / deb / tarball builds)', () {
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: {'GIO_MODULE_DIR': '$mount/usr/lib/gio/modules'},
+          resolvedExecutable: exe,
+          pathExists: existsOnly({'/usr/lib/x86_64-linux-gnu/gio/modules'}),
+        ),
+        isNull,
+      );
+    });
+
+    test('null when GIO_MODULE_DIR is unset or empty (old AppRuns)', () {
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: const {
+            'APPIMAGE': '/home/u/octodo.AppImage',
+            'APPDIR': mount,
+          },
+          resolvedExecutable: exe,
+        ),
+        isNull,
+      );
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: const {
+            'APPIMAGE': '/home/u/octodo.AppImage',
+            'APPDIR': mount,
+            'GIO_MODULE_DIR': '',
+          },
+          resolvedExecutable: exe,
+        ),
+        isNull,
+      );
+    });
+
+    test('user-set value outside the mount passes through untouched', () {
+      // A GIO_MODULE_DIR the USER exported pre-launch is not the
+      // AppRun pin — never second-guess it.
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: const {
+            'APPIMAGE': '/home/u/octodo.AppImage',
+            'APPDIR': mount,
+            'GIO_MODULE_DIR': '/opt/strict/gio/modules',
+          },
+          resolvedExecutable: exe,
+          pathExists: existsOnly({'/usr/lib/gio/modules'}),
+        ),
+        isNull,
+      );
+    });
+
+    test('mount-root lookalike is not treated as the pin', () {
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: const {
+            'APPIMAGE': '/home/u/octodo.AppImage',
+            'APPDIR': mount,
+            'GIO_MODULE_DIR': '$mount-evil/usr/lib/gio/modules',
+          },
+          resolvedExecutable: exe,
+          pathExists: existsOnly({'/usr/lib/gio/modules'}),
+        ),
+        isNull,
+      );
+    });
+
+    test('APPDIR is the authoritative mount root when exported', () {
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: envWithPinned(appDir: mount),
+          resolvedExecutable: '/somewhere/else/octodo',
+          pathExists: existsOnly({'/usr/lib/aarch64-linux-gnu/gio/modules'}),
+        ),
+        '/usr/lib/aarch64-linux-gnu/gio/modules',
+      );
+    });
+
+    test('empty APPDIR falls back to the executable-derived root', () {
+      expect(
+        sanitizeAppImageGioModuleDir(
+          environment: envWithPinned(appDir: ''),
+          resolvedExecutable: exe,
+          pathExists: existsOnly({'/usr/lib/gio/modules'}),
+        ),
+        '/usr/lib/gio/modules',
       );
     });
   });

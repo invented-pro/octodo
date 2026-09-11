@@ -84,6 +84,7 @@ English | [中文简体](./README.zh-CN.md)
     ./octodo-v<version>-linux-x64.AppImage
     ```
     >- If the AppImage fails to launch, install **FUSE 2** (`libfuse2`) via your package manager, or run with `--appimage-extract-and-run`.
+    >- If startup crashes with `Failed to create EGL context` / `Check failed: gl_version_string` (no usable OpenGL — typical in VMs without 3D acceleration or with a broken NVIDIA EGL), run in **software-GL safe mode**: `./octodo-v<version>-linux-x64.AppImage --software-gl` (or `OCTODO_GL=software ./octodo-...AppImage`). Rendering then uses the CPU (llvmpipe) — slower, but always works.
     >- Optional: verify the download against the published `.sha256` sidecar file.
 
 ---

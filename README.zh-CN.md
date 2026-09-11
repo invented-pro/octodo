@@ -84,6 +84,7 @@
     ./octodo-v<version>-linux-x64.AppImage
     ```
     >- 若 AppImage 无法启动，请通过包管理器安装 **FUSE 2**（`libfuse2`），或改用 `--appimage-extract-and-run` 运行。
+    >- 若启动时崩溃并出现 `Failed to create EGL context` / `Check failed: gl_version_string`（无可用 OpenGL —— 常见于未开启 3D 加速的虚拟机或 NVIDIA EGL 驱动异常），请使用**软件渲染安全模式**：`./octodo-v<version>-linux-x64.AppImage --software-gl`（或 `OCTODO_GL=software ./octodo-...AppImage`）。渲染改用 CPU（llvmpipe）—— 稍慢，但一定能启动。
     >- 可选：对照发布侧附带的 `.sha256` 校验文件验证下载。
 
 ---

@@ -910,7 +910,14 @@ jobs:
           # EXTRACT_AND_RUN — no FUSE needed on the runner):
           #   1. linuxdeploy deploy-only: bundles the system
           #      libraries the binary links against (GTK3 stack
-          #      minus glibc) into the AppDir.
+          #      minus glibc) into the AppDir. libepoxy is
+          #      deliberately EXCLUDED (--exclude-library): epoxy is
+          #      the library GTK loads libEGL/libGL through, so a
+          #      22.04-era epoxy shadowing the host's would wedge an
+          #      old GLVND client between newer Mesa/NVIDIA stacks
+          #      and the app (GH #12). epoxy is a hard GTK3
+          #      dependency — present anywhere the app can run at
+          #      all — and its soname (libepoxy.so.0) is ABI-stable.
           #   2. appimagetool squashes the AppDir and embeds the
           #      pinned type-2 runtime explicitly (--runtime-file) —
           #      WITHOUT it appimagetool would download a runtime
@@ -919,11 +926,22 @@ jobs:
           #      only runs with an output plugin); it mirrors
           #      linuxdeploy's semantics: LD_LIBRARY_PATH for the
           #      deployed libs + the bundle's lib dir.
+          #
+          # The empty gio-modules dir backs the AppRun's
+          # GIO_MODULE_DIR pin: the bundled GLib (22.04, 2.72) must
+          # not dlopen the HOST's gio modules (gvfs etc., built for
+          # 24.04's GLib 2.80) — they fail with "undefined symbol:
+          # g_task_set_static_name" noise at every launch (GH #12).
+          # The app uses no gio modules, so an empty dir is correct;
+          # spawned shells get the pin scrubbed off in Dart
+          # (appimage_spawn_env.dart).
           # ----------------------------------------------------------
           export ARCH="$arch"
           AI="octodo-v$ver-$token.AppImage"
           APPIMAGE_EXTRACT_AND_RUN=1 "./linuxdeploy-$arch.AppImage" \
-            --appdir AppDir
+            --appdir AppDir \
+            --exclude-library libepoxy.so.0
+          mkdir -p AppDir/usr/lib/gio/modules
           cat > AppDir/AppRun <<'APPRUN'
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "$0")")"
@@ -935,6 +953,59 @@ jobs:
             export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/bin/lib:${LD_LIBRARY_PATH}"
           else
             export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/bin/lib"
+          fi
+          # Pin gio module scanning to the bundle's (empty) modules
+          # dir so the bundled GLib never dlopens the HOST's gio
+          # modules — built against a newer GLib, they fail with
+          # "undefined symbol" noise at every launch (GH #12). GLib
+          # skips a missing dir silently, so old repacks without the
+          # dir are unaffected. A user-set GIO_MODULE_DIR is
+          # deliberately overridden: the bundled GLib must never load
+          # host gio modules regardless. Spawned shells get this pin
+          # scrubbed back off in Dart (appimage_spawn_env.dart).
+          export GIO_MODULE_DIR="${HERE}/usr/lib/gio/modules"
+
+          # Software-GL safe mode (GH #12): on hosts where no GL
+          # context can be created (VMs without 3D, broken NVIDIA
+          # EGL, ...) the engine FATAL-aborts at startup. The
+          # engine's own --enable-software-rendering switch is NOT
+          # usable here: release builds compile out the env-var
+          # switch plumbing (engine_switches.cc is #ifndef
+          # FLUTTER_RELEASE), so force Mesa's llvmpipe through the
+          # environment instead — honored by the system GL stack, so
+          # it works in release builds.
+          software_gl=0
+          if [ "${OCTODO_GL-}" = "software" ]; then
+            software_gl=1
+          fi
+          # Rotate "$@" through, dropping --software-gl: GtkApplication
+          # rejects unknown options, so our flag must never reach the
+          # binary. Append-then-shift keeps every other argument
+          # verbatim, embedded spaces included.
+          n=$#
+          while [ "$n" -gt 0 ]; do
+            if [ "$1" = "--software-gl" ]; then
+              software_gl=1
+              shift
+            else
+              set -- "$@" "$1"
+              shift
+            fi
+            n=$((n - 1))
+          done
+          if [ "$software_gl" = "1" ]; then
+            echo "octodo: software-GL safe mode enabled (LIBGL_ALWAYS_SOFTWARE=1)" >&2
+            export LIBGL_ALWAYS_SOFTWARE=1
+            # GLVND would still hand EGL to the broken vendor (e.g.
+            # the NVIDIA ICD); pin the vendor list to Mesa when its
+            # ICD is present.
+            for icd in /usr/share/glvnd/egl_vendor.d/50_mesa.json \
+                       /etc/glvnd/egl_vendor.d/50_mesa.json; do
+              if [ -f "$icd" ]; then
+                export __EGL_VENDOR_LIBRARY_FILENAMES="$icd"
+                break
+              fi
+            done
           fi
           exec "${HERE}/usr/bin/octodo" "$@"
           APPRUN
@@ -966,28 +1037,59 @@ jobs:
           # "$PWD/$AI", not "$AI" — a bare filename is
           # PATH-searched by xvfb-run's shell and fails with
           # "not found" even though the file exists.
+          #
+          # Two passes: the default GL path, then the software-GL
+          # safe mode (GH #12). The second pass drives the
+          # --software-gl FLAG (not just the OCTODO_GL env var), so
+          # the AppRun's arg rotation is exercised end-to-end: the
+          # flag must be stripped before GtkApplication sees it and
+          # every other arg must survive verbatim. The env-var branch
+          # funnels into the same one-line gate, so it needs no pass
+          # of its own.
           # ----------------------------------------------------------
-          echo "==> launch smoke test (xvfb)"
-          APPIMAGE_EXTRACT_AND_RUN=1 GDK_BACKEND=x11 \
-            xvfb-run -a -s "-screen 0 1280x800x24" "$PWD/$AI" &
-          seen=0
-          for attempt in $(seq 1 40); do
-            if pgrep -x octodo >/dev/null 2>&1; then
-              seen=1
-              break
+          # smoke <desc> [VAR=VALUE...] -- [app args...]
+          # Env assignments ride `env` in front of xvfb-run; app args
+          # land after the AppImage path (a bare --software-gl must
+          # reach AppRun's rotation loop, not xvfb-run's arg parser).
+          # ----------------------------------------------------------
+          smoke() {
+            local desc="$1"; shift
+            local envs=() appargs=()
+            while [[ $# -gt 0 ]]; do
+              if [[ "$1" == "--" ]]; then
+                shift
+                appargs=("$@")
+                break
+              fi
+              envs+=("$1")
+              shift
+            done
+            echo "==> launch smoke test (xvfb): $desc"
+            env "${envs[@]}" APPIMAGE_EXTRACT_AND_RUN=1 GDK_BACKEND=x11 \
+              xvfb-run -a -s "-screen 0 1280x800x24" "$PWD/$AI" \
+              "${appargs[@]}" &
+            local seen=0 attempt
+            for attempt in $(seq 1 40); do
+              if pgrep -x octodo >/dev/null 2>&1; then
+                seen=1
+                break
+              fi
+              sleep 0.5
+            done
+            if [[ "$seen" != "1" ]]; then
+              echo "Smoke test failed ($desc): octodo never came up inside the AppImage" >&2
+              exit 1
             fi
-            sleep 0.5
-          done
-          if [[ "$seen" != "1" ]]; then
-            echo "Smoke test failed: octodo never came up inside the AppImage" >&2
-            exit 1
-          fi
-          sleep 5
-          if ! pgrep -x octodo >/dev/null 2>&1; then
-            echo "Smoke test failed: octodo did not stay up inside the AppImage" >&2
-            exit 1
-          fi
-          pkill -x octodo 2>/dev/null || true
+            sleep 5
+            if ! pgrep -x octodo >/dev/null 2>&1; then
+              echo "Smoke test failed ($desc): octodo did not stay up inside the AppImage" >&2
+              exit 1
+            fi
+            pkill -x octodo 2>/dev/null || true
+            sleep 1
+          }
+          smoke "default GL"
+          smoke "software-GL safe mode" -- --software-gl
 
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
           echo "token=$token" >> "$GITHUB_OUTPUT"
