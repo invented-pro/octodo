@@ -170,11 +170,11 @@ packages:
     dependency: "direct main"
     description:
       path: "."
-      ref: "2026.08.10"
-      resolved-ref: aedb8cfe4573d61706df75f88c9cf8b6636dedb3
+      ref: "2026.09.11"
+      resolved-ref: "9d035265c9a77547da606a224b558d5452d4bc5a"
       url: "https://github.com/invented-pro/flutter_alacritty"
     source: git
-    version: "2.1.0"
+    version: "2.1.1"
   flutter_hooks:
     dependency: transitive
     description:
