@@ -884,7 +884,14 @@ class _FontFamilyDropdownTrailingState
       final installed = await scanInstalledFontFamilies();
       if (!mounted) return;
       setState(() {
-        _options = mergeFontFamilies(installed: installed, pinCurrent: _value);
+        // The scan has completed, so gate the curated tier to faces
+        // that actually exist on this machine (GH #11) — only the
+        // pinned current value survives a missing install.
+        _options = mergeFontFamilies(
+          installed: installed,
+          pinCurrent: _value,
+          installedOnly: true,
+        );
         _loading = false;
       });
     } catch (_) {
@@ -912,7 +919,17 @@ class _FontFamilyDropdownTrailingState
           builder: (context, _) => _buildRow(
             context,
             palette,
-            mergeFontFamilies(installed: cache.fonts, pinCurrent: _value),
+            // Once the cache's scan has completed successfully, gate
+            // the curated tier to faces actually installed on this
+            // machine (GH #11: offering never-installed fonts like
+            // "Fira Code" is how dead families end up in settings).
+            // While the scan is in flight (or it failed outright)
+            // the curated list renders as an interactive placeholder.
+            mergeFontFamilies(
+              installed: cache.fonts,
+              pinCurrent: _value,
+              installedOnly: !cache.loading && cache.error == null,
+            ),
             cache.loading,
           ),
         ),

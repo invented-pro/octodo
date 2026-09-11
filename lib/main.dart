@@ -18,6 +18,7 @@ import 'src/log.dart';
 import 'src/shortcuts/app_shortcuts.dart';
 import 'src/terminal/font_family_options.dart';
 import 'src/terminal/shell_profiles.dart';
+import 'src/terminal/terminal_view.dart' as octodo_terminal_view;
 import 'src/terminal/terminal_workspace.dart';
 import 'src/update/installer/apply_main.dart';
 import 'src/update/installer/crash_sentinel.dart';
@@ -124,11 +125,24 @@ Future<void> main() async {
   // "RustLib has not been initialized"). Safe to call after
   // ensureInitialized() and before runApp().
   await RustLib.init();
-  // Resolve the Linux monospace default off the UI isolate before
-  // the settings runtime is constructed — the `terminal.fontFamily`
-  // catalog default reads it eagerly, and the resolution forks
-  // `fc-match`. No-op on Windows / macOS.
-  await warmDefaultPlatformMonospace();
+  // Load the bundled JetBrainsMono NFM subset into the engine's
+  // dynamic font manager before the first terminal view measures its
+  // cell metrics: it is the terminal's default font on every platform
+  // and the last-resort pin when a configured family is not installed
+  // (GH #11 — a missing family is silently substituted by a
+  // proportional face on Linux, which breaks the cell grid), plus the
+  // last-chance icon fallback for powerline/starship glyphs.
+  await loadBundledTerminalFonts();
+  // Populate the installed-font registry. Awaited on Linux (fc-list
+  // is cheap, and the settings store validates `terminal.fontFamily`
+  // during construction); Windows/macOS scan in the background — the
+  // registry is optimistic until the first scan lands, and its
+  // ChangeNotifier pulse lets live terminals drop the Latin-advance
+  // memo for families probed before they were installed.
+  InstalledFontRegistry.instance.addListener(
+    octodo_terminal_view.TerminalViewState.invalidateLatinAdvanceCache,
+  );
+  await warmInstalledFontRegistry();
   // Settings must be live before windowManager so the native window
   // background picks up the active palette's `surface0` — the same
   // value drives the alacritty renderer (see TerminalView._buildConfig)

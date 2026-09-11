@@ -231,8 +231,12 @@ const List<Color> _defaultAnsiColors = [
 /// [TerminalSettingsScope] is present in the tree (the test path).
 /// Matches `fa.TerminalConfig.defaults()` so a bare `TerminalView`
 /// looks like a stock alacritty without any caller-supplied settings.
-const TerminalSettings _defaultTerminalSettings = TerminalSettings(
-  fontFamily: 'Cascadia Code',
+final TerminalSettings _defaultTerminalSettings = TerminalSettings(
+  // The bundled monospace font — the universal default on every
+  // platform. It resolves in-engine, so a bare TerminalView never
+  // depends on a platform face that could be missing or silently
+  // substituted.
+  fontFamily: kBundledMonoFamily,
   fontSize: 14.0,
   backgroundColor: Color(0xFF181818),
   cursorStyle: CursorStyle.block,
@@ -495,10 +499,11 @@ class TerminalViewState extends State<TerminalView> {
 
   // Pinned-Latin fallback used when the user's pick lacks Latin glyphs
   // (so the Rust renderer's `CellMetrics.measure` doesn't blow up on a
-  // script-only face). Per-platform: Cascadia Code on Windows, Menlo on
-  // macOS, generic monospace on Linux.
+  // script-only face). Same on every platform: the bundled
+  // JetBrainsMono NFM subset, which resolves in-engine and is
+  // pre-validated as monospace by test/bundled_font_test.dart.
   @visibleForTesting
-  static String get safeFontFamilyFallback => defaultPlatformMonospaceFont;
+  static const String safeFontFamilyFallback = kBundledMonoFamily;
 
   /// Bitmask of every DECSET mode that asks the terminal to capture
   /// mouse input on behalf of the child application. Mirrors
@@ -684,6 +689,59 @@ class TerminalViewState extends State<TerminalView> {
     return safeFontFamilyFallback;
   }
 
+  /// Clears the process-lifetime [hasLatinAdvance] memo. Called when
+  /// the installed-font registry refreshes: a family probed before it
+  /// was installed (0-width 'W' → cached `false`) must not stay dead
+  /// for the rest of the session.
+  static void invalidateLatinAdvanceCache() => _latinAdvanceCache.clear();
+
+  /// The single source of truth for what the renderer may be handed:
+  /// resolves the user's [pick] into a primary family plus the full
+  /// fallback chain, used identically by `_buildConfig` (engine) and
+  /// `fa.TerminalView`'s [TerminalStyle] (metrics + glyphs) so the
+  /// two can never drift.
+  ///
+  /// A pick that is not installed on this host (checked against
+  /// [InstalledFontRegistry]) never reaches the renderer: on Linux a
+  /// request for a missing family is silently substituted by
+  /// fontconfig with a *proportional* face, whose advance widths do
+  /// not match the measured cell — the uniform wide-spacing
+  /// corruption of GH #11. Dead picks pin to the bundled font
+  /// [kBundledMonoFamily] instead; until the first scan lands the
+  /// registry is optimistic (see
+  /// [InstalledFontRegistry.isAvailable]), so a fresh install with a
+  /// valid pick renders immediately.
+  ///
+  /// The primary additionally passes [effectiveLatinPrimary]: a
+  /// script-only installed pick (e.g. "Adobe Devanagari") would
+  /// otherwise measure cells from a fallback face while rendering
+  /// Latin from that fallback too — pinning the primary to the safe
+  /// mono default and keeping the pick first in the fallback chain
+  /// gives clean Latin cells *and* the pick's native script.
+  @visibleForTesting
+  static ({String primary, List<String> fallback}) resolveTerminalFonts(
+    String pick,
+  ) {
+    final usable =
+        InstalledFontRegistry.instance.isAvailable(pick)
+        ? pick
+        : kBundledMonoFamily;
+    final primary = effectiveLatinPrimary(usable);
+    return (
+      primary: primary,
+      fallback: <String>[
+        if (usable != primary) usable,
+        _cjkFontFamily,
+        // The platform chain terminates in the bundled font; skip
+        // it when it is already the primary — the renderer tries
+        // the primary before walking the chain, so a duplicate
+        // entry is pure noise (and breaks list-equality consumers).
+        for (final f in defaultPlatformFontFallback)
+          if (f != primary) f,
+      ],
+    );
+  }
+
   /// Baseline font size (drives zoom-reset). Tracked across settings
   /// changes via `didUpdateWidget` so `Ctrl+0` always returns to the
   /// value the user picked, not the one at first launch.
@@ -786,6 +844,16 @@ class TerminalViewState extends State<TerminalView> {
     }
 
     _engine = fa.TerminalEngine(config: _buildConfig());
+    // Seed the resolved-font tracker with whatever initState's config
+    // used, then follow the installed-font registry: when a scan
+    // lands (Windows/macOS background, ~300 ms after boot) and the
+    // resolution of the current pick changes (e.g. a dead family that
+    // rendered optimistically gets pinned to the safe default), we
+    // rebuild + reconfigure exactly like a font-family settings
+    // change would (GH #11).
+    _lastResolvedPrimary = _fontSetup.primary;
+    _lastResolvedFallback = _fontSetup.fallback;
+    InstalledFontRegistry.instance.addListener(_handleFontRegistryRefresh);
     // Gate the FFI getter calls — `engine.grid.rows/columns/generation`
     // each cross the FFI boundary. Once-per-tab today, but the gate
     // also future-proofs against a per-frame caller.
@@ -886,6 +954,52 @@ class TerminalViewState extends State<TerminalView> {
     });
   }
 
+  /// Resolved (primary, fallback-chain) for the current settings
+  /// snapshot — see [resolveTerminalFonts]. Both the engine config
+  /// and the widget-side TerminalStyle read this, so metrics and
+  /// glyphs always agree.
+  ({String primary, List<String> fallback}) get _fontSetup =>
+      resolveTerminalFonts((_settings ?? _defaultTerminalSettings).fontFamily);
+
+  // Last (primary, fallback) pair handed to the engine/painter —
+  // tracked so an installed-font-registry refresh only rebuilds when
+  // the resolution actually changed (see _handleFontRegistryRefresh).
+  String _lastResolvedPrimary = '';
+  List<String> _lastResolvedFallback = const [];
+
+  /// Registry pulse handler: the installed-font scan turned
+  /// authoritative (or a later dialog-open rescan updated it). If the
+  /// resolved fonts for the current pick changed — the GH #11 case:
+  /// an uninstalled family that passed the optimistic gate now pins
+  /// to a guaranteed monospace default — apply the new pair the same
+  /// way a font-family settings change does: a rebuild so
+  /// fa.TerminalView's didUpdateWidget re-measures with the new
+  /// TerminalStyle, and an engine reconfigure so the stored config
+  /// (and thus future tabs) match.
+  void _handleFontRegistryRefresh() {
+    if (!mounted) return;
+    final setup = _fontSetup;
+    final primaryChanged = setup.primary != _lastResolvedPrimary;
+    final fallbackChanged = !_stringListEq(setup.fallback, _lastResolvedFallback);
+    if (!primaryChanged && !fallbackChanged) return;
+    _lastResolvedPrimary = setup.primary;
+    _lastResolvedFallback = setup.fallback;
+    setState(() {});
+    _engine.reconfigure(_buildConfig());
+    // Same painter quirk as the font-family settings path above:
+    // refreshView() bumps grid.generation so shouldRepaint fires even
+    // when the old and new fonts share identical cell metrics.
+    _engine.refreshView();
+  }
+
+  static bool _stringListEq(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   fa.TerminalConfig _buildConfig() {
     final s = _settings ?? _defaultTerminalSettings;
     // Bell duration: `none` disables both visual flash AND audible feedback
@@ -933,31 +1047,17 @@ class TerminalViewState extends State<TerminalView> {
         ansi: ansiPacked,
       ),
       font: fa.FontConfig(
-        // The primary is the user's pick IF it has a Latin
-        // 'W' advance; otherwise we pin to the safe Latin face
-        // (Cascadia Code) so the Rust renderer's cell metrics
-        // don't degenerate. The non-Latin pick is still added to
-        // the fallback list so it covers the script it's meant
-        // for (e.g. "Adobe Devanagari" for Devanagari glyphs,
-        // "Microsoft YaHei" for CJK). See `hasLatinAdvance`
-        // for how the Latin check works and why a script-only
-        // face would otherwise crash flutter_alacritty's
-        // `CellMetrics.measure` with `Infinity or NaN toInt`.
-        family: effectiveLatinPrimary(s.fontFamily),
-        fallback: <String>[
-          // Only add the user's pick to the fallback when it
-          // is NOT already serving as the primary (i.e., when
-          // we had to pin the primary to safeFontFamilyFallback
-          // because the pick is non-Latin). Latin picks are
-          // already the primary, so the fallback would be a
-          // no-op for them.
-          if (s.fontFamily.isNotEmpty &&
-              s.fontFamily != safeFontFamilyFallback &&
-              s.fontFamily != effectiveLatinPrimary(s.fontFamily))
-            s.fontFamily,
-          _cjkFontFamily,
-          ...defaultPlatformFontFallback,
-        ],
+        // Single source of truth: `resolveTerminalFonts` — the same
+        // (primary, fallback) pair is passed to `fa.TerminalView`'s
+        // TerminalStyle below, so the engine config and the paint
+        // path can never drift. The pick is checked against the
+        // installed-font registry first: an uninstalled family never
+        // reaches the renderer (fontconfig would substitute a
+        // proportional face — GH #11); the primary is additionally
+        // Latin-validated so a script-only installed pick keeps a
+        // clean monospace Latin baseline (see `hasLatinAdvance`).
+        family: _fontSetup.primary,
+        fallback: _fontSetup.fallback,
         size: _fontSize,
         lineHeight: _lineHeight,
       ),
@@ -1664,10 +1764,10 @@ class TerminalViewState extends State<TerminalView> {
               SelectableText(
                 target.toString(),
                 style: TextStyle(
-                  // Resolved concrete mono default — the bare
-                  // 'monospace' literal isn't reliably parsed as a
-                  // family by the engine's desktop font resolver.
-                  fontFamily: defaultPlatformMonospaceFont,
+                  // The bundled monospace font — resolves in-engine,
+                  // so the link text can never fall through to a
+                  // substituted proportional face.
+                  fontFamily: kBundledMonoFamily,
                   fontSize: 12,
                   color: palette.textPrimary,
                 ),
@@ -1998,11 +2098,6 @@ class TerminalViewState extends State<TerminalView> {
 
   @override
   Widget build(BuildContext context) {
-    // The user's font pick. Used in two places below (the engine
-    // config in `_buildConfig` and the widget's `textStyle` here);
-    // hoisted to a local so the long conditional in `textStyle`'s
-    // fallback list stays readable.
-    final fontFamilyPick = (_settings ?? _defaultTerminalSettings).fontFamily;
     return CallbackShortcuts(
       bindings: {
         ...TerminalBindings.build(copySelection: _copySelectionToClipboard),
@@ -2104,7 +2199,7 @@ class TerminalViewState extends State<TerminalView> {
               child: _TerminalDragSelector(
                 engine: _engine,
                 controller: _controller,
-                fontFamily: effectiveLatinPrimary(fontFamilyPick),
+                fontFamily: _fontSetup.primary,
                 fontSize: _fontSize,
                 lineHeight: _lineHeight,
                 cellPadding: _fontSize * 0.3,
@@ -2123,24 +2218,13 @@ class TerminalViewState extends State<TerminalView> {
                   // TIOCSWINSZ (cmd.exe, WSL bash with certain configs), wiping
                   // the visible content.
                   textStyle: fa.TerminalStyle(
-                    // Mirror `_buildConfig`: primary is the user's
-                    // pick when it has Latin 'W' advance, otherwise
-                    // pinned to safeFontFamilyFallback (Cascadia
-                    // Code). The non-Latin pick goes into the
-                    // fallback list for the script it actually
-                    // covers. See `hasLatinAdvance` for the
-                    // detection logic and the crash class this
-                    // avoids in `CellMetrics.measure`.
-                    family: effectiveLatinPrimary(fontFamilyPick),
-                    fallback: <String>[
-                      if (fontFamilyPick.isNotEmpty &&
-                          fontFamilyPick != safeFontFamilyFallback &&
-                          fontFamilyPick !=
-                              effectiveLatinPrimary(fontFamilyPick))
-                        fontFamilyPick,
-                      _cjkFontFamily,
-                      ...defaultPlatformFontFallback,
-                    ],
+                    // Mirror `_buildConfig` via the shared
+                    // `_fontSetup` resolution — the identical
+                    // (primary, fallback) pair, so fa.TerminalView's
+                    // CellMetrics probe and the glyph cache resolve
+                    // exactly what the engine was configured with.
+                    family: _fontSetup.primary,
+                    fallback: _fontSetup.fallback,
                     size: _fontSize,
                     lineHeight: _lineHeight,
                   ),
@@ -2349,6 +2433,7 @@ class TerminalViewState extends State<TerminalView> {
 
   @override
   void dispose() {
+    InstalledFontRegistry.instance.removeListener(_handleFontRegistryRefresh);
     _slowHintTimer?.cancel();
     _flushTimer?.cancel();
     _flushTimer = null;

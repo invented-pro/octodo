@@ -95,9 +95,12 @@ void main() {
               ? 'Menlo'
               : 'PT Mono';
       expect(list.first, expectedFirst);
-      // Generic `monospace` is always available and must be last so
-      // every other entry is preferred at render time.
-      expect(list.last, 'monospace');
+      // The bundled JetBrainsMono NFM subset is always available
+      // (it loads into the engine itself) and must be last so every
+      // installed entry is preferred at render time. It replaced the
+      // generic `monospace` keyword, which the engine's desktop font
+      // resolver does not reliably parse (GH #11).
+      expect(list.last, kBundledMonoFamily);
       // No duplicates.
       expect(
         list.toSet().length,
@@ -417,7 +420,7 @@ void main() {
           ? 'Cascadia Code'
           : Platform.isMacOS
               ? 'Menlo'
-              : 'monospace';
+              : kBundledMonoFamily;
       final items = await pumpAndReadItems(tester, currentValue: knownFace);
       final values = items.map((i) => i.value).toList();
       // The user's value is the first entry, not duplicated later.

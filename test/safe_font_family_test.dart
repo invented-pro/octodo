@@ -12,13 +12,11 @@
 // AND the widget's `textStyle` in `build`) is computed by
 // `effectiveLatinPrimary(family)`:
 //   * Latin pick  → use the pick as the primary
-//   * non-Latin   → pin to `safeFontFamilyFallback` (the
-//                   platform's known-good monospace Latin face:
-//                   Cascadia Code on Windows, Menlo on macOS, the
-//                   fontconfig-resolved concrete monospace default
-//                   on Linux); the pick is added to the fallback
-//                   list so it still covers the script it actually
-//                   has glyphs for.
+//   * non-Latin   → pin to `safeFontFamilyFallback` — the bundled
+//                   JetBrainsMono NFM subset, the same safe default
+//                   on every platform; the pick is added to the
+//                   fallback list so it still covers the script it
+//                   actually has glyphs for.
 //
 // `hasLatinAdvance(family)` is the detection primitive. It
 // compares the rendered advance of "Wi" in the test family against
@@ -33,13 +31,8 @@
 // supports), and on the platform default being measurable (which
 // `TestWidgetsFlutterBinding.ensureInitialized()` wires up).
 //
-// `safeFontFamilyFallback` is per-platform, so the value-pinning
-// test branches on `Platform.isWindows` / `Platform.isMacOS` to
-// match what `defaultPlatformMonospaceFont` returns — the same
-// pattern `pty_launch_args_test.dart` uses for its per-platform
-// contract.
-
-import 'dart:io' show Platform, Process;
+// `safeFontFamilyFallback` is a const — the bundled font — so the
+// value-pinning test needs no per-platform branching.
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -50,54 +43,30 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('safeFontFamilyFallback primary-pin contract', () {
-    test('safeFontFamilyFallback is a known-good monospace Latin face', () {
+    test('safeFontFamilyFallback is the bundled monospace face', () {
       // Pin the *value* — the bug class is "what if a future
-      // contributor picks a script-specific face here?". A
-      // comment-only assertion is too easy to drift past; this
-      // fails if anyone changes the per-platform pick away from a
-      // guaranteed-present monospace Latin face. Per-platform:
-      //   Windows → 'Cascadia Code' (shipped on Win 10/11)
-      //   macOS   → 'Menlo'         (shipped since 10.6)
-      //   Linux   → the fontconfig-resolved concrete monospace
-      //             default (e.g. 'DejaVu Sans Mono') — the bare
-      //             'monospace' generic is NOT reliably parsed by
-      //             the engine's desktop font resolver, so the
-      //             getter resolves it via `fc-match` at first use.
-      final expected = Platform.isWindows
-          ? 'Cascadia Code'
-          : Platform.isMacOS
-              ? 'Menlo'
-              : _fcMatchMonospace() ?? 'monospace';
+      // contributor picks a script-specific or platform-specific
+      // face here?". The bundled JetBrainsMono NFM subset is
+      // monospace, resolves in-engine on every host, and can never
+      // be substituted (GH #11); any other value reintroduces a
+      // host-dependent default.
       expect(
         TerminalViewState.safeFontFamilyFallback,
-        equals(expected),
+        equals(kBundledMonoFamily),
         reason:
-            'Primary family must be a monospace Latin face shipped '
-            'on the current platform. Non-Latin faces (e.g. '
-            '"Adobe Devanagari") have no Latin advance and crash '
-            'flutter_alacritty\'s CellMetrics.measure with '
-            '"Infinity or NaN toInt" at terminal_view.dart:758.',
-      );
-      // Belt-and-suspenders: even if a future contributor edits
-      // `defaultPlatformMonospaceFont` away from the values above,
-      // the getter must still agree with the per-platform helper
-      // (otherwise the production code in `_buildConfig` would
-      // diverge from the contract these tests pin).
-      expect(
-        TerminalViewState.safeFontFamilyFallback,
-        equals(defaultPlatformMonospaceFont),
-        reason: 'safeFontFamilyFallback must delegate to '
-            'defaultPlatformMonospaceFont; if these diverge, the '
-            'production fallback chain and the test contract are '
-            'reading different sources of truth.',
+            'Primary fallback must be the bundled monospace face. '
+            'Non-Latin faces (e.g. "Adobe Devanagari") have no Latin '
+            'advance and crash flutter_alacritty\'s '
+            'CellMetrics.measure with "Infinity or NaN toInt" at '
+            'terminal_view.dart:758; platform-specific faces can be '
+            'missing and silently substituted (GH #11).',
       );
     });
 
     test('safeFontFamilyFallback is exposed @visibleForTesting', () {
-      // No longer `const` — the getter delegates to
-      // `defaultPlatformMonospaceFont`, which reads `Platform.*`
-      // at call time.
-      final symbol = TerminalViewState.safeFontFamilyFallback;
+      // Const — the same value on every platform, no `Platform.*`
+      // reads at call time.
+      const symbol = TerminalViewState.safeFontFamilyFallback;
       expect(symbol, isA<String>());
     });
   });
@@ -112,12 +81,12 @@ void main() {
       expect(TerminalViewState.hasLatinAdvance(''), isFalse);
     });
 
-    test('safeFontFamilyFallback returns true (per-platform Latin face has W/i)', () {
+    test('safeFontFamilyFallback returns true (bundled face is known safe)', () {
       // Short-circuit path: we don't want to re-measure a face
-      // we already know is safe. The pick is per-platform
-      // (Cascadia Code / Menlo / monospace), but every value is
-      // a Latin monospace face with a measurable W/i advance on
-      // its host OS — so `hasLatinAdvance` must agree.
+      // we already know is safe. The bundled font is pre-validated
+      // as monospace with a measurable Latin advance by
+      // test/bundled_font_test.dart — so `hasLatinAdvance` must
+      // agree without probing.
       expect(
         TerminalViewState.hasLatinAdvance(
           TerminalViewState.safeFontFamilyFallback,
@@ -126,7 +95,7 @@ void main() {
       );
     });
 
-    test('a non-existent family falls back to the platform default', () {
+    test('a non-existent family falls back to the default face', () {
       // Detection contract: a missing family name produces the
       // same "Wi" width as the unstyled default (the painter
       // substitutes the platform default). So
@@ -212,27 +181,4 @@ void main() {
   test('widgets import is wired up', () {
     expect(WidgetsBinding, isNotNull);
   });
-}
-
-/// Mirror of the production `fc-match --format=%{family} monospace`
-/// resolution (see `defaultPlatformMonospaceFont`), used to compute
-/// the expected Linux value independently of the code under test.
-/// Returns null when `fc-match` isn't available (non-Linux runners,
-/// minimal containers) — callers then expect the 'monospace' literal
-/// fallback.
-String? _fcMatchMonospace() {
-  try {
-    final result = Process.runSync(
-      'fc-match',
-      const ['--format=%{family}', 'monospace'],
-    );
-    if (result.exitCode != 0) return null;
-    var name = (result.stdout as String).trim();
-    final comma = name.indexOf(',');
-    if (comma >= 0) name = name.substring(0, comma);
-    name = name.trim();
-    return name.isEmpty ? null : name;
-  } catch (_) {
-    return null;
-  }
 }

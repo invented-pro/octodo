@@ -154,46 +154,12 @@ void main() {
       );
       // Pin first, curated fallbacks next, scan results sorted after.
       expect(merged.first, 'Some Custom Face');
-      expect(merged, containsAll(<String>['monospace', 'JetBrains Mono']));
+      expect(merged, containsAll(<String>[kBundledMonoFamily, 'JetBrains Mono']));
       if (installed.isNotEmpty) {
         expect(merged, contains(installed.first));
       }
     }, timeout: const Timeout(Duration(seconds: 30)));
-
-    test('warmDefaultPlatformMonospace seeds the getter off-isolate',
-        () async {
-      if (!Platform.isLinux) return; // no-op on other platforms
-      await warmDefaultPlatformMonospace();
-      final value = defaultPlatformMonospaceFont;
-      expect(value, isNotEmpty);
-      final probe = _probeFcMatchMonospace();
-      if (probe != null) {
-        // With fontconfig available the getter must carry the
-        // concrete resolved family, not the generic literal.
-        expect(value, equals(probe));
-        expect(value, isNot(equals('monospace')));
-      }
-    }, timeout: const Timeout(Duration(seconds: 30)));
   });
-}
-
-/// Mirror of the production `fc-match --format=%{family} monospace`
-/// resolution, computed independently of the code under test.
-String? _probeFcMatchMonospace() {
-  try {
-    final result = Process.runSync(
-      'fc-match',
-      const ['--format=%{family}', 'monospace'],
-    );
-    if (result.exitCode != 0) return null;
-    var name = (result.stdout as String).trim();
-    final comma = name.indexOf(',');
-    if (comma >= 0) name = name.substring(0, comma);
-    name = name.trim();
-    return name.isEmpty ? null : name;
-  } catch (_) {
-    return null;
-  }
 }
 
 /// True when `fc-list` is on PATH and exits cleanly. Probed with

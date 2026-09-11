@@ -95,6 +95,11 @@ flutter:
   assets:
     - assets/logo.png
     - assets/icons/
+    - assets/fonts/JetBrainsMono-NFM-subset.ttf
+    # OFL 1.1 requires the license text to accompany redistribution;
+    # NOTICE.md documents the subsetting provenance.
+    - assets/fonts/OFL.txt
+    - assets/fonts/NOTICE.md
 
 # dart run flutter_launcher_icons
 flutter_launcher_icons:

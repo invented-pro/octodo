@@ -6,7 +6,7 @@
 import 'package:flutter/material.dart';
 import 'setting.dart';
 import 'setting_codec.dart';
-import '../terminal/font_family_options.dart' show defaultPlatformMonospaceFont;
+import '../terminal/font_family_options.dart' show kBundledMonoFamily;
 
 enum CursorStyle { block, underline, bar }
 
@@ -53,13 +53,13 @@ class SettingsCatalog {
 class TerminalSettingsSection {
   final fontFamily = StringSetting(
     'terminal.fontFamily',
-    // Per-platform default lives in font_family_options.dart (explicit
-    // Platform.isWindows / isMacOS / else branches) so the platform
-    // dispatch has exactly one home and Windows picks Cascadia Code,
-    // macOS picks Menlo, Linux picks the fontconfig-resolved concrete
-    // monospace family (e.g. DejaVu Sans Mono) — warmed off the UI
-    // isolate in main() via warmDefaultPlatformMonospace().
-    defaultValue: defaultPlatformMonospaceFont,
+    // The bundled JetBrainsMono NFM subset on every platform — one
+    // default that resolves in-engine and can never be substituted
+    // or go missing (see font_family_options.dart). Users can pick
+    // any installed face from the dropdown; the bundled font also
+    // stays as the last-resort pin for picks that are not installed
+    // (GH #11).
+    defaultValue: kBundledMonoFamily,
     title: 'Font family',
     subtitle: 'Take effect for new workspace.',
     icon: Icons.text_fields,
