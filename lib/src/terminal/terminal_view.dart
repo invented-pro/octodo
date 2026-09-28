@@ -2343,8 +2343,8 @@ class TerminalViewState extends State<TerminalView> {
     );
   }
 
-  /// Second-line key handler for the terminal. Two responsibilities,
-  /// both rooted in the fact that `fa.TerminalView`'s inner Focus
+  /// Second-line key handler for the terminal. Three responsibilities,
+  /// all rooted in the fact that `fa.TerminalView`'s inner Focus
   /// (`_onKeyFallback`) returns `ignored` for some events we still
   /// want to act on — the event then propagates up the focus tree
   /// and reaches this widget.
@@ -2372,7 +2372,33 @@ class TerminalViewState extends State<TerminalView> {
   ///    to IME, so a repeat is already on the wire by the time it
   ///    reaches this handler and writing here would double-fire.
   ///
-  /// Modifier policy (shared by both paths): only intercept when no
+  /// 3. IME candidate navigation (GH #13). While an IME composition
+  ///    is active, `fa.TerminalView._onKeyFallback` returns `ignored`
+  ///    for EVERY key (alacritty parity: keys stay with the OS IME,
+  ///    not the PTY), so bare arrow keys bubble past us and reach the
+  ///    root `Shortcuts`/`Actions` installed by `MaterialApp` —
+  ///    `WidgetsApp.defaultActions` maps them to `DirectionalFocusAction`,
+  ///    which (a) moves focus out of the terminal (↑ lands on the tab
+  ///    bar's New Tab button) and (b) reports the event as handled to
+  ///    the embedder, so macOS never routes the `NSEvent` to
+  ///    `NSTextInputContext` and the candidate bar can't move. We
+  ///    return `skipRemainingHandlers`: propagation stops (no
+  ///    traversal) but `FocusManager.handleKeyMessage` records the
+  ///    event as UNhandled, so the embedder still hands it to the IME.
+  ///    Unconditional (no `Platform.isMacOS` gate): in non-composing
+  ///    mode `fa.TerminalView` handles bare arrows itself via
+  ///    `encodeKey`, so this branch only fires when the inner handler
+  ///    bailed — an active composition or `readOnly` — and in both,
+  ///    arrows should never navigate app focus.
+  ///    Windows shares the same chain; on Linux GTK's IM filter
+  ///    consumes composing keys before Dart sees them, making this a
+  ///    harmless no-op. Must run BEFORE the KeyRepeat branch below so
+  ///    a held arrow during composition can't be misread as printable
+  ///    (macOS reports the `U+F700`-range function-key glyphs, which
+  ///    pass the C0-only `_isPrintableForRepeat` check) and written
+  ///    to the PTY.
+  ///
+  /// Modifier policy (shared by all paths): only intercept when no
   /// Ctrl / Alt / Meta is pressed. Shift is allowed (and just
   /// changes the character that gets written — `event.character`
   /// already reflects the shift). Any chord involving Ctrl / Alt /
@@ -2384,6 +2410,21 @@ class TerminalViewState extends State<TerminalView> {
     final hw = HardwareKeyboard.instance;
     if (hw.isControlPressed || hw.isAltPressed || hw.isMetaPressed) {
       return KeyEventResult.ignored;
+    }
+    // ── IME candidate navigation (GH #13 — see dartdoc item 3). Runs
+    // before the repeat branch for the U+F700 glyph reason above, and
+    // requires the event to still be in flight: skipRemainingHandlers
+    // stops the focus-tree walk while leaving `handled == false`, the
+    // only combination that both blocks DirectionalFocusAction and
+    // lets the embedder deliver the key to the IME.
+    switch (event.logicalKey) {
+      case LogicalKeyboardKey.arrowUp:
+      case LogicalKeyboardKey.arrowDown:
+      case LogicalKeyboardKey.arrowLeft:
+      case LogicalKeyboardKey.arrowRight:
+        return KeyEventResult.skipRemainingHandlers;
+      default:
+        break;
     }
     // ── Letter-key auto-repeat (macOS only — see Focus wrapper dartdoc).
     // We only intercept `KeyRepeatEvent` so the first `KeyDownEvent`
