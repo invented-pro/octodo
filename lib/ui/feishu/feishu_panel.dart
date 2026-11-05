@@ -1,41 +1,61 @@
-// The Feishu settings section: the master toggle row plus the
-// binding card driven by [FeishuBindingFlow.shared] (design doc
-// §2.2 / §6). States map 1:1 to the flow's phases:
+// The Feishu panel — a standalone dialog (opened from the drawer,
+// below the "New workspace" button) that owns everything Feishu:
+// the master toggle and the QR-binding card. Kept out of the
+// Settings dialog deliberately: the binding is an account-level
+// connection flow, not a preferences row.
+//
+// Binding states map 1:1 to [FeishuBindingFlow] phases:
 //
 //   idle            → "Connect Feishu…" button + explainer
 //   requestingCode  → progress spinner
-//   waitingForScan  → QR dialog (opened by the button that started
-//                     the flow; countdown until expiresAt)
+//   waitingForScan  → QR dialog (auto-opened, countdown)
 //   connected       → bound-app summary + Unbind
 //   expired/failed  → reason + Retry
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
-import '../../../src/feishu/feishu_binding_flow.dart';
-import '../../../src/settings/settings_runtime.dart';
-import '../../../src/theme/palette_context.dart';
-import '../../../src/theme/palettes.dart';
-import '../chrome/settings_card.dart';
-import '../chrome/settings_row.dart';
-import '../widgets/trailing_widgets.dart';
+import '../../src/feishu/feishu_binding_flow.dart';
+import '../../src/settings/settings_runtime.dart';
+import '../../src/theme/palette_context.dart';
+import '../../src/theme/palettes.dart';
+import '../settings/chrome/settings_card.dart';
+import '../settings/chrome/settings_row.dart';
+import '../settings/widgets/trailing_widgets.dart';
 
-/// The settings-section widget. Named `FeishuSection` (not
-/// `…SettingsSection`) to avoid clashing with the catalog section
-/// class of the same intent in `settings_catalog.dart` — the
-/// settings dialog imports both libraries.
-class FeishuSection extends StatefulWidget {
-  final bool showJsonPaths;
-  const FeishuSection({super.key, required this.showJsonPaths});
+/// The official Lark/Feishu bird mark (ByteDance IconPark outline
+/// variant) as a monochrome asset tinted to [color].
+class FeishuBrandIcon extends StatelessWidget {
+  final Color color;
+  final double size;
+  const FeishuBrandIcon({super.key, required this.color, this.size = 16});
 
   @override
-  State<FeishuSection> createState() => _FeishuSectionState();
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: SvgPicture.asset(
+        'assets/icons/feishu.svg',
+        fit: BoxFit.contain,
+        colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+      ),
+    );
+  }
 }
 
-class _FeishuSectionState extends State<FeishuSection> {
+class FeishuPanel extends StatefulWidget {
+  const FeishuPanel({super.key});
+
+  @override
+  State<FeishuPanel> createState() => _FeishuPanelState();
+}
+
+class _FeishuPanelState extends State<FeishuPanel> {
   late final FeishuBindingFlow _flow = FeishuBindingFlow.shared;
   void _onFlowChanged() {
     if (!mounted) return;
@@ -80,28 +100,43 @@ class _FeishuSectionState extends State<FeishuSection> {
   Widget build(BuildContext context) {
     final palette = context.palette;
     final catalog = SettingsRuntime.instance.catalog;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SettingsSectionHeader('FEISHU'),
-        SettingsCard(
+    return Dialog(
+      child: SizedBox(
+        width: 560,
+        height: 420,
+        child: Column(
           children: [
-            SettingsCardRow(
-              jsonKey: catalog.feishu.enabled.key,
-              title: catalog.feishu.enabled.title,
-              subtitle: catalog.feishu.enabled.subtitle,
-              leadingIcon: catalog.feishu.enabled.icon,
-              trailing: BoolToggleTrailing(
-                setting: catalog.feishu.enabled,
-                store: SettingsRuntime.instance.store,
+            _Header(onClose: () => Navigator.of(context).pop()),
+            Container(width: 1, height: 1, color: palette.outline),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    SettingsCard(
+                      children: [
+                        SettingsCardRow(
+                          jsonKey: catalog.feishu.enabled.key,
+                          title: catalog.feishu.enabled.title,
+                          subtitle: catalog.feishu.enabled.subtitle,
+                          leadingIcon: catalog.feishu.enabled.icon,
+                          trailing: BoolToggleTrailing(
+                            setting: catalog.feishu.enabled,
+                            store: SettingsRuntime.instance.store,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    SettingsCard(children: [_bindingCard(palette)]),
+                  ],
+                ),
               ),
-              showJsonPaths: widget.showJsonPaths,
             ),
           ],
         ),
-        const SizedBox(height: 8),
-        SettingsCard(children: [_bindingCard(palette)]),
-      ],
+      ),
     );
   }
 
@@ -177,22 +212,16 @@ class _FeishuSectionState extends State<FeishuSection> {
       leadingIcon: expired ? Icons.timer_off_outlined : Icons.error_outline,
       title: expired ? 'QR code expired' : 'Binding failed',
       subtitle: _flow.errorMessage ?? 'Try again.',
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (!expired)
-            OutlinedButton(
-              onPressed: () => _flow.start(),
-              child: const Text('Retry'),
-            )
-          else
-            FilledButton.icon(
+      trailing: expired
+          ? FilledButton.icon(
               onPressed: () => _flow.start(),
               icon: const Icon(Icons.refresh, size: 16),
               label: const Text('New QR code'),
+            )
+          : OutlinedButton(
+              onPressed: () => _flow.start(),
+              child: const Text('Retry'),
             ),
-        ],
-      ),
     );
   }
 
@@ -202,6 +231,63 @@ class _FeishuSectionState extends State<FeishuSection> {
     final m = local.month.toString().padLeft(2, '0');
     final d = local.day.toString().padLeft(2, '0');
     return '$y-$m-$d';
+  }
+}
+
+class _Header extends StatelessWidget {
+  final VoidCallback onClose;
+  const _Header({required this.onClose});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: palette.popupSurface,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(12),
+          topRight: Radius.circular(12),
+        ),
+        border: Border(bottom: BorderSide(color: palette.outline, width: 1)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: palette.accentBlue.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Center(
+              child: FeishuBrandIcon(
+                color: palette.accentBlue,
+                size: 15,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            'Feishu',
+            style: TextStyle(
+              color: palette.textPrimary,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const Spacer(),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: onClose,
+              child: Icon(Icons.close, size: 16, color: palette.textMuted),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -273,19 +359,34 @@ class _FeishuQrDialogState extends State<_FeishuQrDialog> {
                       ),
                     ),
                   )
-                : QrImageView(
-                    data: uri.toString(),
-                    version: QrVersions.auto,
-                    size: 220,
-                    gapless: false,
-                    backgroundColor: Colors.white,
-                    eyeStyle: const QrEyeStyle(
-                      eyeShape: QrEyeShape.square,
-                      color: Colors.black,
-                    ),
-                    dataModuleStyle: const QrDataModuleStyle(
-                      dataModuleShape: QrDataModuleShape.square,
-                      color: Colors.black,
+                // AlertDialog wraps its content column in an
+                // IntrinsicWidth, whose speculative intrinsic walk
+                // reaches QrImageView's internal LayoutBuilder and
+                // throws ("LayoutBuilder does not support returning
+                // intrinsic dimensions") — the dialog's render box
+                // then never gets a size, and every later hit test
+                // over it fails ("Cannot hit test a render box with
+                // no size"). A tight SizedBox short-circuits the
+                // intrinsic walk at its own constraints
+                // (RenderConstrainedBox), so it never reaches the
+                // LayoutBuilder.
+                : SizedBox(
+                    width: 220,
+                    height: 220,
+                    child: QrImageView(
+                      data: uri.toString(),
+                      version: QrVersions.auto,
+                      size: 220,
+                      gapless: false,
+                      backgroundColor: Colors.white,
+                      eyeStyle: const QrEyeStyle(
+                        eyeShape: QrEyeShape.square,
+                        color: Colors.black,
+                      ),
+                      dataModuleStyle: const QrDataModuleStyle(
+                        dataModuleShape: QrDataModuleShape.square,
+                        color: Colors.black,
+                      ),
                     ),
                   ),
           ),
@@ -308,9 +409,9 @@ class _FeishuQrDialogState extends State<_FeishuQrDialog> {
         ),
         TextButton(
           onPressed: () {
-            // Only cancel — the section's phase listener pops this
+            // Only cancel — the panel's phase listener pops this
             // dialog on the idle transition. Popping here too would
-            // double-pop and dismiss the settings dialog as well.
+            // double-pop and dismiss the Feishu panel as well.
             flow.cancel();
           },
           child: const Text('Cancel'),
@@ -318,4 +419,14 @@ class _FeishuQrDialogState extends State<_FeishuQrDialog> {
       ],
     );
   }
+}
+
+// ── Show the panel ─────────────────────────────────────────────────
+
+Future<void> showFeishuPanel(BuildContext context) {
+  return showDialog<void>(
+    context: context,
+    barrierColor: Colors.black.withValues(alpha: 0.5),
+    builder: (_) => const FeishuPanel(),
+  );
 }

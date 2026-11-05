@@ -29,6 +29,7 @@ import 'src/theme/app_theme.dart';
 import 'src/theme/palette_context.dart';
 import 'src/theme/palettes.dart';
 import 'src/window/window_effects.dart';
+import 'ui/feishu/feishu_panel.dart';
 import 'ui/settings/settings_dialog.dart';
 import 'ui/update/update_pill.dart';
 
@@ -1569,6 +1570,7 @@ class _AppShellState extends State<AppShell>
               onAcceptReorder: _reorderWorkspaceById,
               updateModel: _updateModel,
               updateController: _updateController,
+              onOpenFeishu: () => showFeishuPanel(context),
             ),
             // ── Active workspace content ──────────────────────
             Expanded(
@@ -1677,6 +1679,9 @@ class _WorkspaceDrawer extends StatelessWidget {
   final UpdateStateModel updateModel;
   final UpdateController updateController;
 
+  /// Opens the Feishu panel (drawer button below "New workspace").
+  final VoidCallback onOpenFeishu;
+
   const _WorkspaceDrawer({
     required this.workspaces,
     required this.currentIndex,
@@ -1690,6 +1695,7 @@ class _WorkspaceDrawer extends StatelessWidget {
     required this.onAcceptReorder,
     required this.updateModel,
     required this.updateController,
+    required this.onOpenFeishu,
   });
 
   static const double _expandedWidth = 200;
@@ -1801,6 +1807,49 @@ class _WorkspaceDrawer extends StatelessWidget {
                           'New',
                           style: TextStyle(
                             fontSize: 12,
+                            color: palette.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Feishu entry below the New Workspace button — opens the
+          // standalone Feishu panel (QR binding + master toggle).
+          // Styled after the Settings button, but with the official
+          // bird mark instead of a Material glyph.
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: onOpenFeishu,
+              child: Tooltip(
+                message: 'Feishu',
+                child: Container(
+                  height: 28,
+                  margin: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+                  decoration: BoxDecoration(
+                    color: Colors.transparent,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: palette.rowSurface, width: 1),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      FeishuBrandIcon(
+                        size: 14,
+                        color: palette.brightness == Brightness.dark
+                            ? palette.textMuted
+                            : palette.textBody,
+                      ),
+                      if (!collapsed) ...[
+                        const SizedBox(width: 6),
+                        Text(
+                          'Feishu',
+                          style: TextStyle(
+                            fontSize: 11,
                             color: palette.textSecondary,
                           ),
                         ),
