@@ -410,6 +410,22 @@ class TerminalViewState extends State<TerminalView> {
   Timer? _flushTimer;
   static const Duration _flushInterval = Duration(milliseconds: 8);
 
+  /// Broadcast mirror of every PTY output batch (the same bytes
+  /// `_engine.feedWithKitty` receives), for integrations that relay
+  /// terminal output elsewhere — the Feishu remote control. Lazily
+  /// created on first access; a broadcast controller with no
+  /// listeners costs one `add` per flush.
+  StreamController<Uint8List>? _outputTap;
+  Stream<Uint8List>? _outputTapView;
+  Stream<Uint8List> get outputTap => _outputTapView ??=
+      (_outputTap = StreamController<Uint8List>.broadcast()).stream;
+
+  /// Remote-command entry point (Feishu remote control): write
+  /// [bytes] into the PTY as if typed at the keyboard — raw bytes,
+  /// no paste-mode translation. Public mirror for AppShell's
+  /// FeishuHostBridge; nothing else should use this.
+  void writeToPtyPublic(Uint8List bytes) => _engine.write(bytes);
+
   String _lastTitle = '';
   String _lastPwd = '';
 
@@ -1396,6 +1412,10 @@ class TerminalViewState extends State<TerminalView> {
     if (_outputBuffer.isEmpty) return;
     final batch = _outputBuffer.takeBytes();
     _outputBuffer.clear();
+    // Remote-control tap (Feishu): mirror every PTY output batch to
+    // broadcast listeners. Zero listeners in the common case; see
+    // [outputTap].
+    _outputTap?.add(batch);
     // OSC 7 pre-scan (Dart-side): the Rust engine's own OSC 7 pre-parser
     // stops scanning a batch at the first OSC it doesn't know (title
     // OSC 2 / OSC 1 — emitted around every oh-my-zsh prompt), silently
@@ -2494,6 +2514,7 @@ class TerminalViewState extends State<TerminalView> {
     _focus.removeListener(_syncFocusReport);
     widget.windowFocus?.removeListener(_syncFocusReport);
     _pty?.kill();
+    _outputTap?.close();
     _controller.dispose();
     _engine.dispose();
     // _focus is BORROWED from widget.surface.focusNode — Surface owns

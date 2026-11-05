@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show utf8;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,8 @@ import 'package:flutter_alacritty/flutter_alacritty.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:window_manager/window_manager.dart';
 import 'src/app_info.dart';
+import 'src/feishu/feishu_binding_flow.dart';
+import 'src/feishu/feishu_integration.dart';
 import 'src/notifications/desktop_notifications.dart';
 import 'src/notifications/in_app_banner_overlay.dart';
 import 'src/notifications/notification_hub.dart';
@@ -581,6 +584,8 @@ class _AppShellState extends State<AppShell>
           if (mounted) setState(() {});
         });
 
+    _initFeishuIntegration();
+
     // Intercept the OS-level close signal so we can show the
     // "Exit Octodo?" dialog when the user clicks the window's × button.
     // The handler checks `general.confirmOnExit` at close time
@@ -590,6 +595,38 @@ class _AppShellState extends State<AppShell>
 
     _initNotificationPipeline();
     unawaited(_syncFocusOnce());
+  }
+
+  /// Wire the Feishu remote control: create the integration with a
+  /// bridge into the active workspace's focused terminal, sync it
+  /// with the settings toggle + stored credentials, and re-sync
+  /// when either changes (a QR bind/unbind flips the credentials on
+  /// disk; the toggle flips the master switch).
+  void _initFeishuIntegration() {
+    final integration = FeishuIntegration(bridge: _AppShellFeishuBridge(this));
+    _feishu = integration;
+    unawaited(integration.sync(
+      enabled: SettingsRuntime.instance.store
+          .get<bool>(SettingsRuntime.instance.catalog.feishu.enabled),
+    ));
+    _feishuEnabledSub = SettingsRuntime.instance.store
+        .watch<bool>(SettingsRuntime.instance.catalog.feishu.enabled)
+        .listen((enabled) => unawaited(integration.sync(enabled: enabled)));
+    FeishuBindingFlow.shared.addListener(_onFeishuFlowChanged);
+  }
+
+  void _onFeishuFlowChanged() {
+    final phase = FeishuBindingFlow.shared.phase;
+    // Credentials changed on disk: a fresh bind (connected) or an
+    // unbind (idle from connected). Re-run the sync; it reads the
+    // store and starts/stops the channel accordingly.
+    if (phase == FeishuBindingPhase.connected ||
+        phase == FeishuBindingPhase.idle) {
+      unawaited(_feishu?.sync(
+        enabled: SettingsRuntime.instance.store
+            .get<bool>(SettingsRuntime.instance.catalog.feishu.enabled),
+      ));
+    }
   }
 
   /// Wire the notification hub to the desktop backend and settings.
@@ -875,6 +912,11 @@ class _AppShellState extends State<AppShell>
   /// re-reads the flag and short-circuits to an empty map when
   /// disabled. Same pattern as `_OctodoAppState._themeSub`.
   StreamSubscription<bool>? _shortcutsEnabledSub;
+
+  /// Feishu remote-control runtime (WS channel + router). Created
+  /// once in initState; null only before that.
+  FeishuIntegration? _feishu;
+  StreamSubscription<bool>? _feishuEnabledSub;
 
   /// Install in [initState]; uninstall in [dispose].
   void _installEarlyKeyHandler() {
@@ -1508,6 +1550,9 @@ class _AppShellState extends State<AppShell>
   @override
   void dispose() {
     _shortcutsEnabledSub?.cancel();
+    _feishuEnabledSub?.cancel();
+    FeishuBindingFlow.shared.removeListener(_onFeishuFlowChanged);
+    _feishu?.dispose();
     _notificationsEnabledSub?.cancel();
     _notificationsRealertSub?.cancel();
     _hub.removeListener(_onHubChanged);
@@ -2715,4 +2760,29 @@ class _CollapsedWorkspaceTileState extends State<_CollapsedWorkspaceTile> {
       ),
     );
   }
+}
+
+/// Feishu bridge into the active workspace: commands are written to
+/// the focused terminal of the active workspace, and its output is
+/// mirrored from the same terminal. Both resolve at event time so
+/// the bot always drives whatever the user currently has in focus
+/// (design doc §3.2: the binding follows the active workspace).
+class _AppShellFeishuBridge implements FeishuHostBridge {
+  final _AppShellState shell;
+  const _AppShellFeishuBridge(this.shell);
+
+  octodo_terminal_view.TerminalViewState? _focusedTerminal() =>
+      shell._activeWorkspace?.key.currentState
+          ?.getFocusedTerminalViewState();
+
+  @override
+  void runCommand(String command) {
+    final view = _focusedTerminal();
+    if (view == null) return;
+    view.writeToPtyPublic(Uint8List.fromList(utf8.encode(command)));
+  }
+
+  @override
+  Stream<List<int>>? subscribeActiveOutput() =>
+      _focusedTerminal()?.outputTap;
 }
