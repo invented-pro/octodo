@@ -27,11 +27,19 @@ class FeishuInboundEvent {
   /// (images, files, post, …) which the router drops.
   final String text;
 
+  /// Message creation time on Feishu's server, milliseconds since
+  /// epoch (`message.create_time`). 0 when the field is absent.
+  /// The router replays nothing older than the dedup window —
+  /// Feishu redelivers every event it never saw acked, including
+  /// the whole backlog queued while no client was connected.
+  final int createTime;
+
   const FeishuInboundEvent({
     required this.senderOpenId,
     required this.chatId,
     required this.messageId,
     required this.text,
+    this.createTime = 0,
   });
 }
 

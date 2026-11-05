@@ -150,7 +150,22 @@ class FeishuIntegration {
 
   @visibleForTesting
   void handleEvent(FeishuInboundEvent event) {
-    // 1. Dedup (§4.3): re-delivery after a 3 s ack miss, or the same
+    // 1. Replay gate: Feishu redelivers every event it never saw
+    //    acked — on the first connection after an outage that
+    //    includes the whole backlog (observed: yesterday's messages
+    //    re-executed on today's connect). A command older than the
+    //    dedup window is a replay whose moment has passed; the
+    //    in-memory dedup below can't catch it across restarts.
+    if (event.createTime > 0) {
+      final ageMs = DateTime.now().millisecondsSinceEpoch - event.createTime;
+      if (ageMs > _kDedupTtl.inMilliseconds) {
+        _log.info('feishu: dropped stale replay ${event.messageId} '
+            '(age ${(ageMs / 1000).round()}s)');
+        return;
+      }
+    }
+
+    // 2. Dedup (§4.3): re-delivery after a 3 s ack miss, or the same
     //    event landing twice after a reconnect.
     final now = DateTime.now();
     _seen.removeWhere((_, at) => now.difference(at) > _kDedupTtl);
@@ -160,7 +175,7 @@ class FeishuIntegration {
       _seen.remove(_seen.keys.first);
     }
 
-    // 2. Whitelist (§4.2): the creator + ids added later; anything
+    // 3. Whitelist (§4.2): the creator + ids added later; anything
     //    else is dropped silently (no reply — don't leak the bot).
     final allowed = _credentials?.allowedOpenIds;
     if (allowed == null ||
@@ -171,13 +186,13 @@ class FeishuIntegration {
       return;
     }
 
-    // 3. Text only; empty text (stickers etc.) is ignored.
+    // 4. Text only; empty text (stickers etc.) is ignored.
     if (event.text.isEmpty) return;
 
-    // 4. A new command flushes any pending output capture first.
+    // 5. A new command flushes any pending output capture first.
     _capture?.flush();
 
-    // 5. Execute: write into the active terminal and watch its
+    // 6. Execute: write into the active terminal and watch its
     //    output for the aggregation window.
     final output = bridge.subscribeActiveOutput();
     if (output == null) {
@@ -193,7 +208,8 @@ class FeishuIntegration {
       onDone: () => _capture = null,
     );
     bridge.runCommand('${event.text}\n');
-    _log.info('feishu: command from ${event.senderOpenId} executed');
+    _log.info('feishu: command ${event.messageId} '
+        'from ${event.senderOpenId} executed');
   }
 
   void _onEvent(FeishuInboundEvent event) => handleEvent(event);

@@ -1803,7 +1803,9 @@ function prompt {
   ///
   /// Used by the app-level shortcut handler to dispatch terminal-level
   /// actions (copy / paste / zoom / scroll) without each `TerminalView`
-  /// having to register its own `HardwareKeyboard` listener.
+  /// having to register its own `HardwareKeyboard` listener, and by
+  /// the Feishu remote-control bridge for command injection/output
+  /// capture.
   TerminalViewState? getFocusedTerminalViewState() {
     final container = _focusedContainer;
     if (container == null) return null;
@@ -1813,7 +1815,10 @@ function prompt {
     }
     final surface = container.focusedSurface;
     if (surface == null) return null;
-    return surface.viewKey.currentState as TerminalViewState?;
+    // NOT `viewKey.currentState` — the key sits on a KeyedSubtree
+    // (stateless), so currentState is always null. The surface
+    // resolves the TerminalViewState through the subtree's context.
+    return surface.terminalViewState;
   }
 
   // ── Notification-pipeline support ───────────────────────────────

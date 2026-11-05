@@ -425,29 +425,41 @@ class FeishuWsChannel implements FeishuEventChannel {
           'kind=${frame.header(kPbbpType) ?? "?"} '
           'message_id=${frame.header(kPbbpMessageId) ?? "-"} '
           'bytes=${frame.payload?.length ?? 0} '
-          'event_type=${_peekEventType(frame.payload) ?? "-"}');
+          '${_peekEventSummary(frame.payload)}');
     } on FormatException {
       _log.warning('feishu: undecodable frame (${data.length} bytes)');
     }
   }
 
-  static String? _peekEventType(Uint8List? payload) {
-    if (payload == null || payload.isEmpty) return null;
+  /// One-line peek into an event payload for the diagnostics log —
+  /// the routing keys (event type, om_ id, server create_time).
+  static String _peekEventSummary(Uint8List? payload) {
+    if (payload == null || payload.isEmpty) return 'event_type=-';
     try {
       final decoded = jsonDecode(utf8.decode(payload, allowMalformed: true));
       if (decoded is Map<String, dynamic>) {
         final header = decoded['header'];
-        if (header is Map<String, dynamic>) {
-          // Type-check instead of cast: a non-string value here must
-          // not throw from inside the logging path.
-          final type = header['event_type'] ?? header['event'];
-          return type is String ? type : null;
-        }
+        final event = decoded['event'];
+        final message =
+            event is Map<String, dynamic> ? event['message'] : null;
+        final om = message is Map<String, dynamic>
+            ? (message['message_id'] as String? ?? '-')
+            : '-';
+        final created = message is Map<String, dynamic>
+            ? (message['create_time'] as String? ?? '-')
+            : '-';
+        // Type-check instead of cast: a non-string value here must
+        // not throw from inside the logging path.
+        final type = header is Map<String, dynamic>
+            ? (header['event_type'] ?? header['event'])
+            : null;
+        return 'event_type=${type is String ? type : "-"} om=$om '
+            'create_time=$created';
       }
     } on FormatException {
-      // Payload isn't JSON — leave the event type unset.
+      // Payload isn't JSON — leave the summary minimal.
     }
-    return null;
+    return 'event_type=-';
   }
 
   Future<Uri> _fetchEndpointUrl(String domain) async {
@@ -514,6 +526,8 @@ class FeishuWsChannel implements FeishuEventChannel {
     final chatId = message['chat_id'] as String? ?? '';
     final messageId = message['message_id'] as String? ?? '';
     if (chatId.isEmpty || messageId.isEmpty) return null;
+    // Feishu serializes create_time as a ms-epoch string.
+    final createTime = int.tryParse('${message['create_time'] ?? ''}') ?? 0;
     var text = '';
     if (message['message_type'] == 'text') {
       final content = message['content'];
@@ -533,6 +547,7 @@ class FeishuWsChannel implements FeishuEventChannel {
       chatId: chatId,
       messageId: messageId,
       text: text.trim(),
+      createTime: createTime,
     );
   }
 

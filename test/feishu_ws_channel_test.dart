@@ -13,6 +13,8 @@ import 'package:octodo/src/feishu/feishu_credentials.dart';
 import 'package:octodo/src/feishu/feishu_ws_channel.dart';
 import 'package:octodo/src/feishu/pbbp_frame.dart';
 
+import 'feishu_frame_vectors.dart';
+
 FeishuCredentials _creds({String brand = 'feishu'}) => FeishuCredentials(
       appId: 'cli_x',
       appSecret: 'secret',
@@ -240,6 +242,7 @@ void main() {
                 'chat_id': 'oc_chat',
                 'message_id': 'om_msg',
                 'message_type': messageType,
+                'create_time': '1793892935763',
                 'content': content ?? jsonEncode({'text': 'echo hi'}),
               },
             },
@@ -252,6 +255,7 @@ void main() {
       expect(e.chatId, 'oc_chat');
       expect(e.messageId, 'om_msg');
       expect(e.text, 'echo hi');
+      expect(e.createTime, 1793892935763);
     });
 
     test('non-text messages yield empty text', () {
@@ -271,6 +275,22 @@ void main() {
       final broken = Uint8List.fromList(
           utf8.encode(jsonEncode({'header': {}, 'event': {}})));
       expect(FeishuWsChannel.parseImMessageEvent(broken), isNull);
+    });
+
+    test('the real captured frame routes end to end', () {
+      // Regression for the multi-byte-tag bug: the genuine frame
+      // must survive the full pipeline — wire decode → event
+      // extraction — with every routing field intact.
+      final frame = PbbpFrame.decode(Uint8List.fromList([
+        for (var i = 0; i < kCapturedEventFrameHex.length; i += 2)
+          int.parse(kCapturedEventFrameHex.substring(i, i + 2), radix: 16),
+      ]));
+      final e = FeishuWsChannel.parseImMessageEvent(frame.payload!);
+      expect(e, isNotNull);
+      expect(e!.senderOpenId, 'ou_e2404f9e452f734475a4d836bc7ecedd');
+      expect(e.chatId, 'oc_52fc3e78f55c13d122141b9d73f7a9ac');
+      expect(e.messageId, 'om_x100b61fe6ab7e0a0b0fb853f260ca9e');
+      expect(e.text, 'ls');
     });
   });
 }

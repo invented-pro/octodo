@@ -2779,7 +2779,14 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
   void runCommand(String command) {
     final view = _focusedTerminal();
     if (view == null) return;
-    view.writeToPtyPublic(Uint8List.fromList(utf8.encode(command)));
+    // The terminal's Enter key is CR (0x0d) — see flutter_alacritty's
+    // input/key_input.dart. A lone LF lands in PSReadLine's
+    // continuation prompt (>>) without submitting the line, so every
+    // line ending the router appends must become CR before it is
+    // written to the PTY.
+    final bytes = Uint8List.fromList(
+        utf8.encode(command.replaceAll(RegExp(r'\r\n|\n'), '\r')));
+    view.writeToPtyPublic(bytes);
   }
 
   @override

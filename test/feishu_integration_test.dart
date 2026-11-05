@@ -114,11 +114,12 @@ void main() {
       outputWindow: const Duration(milliseconds: 30),
     );
 
-    integration.handleEvent(const FeishuInboundEvent(
+    integration.handleEvent(FeishuInboundEvent(
       senderOpenId: 'ou_owner',
       chatId: 'oc_chat',
       messageId: 'om_1',
       text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
     ));
 
     expect(bridge.commands, ['echo hi\n']);
@@ -143,14 +144,41 @@ void main() {
         outputWindow: const Duration(milliseconds: 5000));
 
     for (var i = 0; i < 3; i++) {
-      integration.handleEvent(const FeishuInboundEvent(
+      integration.handleEvent(FeishuInboundEvent(
         senderOpenId: 'ou_owner',
         chatId: 'oc_chat',
         messageId: 'om_same',
         text: 'echo dup',
+        createTime: DateTime.now().millisecondsSinceEpoch,
       ));
     }
     expect(bridge.commands, ['echo dup\n']);
+  });
+
+  test('stale replays (backlog redelivery after restart) are dropped',
+      () async {
+    final bridge = _RecordingBridge();
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    // Feishu redelivers un-acked events on the next connect — even
+    // from a previous day. Anything older than the dedup TTL must
+    // not re-execute.
+    final stale = DateTime.now().subtract(const Duration(minutes: 30));
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_yesterday',
+      text: 'ls',
+      createTime: stale.millisecondsSinceEpoch,
+    ));
+
+    expect(bridge.commands, isEmpty);
+    expect(sent, isEmpty);
   });
 
   test('no active terminal replies a hint instead of executing', () async {

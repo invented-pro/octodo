@@ -88,6 +88,25 @@ class Surface extends ChangeNotifier {
   /// breaks the key's uniqueness invariant).
   final GlobalKey viewKey = GlobalKey();
 
+  /// The live [TerminalViewState] of this surface's [TerminalView],
+  /// or null while the surface is not mounted.
+  ///
+  /// [viewKey] sits on a [KeyedSubtree] — a **stateless** widget (it
+  /// must not sit on the TerminalView itself; see the [viewKey]
+  /// comment at its use site) — so `viewKey.currentState` is always
+  /// null. Resolve the state through the subtree's context instead:
+  /// the KeyedSubtree's single child element IS the TerminalView.
+  TerminalViewState? get terminalViewState {
+    final context = viewKey.currentContext;
+    if (context == null) return null;
+    TerminalViewState? found;
+    context.visitChildElements((element) {
+      final state = element is StatefulElement ? element.state : null;
+      if (state is TerminalViewState) found = state;
+    });
+    return found;
+  }
+
   /// Title set by the shell via OSC 0/2 escape sequences (e.g. ssh
   /// or opencode set it to "user@host" or "opencode ~/projects").
   /// Empty until the shell reports its own title.
