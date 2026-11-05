@@ -4,9 +4,10 @@
 //   inbound:  event → whitelist (allowed open_ids) → dedup
 //             (message_id window) → host bridge writes the command
 //             into the active terminal
-//   outbound: the active terminal's output, aggregated over a short
-//             window after each command, stripped of escape
-//             sequences, sent back to the originating chat
+//   outbound: the active terminal's output, aggregated until the
+//             command finishes (output gone quiet + a fresh shell
+//             prompt), stripped of escape noise and the command's
+//             own echo, sent back to the originating chat
 //
 // The host (AppShell) supplies the terminal bridge; everything else
 // lives here so the routing rules are unit-testable without the UI.
@@ -32,7 +33,8 @@ abstract class FeishuHostBridge {
 
   /// Broadcast stream of the active terminal's raw PTY output, or
   /// null when there is no active terminal. The router subscribes
-  /// for a short window after each command.
+  /// from just before a command is written until that command's
+  /// output has gone quiet.
   Stream<List<int>>? subscribeActiveOutput();
 }
 
@@ -42,9 +44,16 @@ const int _kDedupCapacity = 1000;
 /// …for at most this long.
 const Duration _kDedupTtl = Duration(minutes: 10);
 
-/// Output aggregation window (§5): collect PTY output for this long
-/// after a command, then reply. Injectable for tests.
+/// Output aggregation idle window (§5): after a command, this much
+/// terminal silence ends the capture — but only once a fresh shell
+/// prompt has appeared at the tail (see [_OutputCapture]). Every
+/// output chunk restarts the wait. Injectable for tests.
 const Duration _kOutputWindowDefault = Duration(milliseconds: 2500);
+
+/// Hard ceiling on one command's capture: commands that never
+/// finish (or shells whose prompt we don't recognize) still get a
+/// partial reply after this long.
+const Duration _kOutputMaxWindowDefault = Duration(seconds: 60);
 
 /// …or until this many bytes arrive, whichever first.
 const int _kOutputMaxBytes = 15 * 1024;
@@ -72,8 +81,11 @@ class FeishuIntegration {
   /// the previous capture immediately).
   _OutputCapture? _capture;
 
-  /// Output aggregation window after each command (injectable).
+  /// Idle window that ends a command's output capture (injectable).
   final Duration outputWindow;
+
+  /// Hard ceiling on one command's output capture (injectable).
+  final Duration maxOutputWindow;
 
   FeishuIntegration({
     required this.bridge,
@@ -81,6 +93,7 @@ class FeishuIntegration {
     FeishuApiClient? api,
     FeishuCredentialStore? credentialStore,
     this.outputWindow = _kOutputWindowDefault,
+    this.maxOutputWindow = _kOutputMaxWindowDefault,
   })  : channel = channel ?? FeishuWsChannel(),
         api = api ?? FeishuApiClient(),
         credentialStore =
@@ -204,7 +217,9 @@ class FeishuIntegration {
       stream: output,
       chatId: event.chatId,
       api: api,
-      window: outputWindow,
+      command: event.text,
+      idleWindow: outputWindow,
+      maxWindow: maxOutputWindow,
       onDone: () => _capture = null,
     );
     bridge.runCommand('${event.text}\n');
@@ -223,53 +238,119 @@ class FeishuIntegration {
   }
 }
 
-/// Collects one command's PTY output: a short [window] of bytes
-/// (capped), then one cleaned-up reply message.
+/// Collects one command's PTY output and turns it into a single
+/// cleaned-up reply. The capture ends at the first of:
+///
+///  - [idleWindow] of silence with a fresh shell prompt at the
+///    tail — the normal "command finished" signal. Silence alone is
+///    NOT enough: cold toolchains (first `flutter --version`, pub
+///    resolution, …) stay silent for far longer than the idle
+///    window before printing anything, and a fixed window used to
+///    flush the command's echo and miss the real output entirely.
+///  - [_kOutputMaxBytes] bytes (very verbose commands),
+///  - [maxWindow] since the command was written — commands that
+///    never finish, or shells whose prompt we don't recognize,
+///  - the output stream closing, or the next command arriving
+///    (the router flushes the previous capture).
 class _OutputCapture {
   final Stream<List<int>> stream;
   final String chatId;
   final FeishuApiClient api;
   final VoidCallback onDone;
 
+  /// The command exactly as sent, used to strip the shell's echo
+  /// of it from the head of the reply.
+  final String command;
+
+  /// Quiet period that may end the capture once a prompt shows.
+  final Duration idleWindow;
+
+  /// Absolute ceiling on the whole capture.
+  final Duration maxWindow;
+
   final List<int> _buffer = [];
   StreamSubscription<List<int>>? _sub;
-  Timer? _timer;
+  Timer? _idleTimer;
+  Timer? _capTimer;
   bool _finished = false;
 
   _OutputCapture({
     required this.stream,
     required this.chatId,
     required this.api,
-    required Duration window,
+    required this.command,
+    required this.idleWindow,
+    required this.maxWindow,
     required this.onDone,
   }) {
-    _sub = stream.listen(_onBytes, onError: (_) {});
-    _timer = Timer(window, flush);
+    _sub = stream.listen(_onBytes, onError: (_) {}, onDone: flush);
+    _idleTimer = Timer(idleWindow, _onIdle);
+    _capTimer = Timer(maxWindow, flush);
   }
 
   void _onBytes(List<int> data) {
     if (_finished) return;
     _buffer.addAll(data);
-    if (_buffer.length >= _kOutputMaxBytes) flush();
+    if (_buffer.length >= _kOutputMaxBytes) {
+      flush();
+      return;
+    }
+    // Output is still flowing — the command is alive. Restart the
+    // quiet-period clock.
+    _idleTimer?.cancel();
+    _idleTimer = Timer(idleWindow, _onIdle);
+  }
+
+  void _onIdle() {
+    if (_finished) return;
+    // Quiet for one idle window. Only reply when the shell shows a
+    // fresh prompt (it finished and is waiting for input); without
+    // one the command may still be running silently, so keep
+    // waiting up to the hard cap.
+    final lines = _cleanLines(_buffer);
+    final tail = lines.isEmpty ? '' : lines.last;
+    if (promptLike.hasMatch(tail)) {
+      flush();
+      return;
+    }
+    _idleTimer = Timer(idleWindow, _onIdle);
   }
 
   /// Stop capturing and send what we have (if anything readable).
   void flush() {
     if (_finished) return;
     _finished = true;
-    _timer?.cancel();
+    _idleTimer?.cancel();
+    _idleTimer = null;
+    _capTimer?.cancel();
+    _capTimer = null;
     _sub?.cancel();
     final bytes = _buffer.toList();
     _buffer.clear();
     onDone();
-    final text = _toReadableText(bytes);
-    if (text.isEmpty) return; // command produced no visible output
-    unawaited(api.sendText(chatId, text).catchError((_) {}));
+    var lines = _cleanLines(bytes);
+    // The shell's echo of the command itself is noise on the phone.
+    if (lines.length > 1 && lines.first == command) lines.removeAt(0);
+    // So is the fresh prompt that told us the command finished
+    // (kept when it is all there is — it is the reply to `cd ..`).
+    if (lines.length > 1 && promptLike.hasMatch(lines.last)) {
+      lines.removeLast();
+    }
+    if (lines.isEmpty) return; // command produced no visible output
+    unawaited(api.sendText(chatId, _formatLines(lines)).catchError((_) {}));
   }
+
+  /// What the common shells print while waiting for input:
+  /// PowerShell (`PS C:\Users\Sun>`), cmd (`C:\>`), and the usual
+  /// unix sigils ($, >, %, ❯, ➜) at the end of a short line.
+  /// Deliberately loose: a false positive costs one early reply,
+  /// a false negative delays the reply to the hard cap.
+  static final RegExp promptLike = RegExp(
+      r'^(?:PS .+>|[A-Za-z]:[\\/].+>|\\\\.+>|\S.{0,98}[>$❯➜]|[>$❯➜])$');
 
   /// UTF-8 (malformed tolerated) minus ANSI CSI/OSC sequences and
   /// carriage noise — what a reader on the phone cares about.
-  static String _toReadableText(List<int> bytes) {
+  static List<String> _cleanLines(List<int> bytes) {
     var text = utf8.decode(bytes, allowMalformed: true);
     // OSC (title, hyperlinks, …): ESC ] … BEL / ESC \
     final osc = RegExp('\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)');
@@ -280,21 +361,21 @@ class _OutputCapture {
     text = text.replaceAll('\x1b', '');
     // Drop BEL, vertical tab; normalize newlines.
     text = text.replaceAll('\x07', '').replaceAll('\r', '');
-    final lines = text
+    return text
         .split('\n')
         .map((l) => l.trimRight())
         .where((l) => l.isNotEmpty)
         .toList();
-    if (lines.isEmpty) return '';
-    // Very verbose output: keep head and tail with an ellipsis.
+  }
+
+  /// Very verbose output: keep head and tail with an ellipsis.
+  static String _formatLines(List<String> lines) {
     const maxLines = 40;
-    if (lines.length > maxLines) {
-      const keep = 15;
-      final head = lines.take(keep).join('\n');
-      final tail = lines.sublist(lines.length - keep).join('\n');
-      return '$head\n… (${lines.length - keep * 2} lines)…\n$tail';
-    }
-    return lines.join('\n');
+    if (lines.length <= maxLines) return lines.join('\n');
+    const keep = 15;
+    final head = lines.take(keep).join('\n');
+    final tail = lines.sublist(lines.length - keep).join('\n');
+    return '$head\n… (${lines.length - keep * 2} lines)…\n$tail';
   }
 }
 

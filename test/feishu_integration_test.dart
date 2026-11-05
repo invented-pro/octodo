@@ -132,8 +132,79 @@ void main() {
 
     expect(sent.length, 1);
     expect(sent.single.$1, 'oc_chat');
-    // Escape sequences stripped, blank lines dropped.
-    expect(sent.single.$2, 'hi\n\$');
+    // Escape sequences stripped, blank lines dropped, and the
+    // trailing prompt ($) recognized as end-of-command and removed.
+    expect(sent.single.$2, 'hi');
+  });
+
+  test('long-running commands: the reply waits for the real output',
+      () async {
+    final bridge = _RecordingBridge();
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      outputWindow: const Duration(milliseconds: 40),
+      maxOutputWindow: const Duration(seconds: 5),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_slow',
+      text: 'flutter --version',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    expect(bridge.commands, ['flutter --version\n']);
+
+    // The shell echoes the command instantly, then the toolchain
+    // warms up silently for far longer than the idle window. No
+    // prompt has shown, so nothing may be sent yet (this is the
+    // field bug: the reply used to be just the echo).
+    bridge.outputController.add(utf8.encode('flutter --version\r\n'));
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(sent, isEmpty, reason: 'no prompt yet — command may still run');
+
+    // Seconds later the real output arrives, then the fresh prompt.
+    bridge.outputController
+        .add(utf8.encode('Flutter 3.47.9 • channel stable\r\n'));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    bridge.outputController.add(utf8.encode('PS C:\\Users\\Sun> '));
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+
+    expect(sent.length, 1);
+    // Echo stripped, prompt stripped: just the output.
+    expect(sent.single.$2, 'Flutter 3.47.9 • channel stable');
+  });
+
+  test('commands that never show a prompt get a partial reply at the cap',
+      () async {
+    final bridge = _RecordingBridge();
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      outputWindow: const Duration(milliseconds: 30),
+      maxOutputWindow: const Duration(milliseconds: 250),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_spin',
+      text: 'spin',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    bridge.outputController.add(utf8.encode('spinning\r\n'));
+
+    // The tail never looks like a prompt, so the idle window keeps
+    // extending — but the hard cap still produces exactly one
+    // partial reply rather than waiting forever.
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    expect(sent.length, 1);
+    expect(sent.single.$2, 'spinning');
   });
 
   test('duplicate message ids are executed once (re-delivery)', () async {
@@ -222,6 +293,7 @@ Future<FeishuIntegration> _routerFor({
   required _RecordingBridge bridge,
   void Function(String chat, String text)? onSend,
   Duration outputWindow = const Duration(seconds: 5),
+  Duration maxOutputWindow = const Duration(seconds: 60),
 }) async {
   final dir = Directory.systemTemp.createTempSync('feishu_router');
   addTearDown(() => dir.deleteSync(recursive: true));
@@ -236,6 +308,7 @@ Future<FeishuIntegration> _routerFor({
     api: api,
     credentialStore: store,
     outputWindow: outputWindow,
+    maxOutputWindow: maxOutputWindow,
   );
   // Load the credentials written above so the whitelist is active.
   await integration.sync(enabled: true);
