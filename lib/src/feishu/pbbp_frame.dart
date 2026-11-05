@@ -137,7 +137,10 @@ class PbbpFrame {
     }
 
     while (i < data.length) {
-      final tag = data[i++];
+      // The tag itself is a varint: fields ≥ 16 (Feishu sends 20,
+      // 21, 22 on real frames) encode it in two bytes. Reading a
+      // single byte derails every field after the first one.
+      final tag = readVarint();
       final field = tag >> 3;
       final wireType = tag & 7;
       switch (field) {
@@ -208,6 +211,9 @@ class PbbpFrame {
       throw const FormatException('truncated varint in pbbp2 header');
     }
 
+    // A tag is just a small varint — same reader.
+    int readTagVarint() => readVarint();
+
     String readStr() {
       final len = readVarint();
       final end = i + len;
@@ -220,7 +226,9 @@ class PbbpFrame {
     }
 
     while (i < body.length) {
-      final tag = body[i++];
+      // Tag is a varint (see decode); header fields 1-2 fit in one
+      // byte, but future fields need not.
+      final tag = readTagVarint();
       switch (tag >> 3) {
         case 1:
           key = readStr();

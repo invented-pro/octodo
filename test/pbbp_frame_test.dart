@@ -7,6 +7,13 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:octodo/src/feishu/pbbp_frame.dart';
 
+import 'feishu_frame_vectors.dart';
+
+Uint8List _bytesOf(String hex) => Uint8List.fromList([
+      for (var i = 0; i < hex.length; i += 2)
+        int.parse(hex.substring(i, i + 2), radix: 16),
+    ]);
+
 void main() {
   test('a ping encodes like the official SDKs', () {
     // From the Python SDK:
@@ -86,5 +93,39 @@ void main() {
       () => PbbpFrame.decode(Uint8List.fromList([0x0a, 0x05, 0x61])),
       throwsFormatException,
     );
+  });
+
+  group('real captured frames (2026-11-05 long connection)', () {
+    // These two regression vectors are the exact bytes Feishu sent
+    // over the WebSocket. They carry fields 12–14 and 20–22 behind
+    // the SDK-documented schema — tags that only fit in multi-byte
+    // varints, which is what broke the codec originally: it read
+    // tags as single bytes and derailed every field after the first
+    // one (surfacing as "truncated varint" at the frame tail).
+    test('captured pong decodes with its ClientConfig payload', () {
+      final f = PbbpFrame.decode(_bytesOf(kCapturedPongFrameHex));
+      expect(f.method, kPbbpControl);
+      expect(f.service, 33554678);
+      expect(f.header('type'), 'pong');
+      expect(f.header('is_ack'), '1');
+      expect(f.header('code'), '0');
+      final cfg = jsonDecode(utf8.decode(f.payload!)) as Map<String, dynamic>;
+      expect(cfg['PingInterval'], 90);
+      expect(cfg['ReconnectCount'], -1);
+    });
+
+    test('captured event decodes across the multi-byte-tag tail', () {
+      final f = PbbpFrame.decode(_bytesOf(kCapturedEventFrameHex));
+      expect(f.method, kPbbpData);
+      expect(f.service, 33554678);
+      expect(f.header('type'), 'event');
+      expect(f.header('sum'), '1');
+      expect(f.header('seq'), '0');
+      expect(f.header('message_id'), isNotNull);
+      expect(f.logIdNew, isNotNull);
+      final json = jsonDecode(utf8.decode(f.payload!)) as Map<String, dynamic>;
+      expect(json['header']['event_type'], 'im.message.receive_v1');
+      expect(json['event']['message']['content'], '{"text":"ls"}');
+    });
   });
 }
