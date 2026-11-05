@@ -24,6 +24,7 @@ import '../../src/terminal/font_family_options.dart';
 import '../../src/theme/palette_context.dart';
 import 'chrome/settings_card.dart';
 import 'chrome/settings_row.dart';
+import 'feishu/feishu_section.dart';
 import 'widgets/trailing_widgets.dart';
 
 class SettingsDialog extends StatefulWidget {
@@ -211,6 +212,7 @@ class _Sidebar extends StatelessWidget {
     ('general', 'General', Icons.tune),
     ('terminal', 'Terminal', Icons.terminal),
     ('shortcuts', 'Shortcuts', Icons.keyboard),
+    ('feishu', 'Feishu', Icons.forum_outlined),
     ('paths', 'Settings files', Icons.folder),
   ];
 
@@ -317,6 +319,7 @@ class _Detail extends StatelessWidget {
           'general' => _buildGeneral(),
           'terminal' => _buildTerminal(),
           'shortcuts' => _buildShortcuts(),
+          'feishu' => FeishuSection(showJsonPaths: showJsonPaths),
           'paths' => _buildPaths(context),
           _ => const SizedBox.shrink(),
         },
