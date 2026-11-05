@@ -336,9 +336,9 @@ class FeishuWsChannel implements FeishuEventChannel {
     final url = await _fetchEndpointUrl(domain);
     if (_stopping || generation != _generation) return;
 
-    final service = int.tryParse(
-            url.queryParameters['service_id'] ?? '') ??
-        0;
+    final service =
+        int.tryParse(url.queryParameters['service_id'] ?? '') ?? 0;
+    final device = url.queryParameters['device_id'] ?? '';
     final connection = await _connect(url);
     if (_stopping || generation != _generation) {
       await connection.close();
@@ -354,7 +354,8 @@ class FeishuWsChannel implements FeishuEventChannel {
     );
 
     _setState(FeishuConnectionState.connected);
-    _log.info('feishu: long connection established');
+    _log.info('feishu: long connection established '
+        '(service_id=$service, device_id=$device)');
 
     _pingTimer?.cancel();
     _pingTimer = Timer.periodic(
@@ -369,6 +370,10 @@ class FeishuWsChannel implements FeishuEventChannel {
     try {
       await for (final message in connection.binaryMessages) {
         if (generation != _generation) return;
+        // Diagnostics first: every inbound frame is logged (data
+        // frames at INFO — they're rare; control at FINE) so a
+        // silent event pipeline is visible without a debugger.
+        _logInbound(message);
         // Pong settings updates.
         final reply = session.handleBinary(message);
         _applyPongSettings(message);
@@ -403,6 +408,46 @@ class FeishuWsChannel implements FeishuEventChannel {
     } on FormatException {
       // Not a pong we can read — fine.
     }
+  }
+
+  /// Log one inbound frame for diagnostics. Data frames (events,
+  /// cards) are rare, so they log at INFO; control frames (pong per
+  /// ping interval) at FINE. Undecodable frames warn.
+  void _logInbound(Uint8List data) {
+    try {
+      final frame = PbbpFrame.decode(data);
+      if (frame.method == kPbbpControl) {
+        _log.fine('feishu: control frame '
+            'type=${frame.header(kPbbpType) ?? "?"}');
+        return;
+      }
+      _log.info('feishu: data frame '
+          'kind=${frame.header(kPbbpType) ?? "?"} '
+          'message_id=${frame.header(kPbbpMessageId) ?? "-"} '
+          'bytes=${frame.payload?.length ?? 0} '
+          'event_type=${_peekEventType(frame.payload) ?? "-"}');
+    } on FormatException {
+      _log.warning('feishu: undecodable frame (${data.length} bytes)');
+    }
+  }
+
+  static String? _peekEventType(Uint8List? payload) {
+    if (payload == null || payload.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(utf8.decode(payload, allowMalformed: true));
+      if (decoded is Map<String, dynamic>) {
+        final header = decoded['header'];
+        if (header is Map<String, dynamic>) {
+          // Type-check instead of cast: a non-string value here must
+          // not throw from inside the logging path.
+          final type = header['event_type'] ?? header['event'];
+          return type is String ? type : null;
+        }
+      }
+    } on FormatException {
+      // Payload isn't JSON — leave the event type unset.
+    }
+    return null;
   }
 
   Future<Uri> _fetchEndpointUrl(String domain) async {

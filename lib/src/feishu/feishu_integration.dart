@@ -101,6 +101,10 @@ class FeishuIntegration {
   /// (un)bind. [enabled] is the `feishu.enabled` setting.
   Future<void> sync({required bool enabled}) async {
     _credentials = await credentialStore.load();
+    // Decision trace: a stop/start in the field log is only
+    // attributable if we can see what sync decided and why.
+    _log.info('feishu: sync enabled=$enabled '
+        'bound=${_credentials != null} running=$_running');
     if (!enabled || _credentials == null) {
       await _stop();
       return;
