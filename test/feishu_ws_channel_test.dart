@@ -91,6 +91,66 @@ void main() {
       expect(reply, isNull);
     });
 
+    test('a card callback waits for its answer', () async {
+      final session = FeishuWsSession(service: 5);
+      addTearDown(session.dispose);
+
+      final emitted = <_Event>[];
+      final sub = session.events
+          .listen((e) => emitted.add(_Event(e.messageId, e.payload)));
+
+      // The ack must not go out before the handler answered: the
+      // answer carries the card's response body.
+      final reply = session.handleBinary(_dataFrame(
+        messageId: 'om_card',
+        payload: utf8.encode(jsonEncode({
+          'schema': '2.0',
+          'header': {'event_type': 'card.action.trigger'},
+          'event': {
+            'operator': {'open_id': 'ou_owner'},
+            'action': {'value': {'a': 'attach', 'id': 'ws1'}},
+            'context': {'open_chat_id': 'oc_chat'},
+          },
+        })),
+      ).encode());
+      expect(reply, isNull);
+      await Future<void>.delayed(Duration.zero);
+      expect(emitted.single.id, 'om_card');
+
+      // The answer: the official SDKs put the handler's response into
+      // the frame's `data` field, base64-encoded.
+      final ack = session.completeCardCallback(
+          'om_card', {'toast': {'type': 'success', 'content': 'ok'}});
+      expect(ack, isNotNull);
+      final decoded = PbbpFrame.decode(ack!);
+      final payload = jsonDecode(utf8.decode(decoded.payload!))
+          as Map<String, dynamic>;
+      expect(payload['code'], 200);
+      expect(
+          utf8.decode(base64Decode(payload['data'] as String)),
+          '{"toast":{"type":"success","content":"ok"}}');
+      await sub.cancel();
+    });
+
+    test('a card callback answered with nothing keeps the card as it is',
+        () async {
+      final session = FeishuWsSession(service: 5);
+      addTearDown(session.dispose);
+
+      session.handleBinary(_dataFrame(
+        messageId: 'om_card',
+        payload: utf8.encode(jsonEncode({
+          'schema': '2.0',
+          'header': {'event_type': 'card.action.trigger'},
+          'event': {'operator': {'open_id': 'ou_owner'}},
+        })),
+      ).encode());
+
+      final ack = session.completeCardCallback('om_card', null);
+      expect(ack, isNotNull);
+      expect(utf8.decode(PbbpFrame.decode(ack!).payload!), '{"code":200}');
+    });
+
     test('split frames are combined in arrival order (out-of-order parts)',
         () async {
       final session = FeishuWsSession(service: 5);
@@ -222,6 +282,44 @@ void main() {
 
       expect(seenUrl.toString(),
           'https://open.larksuite.com/callback/ws/endpoint');
+    });
+  });
+
+  group('parseCardActionEvent', () {
+    test('extracts the operator, the chat and the button value', () {
+      final payload = Uint8List.fromList(utf8.encode(jsonEncode({
+            'schema': '2.0',
+            'header': {'event_type': 'card.action.trigger'},
+            'event': {
+              'operator': {'open_id': 'ou_owner'},
+              'token': 'c-abc',
+              'action': {
+                'tag': 'button',
+                'value': {'a': 'attach', 'id': 'ws_2'},
+              },
+              'context': {
+                'open_chat_id': 'oc_chat',
+                'open_message_id': 'om_card',
+              },
+            },
+          })));
+      final action = FeishuWsChannel.parseCardActionEvent(payload);
+      expect(action, isNotNull);
+      expect(action!.operatorOpenId, 'ou_owner');
+      expect(action.chatId, 'oc_chat');
+      expect(action.messageId, 'om_card');
+      expect(action.token, 'c-abc');
+      expect(action.action, 'attach');
+      expect(action.value['id'], 'ws_2');
+    });
+
+    test('a message event is not a card action', () {
+      final payload = Uint8List.fromList(utf8.encode(jsonEncode({
+            'schema': '2.0',
+            'header': {'event_type': 'im.message.receive_v1'},
+            'event': {'message': {'chat_id': 'oc_chat'}},
+          })));
+      expect(FeishuWsChannel.parseCardActionEvent(payload), isNull);
     });
   });
 

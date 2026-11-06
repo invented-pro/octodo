@@ -9,6 +9,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:octodo/src/feishu/feishu_api_client.dart';
+import 'package:octodo/src/feishu/feishu_binding.dart';
 import 'package:octodo/src/feishu/feishu_credentials.dart';
 import 'package:octodo/src/feishu/feishu_event_channel.dart';
 import 'package:octodo/src/feishu/feishu_integration.dart';
@@ -16,12 +17,29 @@ import 'package:octodo/src/feishu/opencode_client.dart';
 
 class _FakeChannel implements FeishuEventChannel {
   final eventsController = StreamController<FeishuInboundEvent>.broadcast();
+  final cardController = StreamController<FeishuCardActionEvent>.broadcast();
   FeishuCredentials? startedWith;
   int startCalls = 0;
   int stopCalls = 0;
 
+  /// The router's card-action handler — the tests call it directly.
+  Future<Map<String, dynamic>?> Function(FeishuCardActionEvent)? handler;
+
   @override
   Stream<FeishuInboundEvent> get events => eventsController.stream;
+
+  @override
+  Stream<FeishuCardActionEvent> get cardActions => cardController.stream;
+
+  @override
+  Future<Map<String, dynamic>?> Function(FeishuCardActionEvent)?
+      get cardActionHandler => handler;
+
+  @override
+  set cardActionHandler(
+      Future<Map<String, dynamic>?> Function(FeishuCardActionEvent)? value) {
+    handler = value;
+  }
 
   @override
   Stream<FeishuConnectionState> get stateChanges => const Stream.empty();
@@ -43,37 +61,49 @@ class _FakeChannel implements FeishuEventChannel {
 
 class _RecordingBridge implements FeishuHostBridge {
   final commands = <String>[];
+
+  /// The workspace each command went to (null = the active one).
+  final targets = <String?>[];
+
   final outputController = StreamController<List<int>>.broadcast();
   bool hasTerminal = true;
-  bool inAltScreen = false;
+  bool altScreen = false;
   List<String>? screenLines;
-  String terminalId = 'term_1';
+  String termId = 'term_1';
   String? cwd;
   Uint8List? png;
 
-  @override
-  void runCommand(String command) => commands.add(command);
+  /// The workspaces the fake reports to the `/attach` picker.
+  List<FeishuWorkspace> workspaces = const [];
 
   @override
-  Stream<List<int>>? subscribeActiveOutput() =>
+  List<FeishuWorkspace> listWorkspaces() => workspaces;
+
+  @override
+  void runCommand(String? workspaceId, String command) {
+    targets.add(workspaceId);
+    commands.add(command);
+  }
+
+  @override
+  Stream<List<int>>? subscribeOutput(String? workspaceId) =>
       hasTerminal ? outputController.stream : null;
 
   @override
-  bool? activeTerminalInAltScreen() =>
-      hasTerminal ? inAltScreen : null;
+  bool? inAltScreen(String? workspaceId) => hasTerminal ? altScreen : null;
 
   @override
-  List<String>? snapshotActiveScreen() =>
+  List<String>? snapshotScreen(String? workspaceId) =>
       hasTerminal ? screenLines : null;
 
   @override
-  String? activeTerminalId() => hasTerminal ? terminalId : null;
+  String? terminalId(String? workspaceId) => hasTerminal ? termId : null;
 
   @override
-  String? activeTerminalCwd() => hasTerminal ? cwd : null;
+  String? terminalCwd(String? workspaceId) => hasTerminal ? cwd : null;
 
   @override
-  Future<Uint8List?> snapshotActiveTerminalPng() async =>
+  Future<Uint8List?> snapshotPng(String? workspaceId) async =>
       hasTerminal ? png : null;
 }
 
@@ -320,7 +350,7 @@ void main() {
   test('messages typed into a full-screen TUI are relayed and the '
       'rendered screen is mirrored back', () async {
     final bridge = _RecordingBridge()
-      ..inAltScreen = true
+      ..altScreen = true
       ..screenLines = [
         '',
         ' opencode',
@@ -373,7 +403,7 @@ void main() {
       () async {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
-      ..inAltScreen = true
+      ..altScreen = true
       ..screenLines =[' some tui ', ' > '];
     final sent = <(String, String)>[];
     final integration = await _routerFor(
@@ -412,7 +442,7 @@ void main() {
       'as clean text', () async {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
-      ..inAltScreen = true
+      ..altScreen = true
       ..screenLines = [' opencode  ⟨build⟩', '…', ' > '];
     final gateway = _FakeGateway()
       ..ready = true
@@ -557,7 +587,7 @@ void main() {
     // — including a brand-new one the server doesn't know yet), and
     // the reply comes back as pure text.
     sent.clear();
-    bridge.inAltScreen = true;
+    bridge.altScreen = true;
     integration.handleEvent(FeishuInboundEvent(
       senderOpenId: 'ou_owner',
       chatId: 'oc_chat',
@@ -577,7 +607,7 @@ void main() {
       'screen and driven through the server', () async {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
-      ..inAltScreen = true
+      ..altScreen = true
       // No launch capture ever saw it start (local desktop launch)
       // — but the rendered screen carries the brand header.
       ..screenLines = [
@@ -617,7 +647,7 @@ void main() {
       () async {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
-      ..inAltScreen = true
+      ..altScreen = true
       ..screenLines = [' opencode  ⟨build⟩', ' > '];
     final gateway = _FakeGateway()
       ..ready = true
@@ -646,7 +676,7 @@ void main() {
       () async {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
-      ..inAltScreen = true
+      ..altScreen = true
       ..screenLines = [' opencode  ⟨build⟩', ' > '];
     final sent = <(String, String)>[];
     final integration = await _routerFor(
@@ -709,6 +739,271 @@ void main() {
     ));
     expect(bridge.commands, isEmpty);
   });
+
+  // ── Phase 2: cards, bindings, confirmations ────────────────────
+
+  test('a long output is paginated with a pager card', () async {
+    final bridge = _RecordingBridge();
+    final sent = <(String, String)>[];
+    final cards = <Map<String, dynamic>>[];
+    final channel = _FakeChannel();
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+      onSend: (chat, text) => sent.add((chat, text)),
+      onCard: (_, card) => cards.add(card),
+      outputWindow: const Duration(milliseconds: 30),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_long',
+      text: 'cat bigfile',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+
+    // 4000 characters of output — more than one page.
+    bridge.outputController
+        .add(utf8.encode(List.filled(400, 'x' * 10).join('\n')));
+    bridge.outputController.add(utf8.encode('PS C:\\Users\\Sun> '));
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+
+    expect(sent.length, 1, reason: 'the first page goes out as text');
+    expect(cards.length, 1, reason: 'and a pager card offers the rest');
+    final elements = (cards.single['body'] as Map)['elements'] as List;
+    final action = elements.firstWhere((e) => (e as Map)['tag'] == 'action');
+    final buttons = (action as Map)['actions'] as List;
+    final nextValue = ((buttons.first as Map)['value']) as Map<String, dynamic>;
+    expect(nextValue['a'], 'page');
+    expect(nextValue['p'], '1');
+
+    // The user taps "Next": the second page goes out.
+    await channel.handler!(FeishuCardActionEvent(
+      operatorOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_card',
+      token: 'c-1',
+      value: nextValue,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(sent.length, 2);
+    expect(sent.last.$2, isNot(sent.first.$2));
+  });
+
+  test('/attach sends the workspace picker card', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [
+        FeishuWorkspace('ws_1', 'octodo'),
+        FeishuWorkspace('ws_2', 'docs'),
+      ];
+    final cards = <Map<String, dynamic>>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onCard: (_, card) => cards.add(card),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(cards.length, 1);
+    final body = cards.single['body'] as Map<String, dynamic>;
+    final elements = body['elements'] as List;
+    expect(elements.length, 2);
+    final first = (elements.first as Map)['actions'] as List;
+    final value = ((first.first as Map)['value']) as Map<String, dynamic>;
+    expect(value['a'], 'attach');
+    expect(value['id'], 'ws_1');
+  });
+
+  test('a bound chat drives its own workspace', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [
+        FeishuWorkspace('ws_1', 'octodo'),
+        FeishuWorkspace('ws_2', 'docs'),
+      ];
+    final channel = _FakeChannel();
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+    );
+
+    // Bind the chat to the second workspace through the card.
+    final answer = await channel.handler!(FeishuCardActionEvent(
+      operatorOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_card',
+      token: 'c-1',
+      value: {'a': 'attach', 'id': 'ws_2'},
+    ));
+    expect((answer!['toast'] as Map)['content'], contains('docs'));
+
+    // The next command goes to the bound workspace, not the active
+    // one.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    expect(bridge.commands, ['echo hi\n']);
+    expect(bridge.targets, ['ws_2']);
+  });
+
+  test('/detach sends the chat back to the active workspace', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_2', 'docs')];
+    final channel = _FakeChannel();
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    await channel.handler!(FeishuCardActionEvent(
+      operatorOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_card',
+      token: 'c-1',
+      value: {'a': 'attach', 'id': 'ws_2'},
+    ));
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_detach',
+      text: '/detach',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    expect(bridge.targets, [null]);
+  });
+
+  test('a card action from an unlisted operator is refused', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')];
+    final channel = _FakeChannel();
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+    );
+
+    final answer = await channel.handler!(FeishuCardActionEvent(
+      operatorOpenId: 'ou_stranger',
+      chatId: 'oc_chat',
+      messageId: 'om_card',
+      token: 'c-1',
+      value: {'a': 'attach', 'id': 'ws_1'},
+    ));
+    expect((answer!['toast'] as Map)['type'], 'error');
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    expect(bridge.targets, [null], reason: 'the binding was not made');
+  });
+
+  test('a dangerous command waits for the confirmation card', () async {
+    final bridge = _RecordingBridge();
+    final cards = <Map<String, dynamic>>[];
+    final channel = _FakeChannel();
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+      onCard: (_, card) => cards.add(card),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_rm',
+      text: 'rm -rf build',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(bridge.commands, isEmpty,
+        reason: 'nothing runs before the user confirms');
+    expect(cards.length, 1);
+    final elements = (cards.single['body'] as Map)['elements'] as List;
+    final action = elements.firstWhere((e) => (e as Map)['tag'] == 'action');
+    final buttons = (action as Map)['actions'] as List;
+    final runValue = ((buttons.first as Map)['value']) as Map<String, dynamic>;
+    expect(runValue['a'], 'confirm');
+
+    // The user presses "Run": the command goes out.
+    final answer = await channel.handler!(FeishuCardActionEvent(
+      operatorOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_card',
+      token: 'c-1',
+      value: runValue,
+    ));
+    expect((answer!['toast'] as Map)['content'], 'Running.');
+    expect(bridge.commands, ['rm -rf build\n']);
+  });
+
+  test('a declined dangerous command never runs', () async {
+    final bridge = _RecordingBridge();
+    final cards = <Map<String, dynamic>>[];
+    final channel = _FakeChannel();
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+      onCard: (_, card) => cards.add(card),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_rm',
+      text: 'git reset --hard',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final elements = (cards.single['body'] as Map)['elements'] as List;
+    final action = elements.firstWhere((e) => (e as Map)['tag'] == 'action');
+    final buttons = (action as Map)['actions'] as List;
+    final cancelValue =
+        ((buttons.last as Map)['value']) as Map<String, dynamic>;
+
+    await channel.handler!(FeishuCardActionEvent(
+      operatorOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_card',
+      token: 'c-1',
+      value: cancelValue,
+    ));
+    expect(bridge.commands, isEmpty);
+  });
 }
 
 /// Build a router wired to fakes. [onSend] records outbound text.
@@ -718,9 +1013,11 @@ Future<FeishuIntegration> _routerFor({
   required _RecordingBridge bridge,
   void Function(String chat, String text)? onSend,
   void Function(String chat, int bytes)? onImage,
+  void Function(String chat, Map<String, dynamic> card)? onCard,
   Duration outputWindow = const Duration(seconds: 5),
   Duration maxOutputWindow = const Duration(minutes: 5),
   OpencodeGateway? gateway,
+  _FakeChannel? channel,
 }) async {
   final dir = Directory.systemTemp.createTempSync('feishu_router');
   addTearDown(() => dir.deleteSync(recursive: true));
@@ -728,12 +1025,15 @@ Future<FeishuIntegration> _routerFor({
       File('${dir.path}${Platform.pathSeparator}c.json'));
   await store.save(creds);
 
-  final api = _RecordingApiClient(onSend ?? (_, _) {}, onImage: onImage);
+  final api = _RecordingApiClient(onSend ?? (_, _) {},
+      onImage: onImage, onCard: onCard);
   final integration = FeishuIntegration(
     bridge: bridge,
-    channel: _FakeChannel(),
+    channel: channel ?? _FakeChannel(),
     api: api,
     credentialStore: store,
+    bindingStore: FeishuBindingStore(
+        File('${dir.path}${Platform.pathSeparator}b.json')),
     outputWindow: outputWindow,
     maxOutputWindow: maxOutputWindow,
     opencode: gateway ?? _FakeGateway(),
@@ -745,11 +1045,12 @@ Future<FeishuIntegration> _routerFor({
 
 /// Subclass of the real client overriding the outbound path so no
 /// HTTP happens; sends are recorded via [onSend], images via
-/// [onImage].
+/// [onImage], cards via [onCard].
 class _RecordingApiClient extends FeishuApiClient {
   final void Function(String chat, String text) onSend;
   final void Function(String chat, int bytes)? onImage;
-  _RecordingApiClient(this.onSend, {this.onImage}) : super();
+  final void Function(String chat, Map<String, dynamic> card)? onCard;
+  _RecordingApiClient(this.onSend, {this.onImage, this.onCard}) : super();
 
   @override
   Future<void> sendText(String chatId, String text) async =>
@@ -758,4 +1059,8 @@ class _RecordingApiClient extends FeishuApiClient {
   @override
   Future<void> sendImage(String chatId, Uint8List png) async =>
       onImage?.call(chatId, png.length);
+
+  @override
+  Future<void> sendCard(String chatId, Map<String, dynamic> card) async =>
+      onCard?.call(chatId, card);
 }

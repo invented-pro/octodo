@@ -2762,22 +2762,45 @@ class _CollapsedWorkspaceTileState extends State<_CollapsedWorkspaceTile> {
   }
 }
 
-/// Feishu bridge into the active workspace: commands are written to
-/// the focused terminal of the active workspace, and its output is
-/// mirrored from the same terminal. Both resolve at event time so
-/// the bot always drives whatever the user currently has in focus
-/// (design doc §3.2: the binding follows the active workspace).
+/// Feishu bridge into the desktop app: commands are written to the
+/// focused terminal of a workspace — the one the chat is bound to,
+/// or the active workspace when it has no binding (design doc §3.2:
+/// the binding follows the active workspace until the user picks
+/// one). The output is mirrored from the same terminal. Both resolve
+/// at event time, so the bot always drives the terminal the chat is
+/// bound to.
 class _AppShellFeishuBridge implements FeishuHostBridge {
   final _AppShellState shell;
   const _AppShellFeishuBridge(this.shell);
 
-  octodo_terminal_view.TerminalViewState? _focusedTerminal() =>
-      shell._activeWorkspace?.key.currentState
+  /// The workspace entry for [workspaceId] — null means the active
+  /// workspace.
+  _WorkspaceEntry? _entryFor(String? workspaceId) {
+    if (workspaceId == null || workspaceId.isEmpty) {
+      return shell._activeWorkspace;
+    }
+    for (final entry in shell._workspaces) {
+      if (entry.id == workspaceId) return entry;
+    }
+    return null;
+  }
+
+  octodo_terminal_view.TerminalViewState? _focusedTerminal(
+          String? workspaceId) =>
+      _entryFor(workspaceId)
+          ?.key
+          .currentState
           ?.getFocusedTerminalViewState();
 
   @override
-  void runCommand(String command) {
-    final view = _focusedTerminal();
+  List<FeishuWorkspace> listWorkspaces() => [
+        for (final entry in shell._workspaces)
+          FeishuWorkspace(entry.id, entry.name),
+      ];
+
+  @override
+  void runCommand(String? workspaceId, String command) {
+    final view = _focusedTerminal(workspaceId);
     if (view == null) return;
     // The terminal's Enter key is CR (0x0d) — see flutter_alacritty's
     // input/key_input.dart. A lone LF lands in PSReadLine's
@@ -2790,24 +2813,25 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
   }
 
   @override
-  Stream<List<int>>? subscribeActiveOutput() =>
-      _focusedTerminal()?.outputTap;
+  Stream<List<int>>? subscribeOutput(String? workspaceId) =>
+      _focusedTerminal(workspaceId)?.outputTap;
 
   @override
-  bool? activeTerminalInAltScreen() => _focusedTerminal()?.inAltScreen;
+  bool? inAltScreen(String? workspaceId) =>
+      _focusedTerminal(workspaceId)?.inAltScreen;
 
   @override
-  List<String>? snapshotActiveScreen() =>
-      _focusedTerminal()?.visibleScreenLines();
+  List<String>? snapshotScreen(String? workspaceId) =>
+      _focusedTerminal(workspaceId)?.visibleScreenLines();
 
   @override
-  String? activeTerminalId() =>
-      shell._activeWorkspace?.key.currentState?.getFocusedSurface()?.id;
+  String? terminalId(String? workspaceId) =>
+      _entryFor(workspaceId)?.key.currentState?.getFocusedSurface()?.id;
 
   @override
-  String? activeTerminalCwd() {
+  String? terminalCwd(String? workspaceId) {
     final surface =
-        shell._activeWorkspace?.key.currentState?.getFocusedSurface();
+        _entryFor(workspaceId)?.key.currentState?.getFocusedSurface();
     if (surface == null) return null;
     // OSC 7-tracked cwd, else the spawn directory. '~' is a
     // marker for "WSL home unknown" — not a usable path.
@@ -2816,6 +2840,6 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
   }
 
   @override
-  Future<Uint8List?> snapshotActiveTerminalPng() async =>
-      await _focusedTerminal()?.capturePng();
+  Future<Uint8List?> snapshotPng(String? workspaceId) async =>
+      await _focusedTerminal(workspaceId)?.capturePng();
 }

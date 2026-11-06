@@ -113,6 +113,18 @@ class FeishuWsRawEvent {
   const FeishuWsRawEvent(this.messageId, this.traceId, this.payload);
 }
 
+/// The event type of a data frame's payload — 'im.message.receive_v1'
+/// for messages, 'card.action.trigger' for card button presses.
+const String kFeishuCardActionEvent = 'card.action.trigger';
+
+/// The event type carried by a decoded event payload.
+String? feishuEventType(Map<String, dynamic> json) {
+  final header = json['header'];
+  if (header is! Map<String, dynamic>) return null;
+  final type = header['event_type'];
+  return type is String ? type : null;
+}
+
 /// Pure per-connection session logic: feed frames in, get reply
 /// bytes and events out. Kept side-effect-free (no sockets) so the
 /// ack / reassembly / pong-settings rules are unit-testable.
@@ -123,6 +135,12 @@ class FeishuWsSession {
   /// Split-message parts by message id, with a 5 s TTL.
   final _parts = <String, _Parts>{};
   final DateTime Function() _now;
+
+  /// Card callbacks waiting for their answer: the reply must reach
+  /// Feishu within 3 s (the user client shows an error otherwise), so
+  /// the acknowledgement is deferred until the handler has decided
+  /// what to say.
+  final _pendingCards = <String, _PendingCard>{};
 
   FeishuWsSession({required this.service, FeishuWsSettings? settings, DateTime Function()? now})
       : settings = settings ?? const FeishuWsSettings(),
@@ -169,21 +187,52 @@ class FeishuWsSession {
       payload = piece;
     }
 
-    // Card callbacks are not received in this build; like the
-    // official SDKs, they go unanswered.
+    // Card callbacks are delivered as event frames whose event type
+    // is `card.action.trigger`; the acknowledgement carries the
+    // card's response (a toast, an updated card). Other frame types
+    // (the legacy "card" flavour) are not delivered by the platform
+    // and go unanswered.
     if (kind != 'event') return null;
 
     final stopwatch = Stopwatch()..start();
     var code = 200;
     try {
       // Validate JSON before forwarding.
-      jsonDecode(utf8.decode(payload, allowMalformed: true));
+      final decoded = jsonDecode(utf8.decode(payload, allowMalformed: true));
+      if (decoded is Map<String, dynamic> &&
+          feishuEventType(decoded) == kFeishuCardActionEvent) {
+        // Deferred: the ack waits for the handler's response body
+        // (see [completeCardCallback]).
+        _pendingCards[messageId] = _PendingCard(frame, stopwatch);
+        _eventController.add(FeishuWsRawEvent(messageId, traceId, payload));
+        return null;
+      }
       _eventController.add(FeishuWsRawEvent(messageId, traceId, payload));
     } on FormatException {
       code = 500;
     }
     return frame
         .ack(code, stopwatch.elapsedMilliseconds)
+        .encode();
+  }
+
+  /// Answer a card callback and return the acknowledgement bytes to
+  /// write to the socket.
+  ///
+  /// [response] is the body to send back (the toast, the updated
+  /// card), or null to keep the card unchanged — the official SDKs
+  /// send exactly that when their handler returns nothing. The answer
+  /// must reach Feishu within 3 s, so the caller answers promptly.
+  Uint8List? completeCardCallback(
+      String messageId, Map<String, dynamic>? response) {
+    final pending = _pendingCards.remove(messageId);
+    if (pending == null) return null;
+    final elapsed = pending.stopwatch.elapsedMilliseconds;
+    if (response == null) {
+      return pending.frame.ack(200, elapsed).encode();
+    }
+    return pending.frame
+        .ackWith(200, elapsed, jsonEncode(response))
         .encode();
   }
 
@@ -219,6 +268,14 @@ class _Parts {
   bool isAlive(DateTime now) => expires.isAfter(now);
 }
 
+/// A card callback waiting for its answer: the frame to acknowledge
+/// and the clock that started when it arrived.
+class _PendingCard {
+  final PbbpFrame frame;
+  final Stopwatch stopwatch;
+  _PendingCard(this.frame, this.stopwatch);
+}
+
 /// The production channel: endpoint → WebSocket → session loop,
 /// reconnecting per Feishu's settings until stopped.
 class FeishuWsChannel implements FeishuEventChannel {
@@ -229,6 +286,13 @@ class FeishuWsChannel implements FeishuEventChannel {
 
   StreamController<FeishuConnectionState>? _state;
   final _eventController = StreamController<FeishuInboundEvent>.broadcast();
+  final _cardController = StreamController<FeishuCardActionEvent>.broadcast();
+
+  /// Answers a card press with the body to send back (a toast, an
+  /// updated card) — set by the router above.
+  @override
+  Future<Map<String, dynamic>?> Function(FeishuCardActionEvent)?
+      cardActionHandler;
 
   FeishuCredentials? _credentials;
   FeishuWsSettings _settings;
@@ -270,6 +334,9 @@ class FeishuWsChannel implements FeishuEventChannel {
 
   @override
   Stream<FeishuInboundEvent> get events => _eventController.stream;
+
+  @override
+  Stream<FeishuCardActionEvent> get cardActions => _cardController.stream;
 
   @override
   Future<void> start(FeishuCredentials credentials) async {
@@ -492,8 +559,85 @@ class FeishuWsChannel implements FeishuEventChannel {
   }
 
   void _emitEvent(FeishuWsRawEvent e) {
+    final action = parseCardActionEvent(e.payload);
+    if (action != null) {
+      // The answer has to reach Feishu within 3 s — ask the handler
+      // and acknowledge the frame with its response.
+      unawaited(_answerCardAction(e.messageId, action));
+      return;
+    }
     final event = parseImMessageEvent(e.payload);
     if (event != null) _eventController.add(event);
+  }
+
+  /// Ask the handler what to answer a card press with, then write the
+  /// acknowledgement. A handler that is slow or missing must not
+  /// leave the callback unanswered — the user client shows an error
+  /// after 3 s — so the answer is cut off at 2.5 s and the card is
+  /// left unchanged.
+  Future<void> _answerCardAction(
+      String messageId, FeishuCardActionEvent action) async {
+    Map<String, dynamic>? response;
+    final handler = cardActionHandler;
+    if (handler != null) {
+      try {
+        response = await handler(action).timeout(
+            const Duration(milliseconds: 2500));
+      } catch (e) {
+        _log.warning('feishu: card action failed ($e)');
+      }
+    }
+    final ack = _session?.completeCardCallback(messageId, response);
+    if (ack != null) {
+      try {
+        _connection?.send(ack);
+      } catch (_) {}
+    }
+  }
+
+  /// Extract the fields of a `card.action.trigger` callback we route
+  /// on. Null for every other event type.
+  ///
+  /// Public + pure so routing tests don't need a socket.
+  static FeishuCardActionEvent? parseCardActionEvent(Uint8List payload) {
+    Map<String, dynamic> json;
+    try {
+      json = jsonDecode(utf8.decode(payload, allowMalformed: true))
+          as Map<String, dynamic>;
+    } on FormatException {
+      return null;
+    }
+    if (feishuEventType(json) != kFeishuCardActionEvent) return null;
+    final event = json['event'];
+    if (event is! Map<String, dynamic>) return null;
+    final operator = event['operator'];
+    final openId =
+        operator is Map<String, dynamic> ? (operator['open_id'] as String? ?? '') : '';
+    final context = event['context'];
+    final chatId =
+        context is Map<String, dynamic> ? (context['open_chat_id'] as String? ?? '') : '';
+    final messageId =
+        context is Map<String, dynamic> ? (context['open_message_id'] as String? ?? '') : '';
+    final action = event['action'];
+    final rawValue = action is Map<String, dynamic> ? action['value'] : null;
+    final value = <String, dynamic>{};
+    if (rawValue is Map<String, dynamic>) {
+      value.addAll(rawValue);
+    } else if (rawValue is String && rawValue.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawValue);
+        if (decoded is Map<String, dynamic>) value.addAll(decoded);
+      } on FormatException {
+        // Not JSON — the value stays empty.
+      }
+    }
+    return FeishuCardActionEvent(
+      operatorOpenId: openId,
+      chatId: chatId,
+      messageId: messageId,
+      token: (event['token'] as String?) ?? '',
+      value: value,
+    );
   }
 
   /// Extract the fields of `im.message.receive_v1` we route on.
@@ -555,6 +699,7 @@ class FeishuWsChannel implements FeishuEventChannel {
     stop();
     _state?.close();
     _eventController.close();
+    _cardController.close();
     _http.close();
   }
 }

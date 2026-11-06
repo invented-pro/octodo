@@ -84,6 +84,28 @@ class PbbpFrame {
         payload: Uint8List.fromList(utf8.encode('{"code":$code}')),
       );
 
+  /// The acknowledgement for a data frame whose handler produced a
+  /// response body — a card callback's toast or updated card.
+  ///
+  /// The official SDKs put the handler's response into the frame's
+  /// `data` field, base64-encoded (Go marshals its `[]byte` that
+  /// way): `{"code":200,"data":"<base64 of the response JSON>"}`.
+  PbbpFrame ackWith(int code, int elapsedMs, String responseJson) =>
+      PbbpFrame(
+        seqId: seqId,
+        logId: logId,
+        service: service,
+        method: method,
+        headers: [
+          ...headers,
+          PbbpHeader(kPbbpBizRt, elapsedMs.toString()),
+        ],
+        payload: Uint8List.fromList(utf8.encode(jsonEncode({
+          'code': code,
+          'data': base64Encode(utf8.encode(responseJson)),
+        }))),
+      );
+
   // ── Encoding ──────────────────────────────────────────────────
 
   Uint8List encode() {

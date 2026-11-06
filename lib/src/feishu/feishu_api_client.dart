@@ -184,6 +184,16 @@ class FeishuApiClient {
     }
   }
 
+  /// Send an interactive card to [chatId] (design doc §7 phase 2 —
+  /// the workspace picker, the dangerous-command confirmation, the
+  /// output pager).
+  ///
+  /// Cards are rare and user-triggered, so they skip the text queue
+  /// (like images) — but they still go through the token refresh.
+  Future<void> sendCard(String chatId, Map<String, dynamic> card) async {
+    await _sendMessage(chatId, 'interactive', jsonEncode(card));
+  }
+
   Future<void> _sendMessage(String chatId, String msgType, String content) async {
     var token = await _tenantAccessToken();
     for (var attempt = 0; attempt < 2; attempt++) {

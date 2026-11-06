@@ -14,58 +14,74 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
 import '../log.dart';
 import 'feishu_api_client.dart';
+import 'feishu_binding.dart';
+import 'feishu_cards.dart';
 import 'feishu_credentials.dart';
 import 'feishu_event_channel.dart';
 import 'feishu_ws_channel.dart';
 import 'opencode_client.dart';
 
+/// A workspace of the desktop app — the unit a Feishu chat binds to
+/// (design doc §3: "一个飞书单聊或群聊绑定到 Octodo 的某个工作区").
+class FeishuWorkspace {
+  final String id;
+  final String name;
+  const FeishuWorkspace(this.id, this.name);
+}
+
 /// What the integration needs from the app shell: where commands go
 /// and where their output comes from. Implemented by `_AppShellState`.
+///
+/// Every terminal-facing method takes the workspace the chat is bound
+/// to; null means "the active workspace" — the pre-binding behaviour.
 abstract class FeishuHostBridge {
-  /// Write [command] (already newline-terminated by the router)
-  /// into the active workspace's focused terminal. No-op when no
-  /// terminal exists.
-  void runCommand(String command);
+  /// The workspaces the app has open — the `/attach` picker.
+  List<FeishuWorkspace> listWorkspaces();
 
-  /// Broadcast stream of the active terminal's raw PTY output, or
+  /// Write [command] (already newline-terminated by the router) into
+  /// the focused terminal of [workspaceId]. No-op when no terminal
+  /// exists.
+  void runCommand(String? workspaceId, String command);
+
+  /// Broadcast stream of the focused terminal's raw PTY output, or
   /// null when there is no active terminal. The router subscribes
   /// from just before a command is written until that command's
   /// output has gone quiet.
-  Stream<List<int>>? subscribeActiveOutput();
+  Stream<List<int>>? subscribeOutput(String? workspaceId);
 
-  /// Whether the active terminal is currently displaying a
-  /// full-screen TUI (alternate screen buffer) — vim, less, the
-  /// opencode TUI, … Null when there is no active terminal. The
-  /// router mirrors the rendered screen then: TUI redraws are
+  /// Whether the focused terminal of [workspaceId] is currently
+  /// displaying a full-screen TUI (alternate screen buffer) — vim,
+  /// less, the opencode TUI, … Null when there is no such terminal.
+  /// The router mirrors the rendered screen then: TUI redraws are
   /// screen layout, not line output.
-  bool? activeTerminalInAltScreen();
+  bool? inAltScreen(String? workspaceId);
 
-  /// The active terminal's visible screen as text lines, top row
-  /// first — what a full-screen TUI currently shows, or the
-  /// shell's latest lines. Null when there is no active terminal.
-  List<String>? snapshotActiveScreen();
+  /// The focused terminal's visible screen as text lines, top row
+  /// first — what a full-screen TUI currently shows, or the shell's
+  /// latest lines. Null when there is no such terminal.
+  List<String>? snapshotScreen(String? workspaceId);
 
-  /// Stable identity of the focused terminal surface, so the
-  /// router can keep per-terminal state across commands (e.g.
-  /// which TUI app owns it). Null when there is no active
-  /// terminal.
-  String? activeTerminalId();
+  /// Stable identity of the focused terminal surface, so the router
+  /// can keep per-terminal state across commands (e.g. which TUI app
+  /// owns it). Null when there is no such terminal.
+  String? terminalId(String? workspaceId);
 
   /// The focused terminal's working directory (OSC 7 tracked,
   /// falling back to the spawn directory) — the key the opencode
   /// gateway matches server sessions by. Null when unknown.
-  String? activeTerminalCwd();
+  String? terminalCwd(String? workspaceId);
 
   /// The focused terminal rendered to PNG (its enclosing repaint
   /// boundary rasterized) — `/history` sends this to the phone.
-  /// Null when there is no active terminal (or it can't be
-  /// rasterized yet).
-  Future<Uint8List?> snapshotActiveTerminalPng();
+  /// Null when there is no such terminal (or it can't be rasterized
+  /// yet).
+  Future<Uint8List?> snapshotPng(String? workspaceId);
 }
 
 /// Dedup window (§4.3): remember this many message ids…
@@ -88,6 +104,10 @@ const Duration _kOutputMaxWindowDefault = Duration(minutes: 5);
 
 /// …or until this many bytes arrive, whichever first.
 const int _kOutputMaxBytes = 15 * 1024;
+
+/// One page of a long output — the size of one chat message the
+/// pager splits an oversized reply into (design doc §5).
+const int _kPageChars = 2500;
 
 /// What the router answers when a full-screen TUI without a
 /// server adapter owns the terminal: the text is relayed and the
@@ -162,11 +182,26 @@ class FeishuIntegration {
   /// terminal id → app name ('opencode', …).
   final _tuiApps = <String, String>{};
 
+  /// Which workspace each chat drives (design doc §3, phase 2).
+  final Map<String, FeishuChatBinding> _bindings = {};
+
+  /// Where the bindings are persisted.
+  final FeishuBindingStore bindingStore;
+
+  /// Dangerous commands waiting for the user's confirmation — the
+  /// token → command map behind the confirmation card.
+  final Map<String, _PendingCommand> _pendingCommands = {};
+
+  /// Long outputs waiting to be paged through — the token → pages
+  /// map behind the pager card.
+  final Map<String, List<String>> _pageBuffers = {};
+
   FeishuIntegration({
     required this.bridge,
     FeishuEventChannel? channel,
     FeishuApiClient? api,
     FeishuCredentialStore? credentialStore,
+    FeishuBindingStore? bindingStore,
     this.outputWindow = _kOutputWindowDefault,
     this.maxOutputWindow = _kOutputMaxWindowDefault,
     OpencodeGateway? opencode,
@@ -174,7 +209,8 @@ class FeishuIntegration {
         channel = channel ?? FeishuWsChannel(),
         api = api ?? FeishuApiClient(),
         credentialStore =
-            credentialStore ?? FeishuCredentialStore.resolve();
+            credentialStore ?? FeishuCredentialStore.resolve(),
+        bindingStore = bindingStore ?? FeishuBindingStore.resolve();
 
   static FeishuIntegration? _instance;
 
@@ -217,8 +253,30 @@ class FeishuIntegration {
     _stateSub ??= channel.stateChanges.listen((s) {
       _log.info('feishu: ${s.name}');
     });
+    // The card press handler: the answer must reach Feishu within
+    // 3 s, so the channel asks us and writes our reply back.
+    channel.cardActionHandler = _handleCardAction;
+    await _loadBindings();
     await channel.start(creds);
     _log.info('feishu: integration started for ${creds.appIdPreview}');
+  }
+
+  /// Read the persisted chat bindings (design doc §3 — a chat keeps
+  /// its workspace across restarts).
+  Future<void> _loadBindings() async {
+    final loaded = await bindingStore.load();
+    _bindings
+      ..clear()
+      ..addAll(loaded);
+    if (loaded.isNotEmpty) {
+      _log.info('feishu: ${loaded.length} chat binding(s) restored');
+    }
+  }
+
+  /// Persist the bindings (best effort — a failed write must not
+  /// break the chat).
+  Future<void> _saveBindings() async {
+    await bindingStore.save(_bindings);
   }
 
   String? _boundAppId;
@@ -279,17 +337,60 @@ class FeishuIntegration {
     // 4. Text only; empty text (stickers etc.) is ignored.
     if (event.text.isEmpty) return;
 
+    // The workspace this chat drives: its own binding, or the active
+    // workspace when it has none (design doc §3.2 — before the user
+    // picks one, the binding follows the active workspace).
+    final workspaceId = _bindings[event.chatId]?.workspaceId;
+
     // 5. `/history` replies with what the conversation/screen
     //    currently shows — the server conversation tail when a
     //    server-backed TUI owns the terminal, else a rendered PNG
     //    snapshot, else the filtered screen text.
     if (event.text == '/history') {
       _capture?.flush();
-      unawaited(_sendHistory(event.chatId));
+      unawaited(_sendHistory(event.chatId, workspaceId));
       return;
     }
 
-    // 5b. `/raw <text>` — relay raw text into whatever owns the
+    // 5a. `/attach` — pick the workspace this chat drives. The
+    //     picker is a card: buttons are far easier to hit on a
+    //     phone than a numbered list (design doc §3.2).
+    if (event.text == '/attach') {
+      unawaited(_sendWorkspacePicker(event.chatId));
+      return;
+    }
+
+    // 5b. `/detach` — drop the binding; the chat follows the active
+    //     workspace again.
+    if (event.text == '/detach') {
+      unawaited(_detach(event.chatId));
+      return;
+    }
+
+    // 5b2. `/run <token>` / `/cancel` — the text fallback for the
+    //      confirmation card, used when the card cannot be sent.
+    if (event.text.startsWith('/run ')) {
+      final token = event.text.substring(5).trim();
+      final pending = _pendingCommands[token];
+      if (pending == null || pending.chatId != event.chatId) {
+        unawaited(api
+            .sendText(event.chatId, 'That confirmation expired.')
+            .catchError((_) {}));
+        return;
+      }
+      _pendingCommands.remove(token);
+      _writeAndCapture(
+          event.chatId, pending.command, pending.workspaceId);
+      return;
+    }
+    if (event.text == '/cancel') {
+      _pendingCommands.removeWhere((_, pending) =>
+          pending.chatId == event.chatId);
+      unawaited(api.sendText(event.chatId, 'Cancelled.').catchError((_) {}));
+      return;
+    }
+
+    // 5c. `/raw <text>` — relay raw text into whatever owns the
     //     terminal (a full-screen TUI included), bypassing the
     //     server routing: the escape hatch for TUI control (q,
     //     /, dd, …).
@@ -301,10 +402,10 @@ class FeishuIntegration {
             .catchError((_) {}));
         return;
       }
-      if (bridge.activeTerminalInAltScreen() == true) {
-        _mirrorIntoTui(event, text: keys);
+      if (bridge.inAltScreen(workspaceId) == true) {
+        _mirrorIntoTui(event, text: keys, workspaceId: workspaceId);
       } else {
-        _writeAndCapture(event.chatId, keys);
+        _writeAndCapture(event.chatId, keys, workspaceId);
       }
       _log.info('feishu: /raw ${event.messageId} relayed');
       return;
@@ -315,38 +416,274 @@ class FeishuIntegration {
     //    through their server — same session the desktop TUI
     //    shows, pure text replies. Any other TUI gets the text
     //    relayed and its screen mirrored back.
-    if (bridge.activeTerminalInAltScreen() == true) {
-      final termId = bridge.activeTerminalId();
+    if (bridge.inAltScreen(workspaceId) == true) {
+      final termId = bridge.terminalId(workspaceId);
       final app =
-          _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotActiveScreen());
+          _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotScreen(workspaceId));
       final gateway = _gatewayFor(app);
       if (gateway != null) {
         // Serialized: the messages go into the TUI's composer one
         // after the other.
         final task = _tuiChatQueue
-            .then((_) => _tuiServerChat(event, gateway))
+            .then((_) => _tuiServerChat(event, gateway, workspaceId))
             .catchError((_) {});
         _tuiChatQueue = task.then<void>((_) {}, onError: (_) {});
         return;
       }
-      _mirrorIntoTui(event);
+      _mirrorIntoTui(event, workspaceId: workspaceId);
       return;
     }
 
-    // 8. Execute: write into the active terminal and watch its
-    //    output for the aggregation window.
-    _writeAndCapture(event.chatId, event.text);
+    // 8. Execute: write into the bound terminal and watch its
+    //    output for the aggregation window. A command that looks
+    //    destructive waits for the user's confirmation (a card).
+    final dangerous = _dangerousPattern(event.text);
+    if (dangerous != null) {
+      _log.info('feishu: ${event.messageId} held for confirmation '
+          '("$dangerous")');
+      unawaited(_askForConfirmation(
+          event.chatId, event.text, workspaceId));
+      return;
+    }
+    _writeAndCapture(event.chatId, event.text, workspaceId);
     _log.info('feishu: command ${event.messageId} '
         'from ${event.senderOpenId} executed');
   }
 
-  /// Write [commandLine] into the active terminal and capture its
+  // ── Cards, bindings, confirmations (design doc §3, phase 2) ───
+
+  /// Answer a card button press.
+  ///
+  /// The answer must reach Feishu within 3 s (the user client shows
+  /// an error otherwise), so only the *decision* is made here — the
+  /// work that follows (running a command) happens afterwards.
+  Future<Map<String, dynamic>?> _handleCardAction(
+      FeishuCardActionEvent action) async {
+    // The whitelist applies to card presses exactly as it applies to
+    // messages (§4.2).
+    final allowed = _credentials?.allowedOpenIds ?? const <String>[];
+    if (action.operatorOpenId.isEmpty ||
+        !allowed.contains(action.operatorOpenId)) {
+      _log.info('feishu: dropped a card action from an unlisted operator');
+      return cardToast('Not authorized.', type: 'error');
+    }
+    switch (action.action) {
+      case CardActions.attach:
+        return _attachToWorkspace(action.chatId, action.value['id'] as String?);
+      case CardActions.detach:
+        await _detach(action.chatId);
+        return cardToast('Back to the active workspace.');
+      case CardActions.confirm:
+        return _confirmPending(action);
+      case CardActions.cancel:
+        return _cancelPending(action);
+      case CardActions.page:
+        return _showPage(action);
+    }
+    return null;
+  }
+
+  /// Send another page of a long output (design doc §5 — long
+  /// outputs are navigated with card buttons, not concatenated
+  /// text).
+  Future<Map<String, dynamic>?> _showPage(FeishuCardActionEvent action) async {
+    final token = action.value['t'] as String?;
+    final pages = token == null ? null : _pageBuffers[token];
+    if (pages == null || pages.isEmpty) {
+      return cardToast('That output is gone.', type: 'error');
+    }
+    final index = int.tryParse('${action.value['p'] ?? ''}') ?? 0;
+    final clamped = index.clamp(0, pages.length - 1);
+    await api.sendText(action.chatId, pages[clamped]).catchError((_) {});
+    return cardToast('Page ${clamped + 1} / ${pages.length}');
+  }
+
+  /// Bind [chatId] to a workspace.
+  Future<Map<String, dynamic>?> _attachToWorkspace(
+      String chatId, String? workspaceId) async {
+    if (workspaceId == null || workspaceId.isEmpty) {
+      return cardToast('No workspace chosen.', type: 'error');
+    }
+    FeishuWorkspace? match;
+    for (final workspace in bridge.listWorkspaces()) {
+      if (workspace.id == workspaceId) {
+        match = workspace;
+        break;
+      }
+    }
+    if (match == null) {
+      return cardToast('That workspace is gone.', type: 'error');
+    }
+    _bindings[chatId] = FeishuChatBinding(
+      chatId: chatId,
+      chatType: 'p2p',
+      workspaceId: match.id,
+      workspaceName: match.name,
+      boundAt: DateTime.now(),
+      boundBy: _credentials?.ownerOpenId ?? '',
+    );
+    await _saveBindings();
+    _log.info('feishu: chat $chatId bound to workspace ${match.id}');
+    return cardToast('Now driving: ${match.name}');
+  }
+
+  /// Drop the chat's binding — it follows the active workspace
+  /// again.
+  Future<void> _detach(String chatId) async {
+    final binding = _bindings.remove(chatId);
+    if (binding == null) {
+      await api
+          .sendText(chatId, 'This chat is not bound to a workspace.')
+          .catchError((_) {});
+      return;
+    }
+    await _saveBindings();
+    _log.info('feishu: chat $chatId unbound');
+    await api
+        .sendText(chatId,
+            'Unbound — this chat follows the active workspace again.')
+        .catchError((_) {});
+  }
+
+  /// Send the workspace picker card — the `/attach` flow (design doc
+  /// §3.2). Falls back to a text list when the card cannot be sent.
+  Future<void> _sendWorkspacePicker(String chatId) async {
+    final workspaces = bridge.listWorkspaces();
+    if (workspaces.isEmpty) {
+      await api
+          .sendText(chatId, 'No workspaces yet — create one in Octodo.')
+          .catchError((_) {});
+      return;
+    }
+    final current = _bindings[chatId]?.workspaceId;
+    try {
+      await api.sendCard(
+        chatId,
+        workspaceSelectorCard(
+          [for (final w in workspaces) CardTarget(w.id, w.name)],
+          current: current,
+        ),
+      );
+    } catch (e) {
+      _log.warning('feishu: workspace card failed ($e)');
+      final list = [
+        'Pick a workspace — reply with /attach <id>:',
+        for (var i = 0; i < workspaces.length; i++)
+          '${i + 1}. ${workspaces[i].name}  (${workspaces[i].id})',
+      ].join('\n');
+      await api.sendText(chatId, list).catchError((_) {});
+    }
+  }
+
+  /// Ask before running a command that looks destructive (design doc
+  /// §7 phase 2 — the dangerous-command confirmation card).
+  Future<void> _askForConfirmation(
+      String chatId, String command, String? workspaceId) async {
+    _prunePendingCommands();
+    final token = _newToken();
+    _pendingCommands[token] = _PendingCommand(
+      chatId: chatId,
+      command: command,
+      workspaceId: workspaceId,
+      at: DateTime.now(),
+    );
+    try {
+      await api.sendCard(chatId, confirmCard(command: command, token: token));
+    } catch (e) {
+      _log.warning('feishu: confirmation card failed ($e)');
+      await api
+          .sendText(chatId,
+              'That command looks destructive. Reply /run $token to run it, '
+              'or /cancel to drop it.')
+          .catchError((_) {});
+    }
+  }
+
+  /// Run the command the user confirmed.
+  Future<Map<String, dynamic>?> _confirmPending(FeishuCardActionEvent action) async {
+    final token = action.value['t'] as String?;
+    final pending = token == null ? null : _pendingCommands[token];
+    if (pending == null) {
+      return cardToast('That confirmation expired.', type: 'error');
+    }
+    _pendingCommands.remove(token);
+    if (pending.chatId != action.chatId) {
+      return cardToast('That confirmation belongs to another chat.',
+          type: 'error');
+    }
+    // Run it now — the reply follows the normal output path.
+    _writeAndCapture(pending.chatId, pending.command, pending.workspaceId);
+    return cardToast('Running.');
+  }
+
+  /// Drop the command the user declined.
+  Future<Map<String, dynamic>?> _cancelPending(FeishuCardActionEvent action) async {
+    final token = action.value['t'] as String?;
+    if (token == null || _pendingCommands.remove(token) == null) {
+      return cardToast('Nothing to cancel.', type: 'error');
+    }
+    return cardToast('Cancelled.');
+  }
+
+  /// Drop the confirmations nobody acted on.
+  void _prunePendingCommands() {
+    final cutoff =
+        DateTime.now().subtract(const Duration(minutes: 2));
+    _pendingCommands.removeWhere((_, pending) => pending.at.isBefore(cutoff));
+  }
+
+  /// A short random token for a pending command.
+  String _newToken() {
+    const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    final random = Random();
+    return List.generate(
+        6, (_) => alphabet[random.nextInt(alphabet.length)]).join();
+  }
+
+  /// The dangerous-command patterns (design doc §7 phase 2). The
+  /// check is a substring match on the lower-cased command — a
+  /// reminder, not a security boundary: the user is the only
+  /// whitelisted sender.
+  static final List<String> _kDangerousPatterns = [
+    'rm -rf',
+    'rm -fr',
+    'git reset --hard',
+    'git clean -f',
+    'git push --force',
+    'git push -f',
+    'remove-item -recurse',
+    'remove-item -force',
+    'del /s',
+    'rmdir /s',
+    'diskpart',
+    'format ',
+    'mkfs',
+    'dd if=',
+    'shutdown',
+    'reboot',
+    'taskkill',
+    'drop table',
+    'drop database',
+    'truncate table',
+    'chmod -r 777',
+  ];
+
+  /// The dangerous pattern in [command], or null when it looks safe.
+  static String? _dangerousPattern(String command) {
+    final lower = command.toLowerCase();
+    for (final pattern in _kDangerousPatterns) {
+      if (lower.contains(pattern)) return pattern.trim();
+    }
+    return null;
+  }
+
+  /// Write [commandLine] into the bound terminal and capture its
   /// output for the reply (the plain-command path — line output,
   /// not a screen mirror). Shared by direct commands and `/ai`.
-  void _writeAndCapture(String chatId, String commandLine) {
+  void _writeAndCapture(String chatId, String commandLine, String? workspaceId) {
     // A new command flushes any pending output capture first.
     _capture?.flush();
-    final output = bridge.subscribeActiveOutput();
+    final output = bridge.subscribeOutput(workspaceId);
     if (output == null) {
       unawaited(api
           .sendText(chatId, 'No active terminal in Octodo.')
@@ -361,10 +698,66 @@ class FeishuIntegration {
       idleWindow: outputWindow,
       maxWindow: maxOutputWindow,
       onDone: () => _capture = null,
-      terminalId: bridge.activeTerminalId(),
+      terminalId: bridge.terminalId(workspaceId),
       onTuiApp: _rememberTuiApp,
+      replyTo: _sendReply,
     );
-    bridge.runCommand('$commandLine\n');
+    bridge.runCommand(workspaceId, '$commandLine\n');
+  }
+
+  /// Send a command's output back.
+  ///
+  /// A long output is split into pages: the first page goes out as
+  /// text, a pager card offers "previous / next" (design doc §5 —
+  /// navigating with buttons beats concatenating text). When the
+  /// card cannot be sent, the remaining pages go out as plain
+  /// messages instead — nothing is ever lost.
+  Future<void> _sendReply(String chatId, String text) async {
+    final pages = _paginate(text);
+    if (pages.length <= 1) {
+      await api.sendText(chatId, text).catchError((_) {});
+      return;
+    }
+    _prunePageBuffers();
+    final token = _newToken();
+    _pageBuffers[token] = pages;
+    await api.sendText(chatId, pages.first).catchError((_) {});
+    try {
+      await api.sendCard(
+          chatId, pagerCard(token: token, page: 0, pages: pages.length));
+    } catch (e) {
+      _log.warning('feishu: pager card failed ($e)');
+      for (final page in pages.skip(1)) {
+        await api.sendText(chatId, page).catchError((_) {});
+      }
+    }
+  }
+
+  /// Split [text] into pages of at most [_kPageChars] characters,
+  /// breaking at line boundaries.
+  static List<String> _paginate(String text) {
+    if (text.length <= _kPageChars) return [text];
+    final pages = <String>[];
+    var current = StringBuffer();
+    for (final line in text.split('\n')) {
+      if (current.isNotEmpty && current.length + line.length + 1 > _kPageChars) {
+        pages.add(current.toString());
+        current = StringBuffer();
+      }
+      if (current.isNotEmpty) current.write('\n');
+      current.write(line);
+    }
+    if (current.isNotEmpty) pages.add(current.toString());
+    return pages;
+  }
+
+  /// Drop the page buffers nobody navigated to.
+  void _prunePageBuffers() {
+    if (_pageBuffers.length < 8) return;
+    final keys = _pageBuffers.keys.toList();
+    for (final key in keys.take(_pageBuffers.length - 4)) {
+      _pageBuffers.remove(key);
+    }
   }
 
   /// Record which server-backed TUI owns a terminal (sniffed at
@@ -402,13 +795,13 @@ class FeishuIntegration {
   ///  2. the rendered PNG (needs the bot's image-upload scope;
   ///     skipped silently when the platform denies it),
   ///  3. the screen grid as text, decoration lines dropped.
-  Future<void> _sendHistory(String chatId) async {
-    final termId = bridge.activeTerminalId();
+  Future<void> _sendHistory(String chatId, String? workspaceId) async {
+    final termId = bridge.terminalId(workspaceId);
     final app =
-        _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotActiveScreen());
+        _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotScreen(workspaceId));
     final gateway = _gatewayFor(app);
     if (gateway != null) {
-      final cwd = bridge.activeTerminalCwd();
+      final cwd = bridge.terminalCwd(workspaceId);
       if (cwd != null) {
         try {
           final tail = await gateway.conversationTail(cwd);
@@ -420,7 +813,7 @@ class FeishuIntegration {
       }
     }
     try {
-      final png = await bridge.snapshotActiveTerminalPng();
+      final png = await bridge.snapshotPng(workspaceId);
       if (png != null && png.isNotEmpty) {
         await api.sendImage(chatId, png);
         return;
@@ -428,7 +821,7 @@ class FeishuIntegration {
     } catch (e) {
       _log.warning('feishu: screen image failed ($e)');
     }
-    final screen = _trimBlank(bridge.snapshotActiveScreen() ?? const [])
+    final screen = _trimBlank(bridge.snapshotScreen(workspaceId) ?? const [])
         .where((l) => !_decorationLine.hasMatch(l))
         .toList();
     final text =
@@ -452,18 +845,19 @@ class FeishuIntegration {
   /// server's event stream as pure text, keyed by the session the
   /// TUI just used.
   Future<void> _tuiServerChat(
-      FeishuInboundEvent event, OpencodeGateway gateway) async {
-    final cwd = bridge.activeTerminalCwd();
+      FeishuInboundEvent event, OpencodeGateway gateway, String? workspaceId)
+      async {
+    final cwd = bridge.terminalCwd(workspaceId);
     if (cwd == null || !await gateway.ensure()) {
       _log.info('feishu: tui-chat ${event.messageId} fell back to mirror');
-      _mirrorIntoTui(event);
+      _mirrorIntoTui(event, workspaceId: workspaceId);
       return;
     }
     _capture?.flush();
     final result = await gateway.tuiTurn(
       cwd,
       _oneLine(event.text),
-      (line) => _writeTuiLine(line),
+      (line) => _writeTuiLine(line, workspaceId),
     );
     final sessionId = result.sessionId;
     final reply = result.reply;
@@ -497,12 +891,13 @@ class FeishuIntegration {
   /// Relay the text into the TUI and mirror its rendered screen
   /// back once quiet (the generic TUI path). [text] overrides
   /// [FeishuInboundEvent.text] for `/raw`.
-  void _mirrorIntoTui(FeishuInboundEvent event, {String? text}) {
+  void _mirrorIntoTui(FeishuInboundEvent event,
+      {String? text, String? workspaceId}) {
     final line = text ?? event.text;
     _capture?.flush();
-    final output = bridge.subscribeActiveOutput();
+    final output = bridge.subscribeOutput(workspaceId);
     if (output == null) {
-      _writeTuiLine(line);
+      _writeTuiLine(line, workspaceId);
       unawaited(api
           .sendText(event.chatId, _kTuiHint)
           .catchError((_) {}));
@@ -516,9 +911,10 @@ class FeishuIntegration {
       idleWindow: outputWindow,
       maxWindow: maxOutputWindow,
       onDone: () => _capture = null,
-      screenOf: bridge.snapshotActiveScreen,
+      screenOf: () => bridge.snapshotScreen(workspaceId),
+      replyTo: _sendReply,
     );
-    _writeTuiLine(line);
+    _writeTuiLine(line, workspaceId);
   }
 
   /// Write a line into a TUI as two separate PTY writes: the text
@@ -528,28 +924,28 @@ class FeishuIntegration {
   /// its Enter swallowed (observed: opencode's `/quit`). The
   /// plain-shell path (`_writeAndCapture`) is unaffected: a
   /// shell's line discipline handles text+CR in one write fine.
-  void _writeTuiLine(String line) {
+  void _writeTuiLine(String line, String? workspaceId) {
     // A pending Enter belongs to the *previous* line: send it now
     // so this line starts in a fresh composer. Cancelling it
     // instead merged two messages into one submission — the second
     // line landed in the first one's composer, and the first
     // message was never sent at all.
-    _flushTuiEnter();
-    bridge.runCommand(line);
+    _flushTuiEnter(workspaceId);
+    bridge.runCommand(workspaceId, line);
     _pendingTuiEnter = Timer(const Duration(milliseconds: 150), () {
       _pendingTuiEnter = null;
-      bridge.runCommand('\n');
+      bridge.runCommand(workspaceId, '\n');
     });
   }
 
   /// Send the Enter waiting to follow a TUI text write right now
   /// (see [_writeTuiLine]).
-  void _flushTuiEnter() {
+  void _flushTuiEnter(String? workspaceId) {
     final pending = _pendingTuiEnter;
     if (pending == null) return;
     pending.cancel();
     _pendingTuiEnter = null;
-    bridge.runCommand('\n');
+    bridge.runCommand(workspaceId, '\n');
   }
 
   void _onEvent(FeishuInboundEvent event) => handleEvent(event);
@@ -562,6 +958,22 @@ class FeishuIntegration {
     }
     api.dispose();
   }
+}
+
+/// A dangerous command waiting for the user's confirmation — the
+/// token in the confirmation card points at it.
+class _PendingCommand {
+  final String chatId;
+  final String command;
+  final String? workspaceId;
+  final DateTime at;
+
+  const _PendingCommand({
+    required this.chatId,
+    required this.command,
+    required this.workspaceId,
+    required this.at,
+  });
 }
 
 /// Collects one command's PTY output and turns it into a single
@@ -607,6 +1019,10 @@ class _OutputCapture {
   final String? terminalId;
   final void Function(String terminalId, String app)? onTuiApp;
 
+  /// How the reply leaves: the router's own sender, which paginates
+  /// long outputs (design doc §5). Null = a plain text send.
+  final Future<void> Function(String chatId, String text)? replyTo;
+
   final List<int> _buffer = [];
   StreamSubscription<List<int>>? _sub;
   Timer? _idleTimer;
@@ -624,10 +1040,22 @@ class _OutputCapture {
     this.screenOf,
     this.terminalId,
     this.onTuiApp,
+    this.replyTo,
   }) {
     _sub = stream.listen(_onBytes, onError: (_) {}, onDone: flush);
     _idleTimer = Timer(idleWindow, _onIdle);
     _capTimer = Timer(maxWindow, flush);
+  }
+
+  /// Send the reply — through the router's paginating sender when it
+  /// is there, plain text otherwise.
+  void _reply(String text) {
+    final sender = replyTo;
+    if (sender != null) {
+      unawaited(sender(chatId, text).catchError((_) {}));
+      return;
+    }
+    unawaited(api.sendText(chatId, text).catchError((_) {}));
   }
 
   void _onBytes(List<int> data) {
@@ -706,9 +1134,7 @@ class _OutputCapture {
       // Mirror mode: reply with the rendered screen, not bytes.
       final screen = _trimBlank(screenOf!() ?? const []);
       if (screen.isEmpty) return; // blank screen, nothing to say
-      unawaited(api
-          .sendText(chatId, _formatReplyLines(screen))
-          .catchError((_) {}));
+      _reply(_formatReplyLines(screen));
       return;
     }
     final bytes = _buffer.toList();
@@ -722,8 +1148,10 @@ class _OutputCapture {
       lines.removeLast();
     }
     if (lines.isEmpty) return; // command produced no visible output
-    unawaited(
-        api.sendText(chatId, _formatReplyLines(lines)).catchError((_) {}));
+    // The full output — a long one is paged, not truncated (the
+    // design's §5: navigate with card buttons instead of dropping
+    // the middle).
+    _reply(lines.join('\n'));
   }
 
   /// Tear the capture down (timers, subscription, router state).
@@ -794,23 +1222,26 @@ List<String> _trimBlank(List<String> lines) {
 
 class _NullHostBridge implements FeishuHostBridge {
   @override
-  void runCommand(String command) {}
+  List<FeishuWorkspace> listWorkspaces() => const [];
 
   @override
-  Stream<List<int>>? subscribeActiveOutput() => null;
+  void runCommand(String? workspaceId, String command) {}
 
   @override
-  bool? activeTerminalInAltScreen() => null;
+  Stream<List<int>>? subscribeOutput(String? workspaceId) => null;
 
   @override
-  List<String>? snapshotActiveScreen() => null;
+  bool? inAltScreen(String? workspaceId) => null;
 
   @override
-  String? activeTerminalId() => null;
+  List<String>? snapshotScreen(String? workspaceId) => null;
 
   @override
-  String? activeTerminalCwd() => null;
+  String? terminalId(String? workspaceId) => null;
 
   @override
-  Future<Uint8List?> snapshotActiveTerminalPng() async => null;
+  String? terminalCwd(String? workspaceId) => null;
+
+  @override
+  Future<Uint8List?> snapshotPng(String? workspaceId) async => null;
 }
