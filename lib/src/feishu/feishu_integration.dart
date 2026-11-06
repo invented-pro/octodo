@@ -977,79 +977,106 @@ class FeishuIntegration {
         .catchError((_) {});
   }
 
-  /// `/status` — where the user is right now: the workspaces, the
-  /// bound one, its panes (numbered) and the focused tab.
+  /// `/status` — the tab this chat drives, up top; every tab as a
+  /// flat block (address, then title, then pwd) with the driving
+  /// one marked; a one-line /attach reminder at the end. Workspaces
+  /// and panes are desktop bookkeeping — the chat cares about the
+  /// terminal it types into. Read-only: nothing here writes.
   Future<void> _sendStatus(String chatId, String? workspaceId) async {
     final workspaces = bridge.listWorkspaces();
     final binding = _bindings[chatId];
-    final lines = <String>[];
-
-    // The workspaces — numbered, the active and the bound one marked.
-    lines.add('Workspaces:');
-    for (var i = 0; i < workspaces.length; i++) {
-      final workspace = workspaces[i];
-      final marks = [
-        if (workspace.active) 'active',
-        if (binding?.workspaceId == workspace.id) 'bound',
-      ];
-      lines.add('  ${i + 1}. ${workspace.name}'
-          '${marks.isEmpty ? '' : '  (${marks.join(', ')})'}');
-    }
-
-    // The pane layout of the target workspace.
-    final target = binding?.workspaceId ?? workspaceId;
+    // The target: what the chat is bound to, else the desktop-active
+    // workspace (the one plain text would land in).
+    final target = binding?.workspaceId ??
+        workspaceId ??
+        _activeWorkspaceId(workspaces);
     final name = _workspaceName(workspaces, target);
-    lines.add('Target: ${name ?? 'the active workspace'}'
-        '${binding?.paneNumber == null ? '' : ' · pane ${binding!.paneNumber}'}'
-        '${binding?.surfaceNumber == null ? '' : ' · tab ${binding!.surfaceNumber}'}');
-
+    final wsNumber = workspaces.indexWhere((w) => w.id == target) + 1;
     final layout = bridge.layoutOf(target);
-    if (layout.panes.isEmpty) {
-      lines.add('Panes: none yet');
-    } else {
-      lines.add('Panes:');
-      for (final pane in layout.panes) {
-        lines.add('  ${pane.number}.'
-            '${pane.focused ? ' [focused]' : ''}'
-            '${binding?.paneId == pane.id ? ' [bound]' : ''}');
-        for (var i = 0; i < pane.tabs.length; i++) {
-          final tab = pane.tabs[i];
-          final cwd = tab.cwd;
-          final marks = [
-            if (tab.focused) 'focused',
-            if (binding?.surfaceId == tab.id) 'bound',
-          ];
-          lines.add('     ${i + 1}. ${tab.title.isEmpty ? tab.id : tab.title}'
-              '${cwd == null ? '' : '  ($cwd)'}'
-              '${marks.isEmpty ? '' : '  [${marks.join(', ')}]'}');
+
+    // The tab plain text would land in: the bound one, else the
+    // pane's (workspace's) focused tab.
+    FeishuPaneStatus? pane;
+    if (binding?.paneId != null) {
+      for (final p in layout.panes) {
+        if (p.id == binding!.paneId) pane = p;
+      }
+    }
+    if (pane == null) {
+      for (final p in layout.panes) {
+        if (p.focused) pane = p;
+      }
+      pane ??= layout.panes.isEmpty ? null : layout.panes.first;
+    }
+    FeishuTabStatus? tab;
+    if (pane != null) {
+      if (binding?.surfaceId != null) {
+        for (final t in pane.tabs) {
+          if (t.id == binding!.surfaceId) tab = t;
         }
       }
+      if (tab == null) {
+        for (final t in pane.tabs) {
+          if (t.focused) tab = t;
+        }
+        tab ??= pane.tabs.isEmpty ? null : pane.tabs.first;
+      }
+    }
+
+    final lines = <String>[];
+    String headline;
+    if (tab == null || pane == null) {
+      headline = 'Nothing to drive yet'
+          '${name == null ? '' : ' — "$name" has no tabs'}';
+    } else {
+      String tabLabel(FeishuTabStatus t) =>
+          t.title.isEmpty ? t.id : t.title;
+      final addr = wsNumber <= 0
+          ? null
+          : '$wsNumber.${pane.number}.${pane.tabs.indexOf(tab) + 1}';
+      headline = '${binding == null ? 'Following' : 'Driving'} '
+          '${addr == null ? '' : '$addr '}'
+          '"${tabLabel(tab)}"'
+          '${tab.cwd == null ? '' : ' · ${tab.cwd}'}';
+
+      // Every tab, flat — one block per tab: its ws.pane.tab
+      // address, with the title and pwd indented under it. The
+      // driving block is marked.
+      for (var w = 0; w < workspaces.length; w++) {
+        final ws = workspaces[w];
+        for (final p in bridge.layoutOf(ws.id).panes) {
+          for (var i = 0; i < p.tabs.length; i++) {
+            final t = p.tabs[i];
+            final driving =
+                ws.id == target && p.id == pane.id && t.id == tab.id;
+            lines.add('${driving ? '▸ ' : ''}${w + 1}.${p.number}.${i + 1}');
+            lines.add('  ${tabLabel(t)}');
+            final cwd = t.cwd;
+            if (cwd != null) lines.add('  $cwd');
+          }
+        }
+      }
+
       // A binding can outlive its pane (pane ids are fresh every
-      // launch) — say so instead of leaving [bound] mysteriously
-      // missing.
+      // launch) — say so instead of leaving the address pointing at
+      // a stranger.
       if (binding?.paneId != null &&
           !layout.panes.any((p) => p.id == binding!.paneId)) {
         lines.add('The bound pane is gone — /attach <ws>.<pane>[.<tab>] again.');
       }
+
+      lines.add('Tip: /attach 1.2.3 to switch');
     }
-    // Vivid: the tree keeps its alignment in a plain-text card body,
-    // the target line bold above it. Text fallback keeps every line.
-    final text = lines.join('\n');
+
+    // Vivid: the blocks keep their alignment in a plain-text card
+    // body, the headline bold above it. Text fallback keeps every
+    // line.
     try {
-      final targetLine =
-          lines.firstWhere((l) => l.startsWith('Target: '), orElse: () => '');
       await api.sendCard(
-          chatId,
-          statusCard(
-            target: targetLine.isEmpty
-                ? ''
-                : targetLine.substring('Target: '.length),
-            body: lines
-                .where((l) => !l.startsWith('Target: '))
-                .join('\n'),
-          ));
+          chatId, statusCard(target: headline, body: lines.join('\n')));
     } catch (e) {
       _log.warning('feishu: status card failed ($e)');
+      final text = lines.isEmpty ? headline : '$headline\n${lines.join('\n')}';
       await api.sendText(chatId, text).catchError((_) {});
     }
   }
@@ -1060,6 +1087,15 @@ class FeishuIntegration {
     if (id == null) return null;
     for (final workspace in workspaces) {
       if (workspace.id == id) return workspace.name;
+    }
+    return null;
+  }
+
+  /// The desktop-active workspace's id, or null when the bridge
+  /// reports none.
+  static String? _activeWorkspaceId(List<FeishuWorkspace> workspaces) {
+    for (final w in workspaces) {
+      if (w.active) return w.id;
     }
     return null;
   }

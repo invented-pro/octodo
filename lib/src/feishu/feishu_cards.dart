@@ -295,25 +295,27 @@ Map<String, dynamic> _mdSection(String content) => {
       'text': {'tag': 'lark_md', 'content': content},
     };
 
-/// The /status card — the target line bold, the layout tree in plain
-/// text (alignment survives).
+/// The /status card — the driven tab as the bold headline, the flat
+/// tab blocks (driving one marked with ▸) in plain text so the
+/// alignment survives.
 Map<String, dynamic> statusCard({
   required String target,
   required String body,
-}) =>
-    feishuCard(
-      title: 'Where you are',
-      elements: [
-        {
-          'tag': 'div',
-          'text': {'tag': 'lark_md', 'content': '**Target: $target**'},
-        },
-        {
-          'tag': 'div',
-          'text': {'tag': 'plain_text', 'content': body},
-        },
-      ],
-    );
+}) {
+  final elements = <Map<String, dynamic>>[
+    {
+      'tag': 'div',
+      'text': {'tag': 'lark_md', 'content': '**$target**'},
+    },
+  ];
+  if (body.isNotEmpty) {
+    elements.add({
+      'tag': 'div',
+      'text': {'tag': 'plain_text', 'content': body},
+    });
+  }
+  return feishuCard(title: 'Now driving', elements: elements);
+}
 
 /// A task-completion card: colored header by exit code, the result in
 /// a code fence (plain text when the output itself contains fences).

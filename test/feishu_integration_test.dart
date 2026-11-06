@@ -1289,9 +1289,14 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     final reply = cardText(cards.single);
-    expect(reply, contains('1. one  [focused]'));
-    expect(reply, contains('2. two'));
+    // The stale binding (pane number 3, past the live layout) falls
+    // back to the focused tab for the headline; the sibling tab
+    // stays reachable as a flat block.
+    expect(reply, contains('Driving 1.1.1 "one"'));
+    expect(reply, contains('▸ 1.1.1'));
+    expect(reply, contains('1.1.2\n  two'));
     expect(reply, contains('The bound pane is gone'));
+    expect(reply, contains('Tip: /attach 1.2.3 to switch'));
   });
 
   test('/newtab opens a tab in the bound pane and re-binds to it',
@@ -1507,7 +1512,7 @@ void main() {
     expect(bridge.focusedPanes.last, 'pane_live');
     expect(bridge.focusedSurfaces.last, 'tab_y');
 
-    // The healed ids are persisted — /status marks the live pane.
+    // The healed ids are persisted — /status drives the live tab.
     integration.handleEvent(FeishuInboundEvent(
       senderOpenId: 'ou_owner',
       chatId: 'oc_chat',
@@ -1517,8 +1522,9 @@ void main() {
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
     final reply = cardText(cards.single);
-    expect(reply, contains('1. [focused] [bound]'));
-    expect(reply, contains('2. two  [bound]'));
+    expect(reply, contains('Driving 1.1.2 "two"'));
+    expect(reply, contains('▸ 1.1.2\n  two'));
+    expect(reply, contains('1.1.1\n  one'));
   });
 
   test('a tab-bound chat does not leak into the desktop-focused TUI',
@@ -1744,7 +1750,7 @@ void main() {
   test('/status reports the workspace, its panes and the focused tab',
       () async {
     final bridge = _RecordingBridge()
-      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo', active: true)]
       ..panes = const [
         FeishuPaneStatus(
           id: 'pane_1',
@@ -1784,16 +1790,17 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     final reply = cardText(cards.single);
-    expect(reply, contains('Workspaces:'));
-    expect(reply, contains('1. octodo'));
-    expect(reply, contains('Panes:'));
-    expect(reply, contains('1. [focused]'));
-    expect(reply, contains('2.'));
-    expect(reply, contains('opencode'));
-    expect(reply, contains(r'E:\src\octodo'));
-    // The target line is bold in its own div.
-    expect(cards.single['header']['title']['content'], 'Where you are');
-    expect(reply, contains('**Target: the active workspace**'));
+    // Unbound: the headline follows the desktop focus; the driven
+    // tab is marked in the body, its block bold-adjacent (headline).
+    expect(reply, contains('Following 1.1.2 "opencode" · E:\\src\\octodo'));
+    expect(reply, contains('▸ 1.1.2\n  opencode'));
+    expect(reply, contains('1.1.1\n  pwsh'));
+    // Empty pane 2 produces no block; the reminder is the last line.
+    expect(reply, isNot(contains('\n2.1')));
+    expect(reply, contains('Tip: /attach 1.2.3 to switch'));
+    // The headline is bold in its own div.
+    expect(cards.single['header']['title']['content'], 'Now driving');
+    expect(reply, contains('**Following 1.1.2 "opencode"'));
   });
 
   test('/attach <n> binds the chat to the n-th workspace, <n>.<m> to '
