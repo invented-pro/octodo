@@ -2824,11 +2824,12 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
   }
 
   @override
-  bool focusPane(String? workspaceId, String paneId) =>
+  @override
+  bool focusPane(String? workspaceId, String paneId, {String? surfaceId}) =>
       _entryFor(workspaceId)
           ?.key
           .currentState
-          ?.focusPaneById(paneId) ??
+          ?.focusPaneById(paneId, surfaceId: surfaceId) ??
       false;
 
   @override

@@ -83,6 +83,9 @@ class _RecordingBridge implements FeishuHostBridge {
   /// The panes the fake was asked to focus.
   final List<String> focusedPanes = [];
 
+  /// The tabs the fake was asked to focus within their pane.
+  final List<String> focusedSurfaces = [];
+
   @override
   List<FeishuWorkspace> listWorkspaces() => workspaces;
 
@@ -91,8 +94,9 @@ class _RecordingBridge implements FeishuHostBridge {
       FeishuLayoutStatus(panes);
 
   @override
-  bool focusPane(String? workspaceId, String paneId) {
+  bool focusPane(String? workspaceId, String paneId, {String? surfaceId}) {
     focusedPanes.add(paneId);
+    if (surfaceId != null) focusedSurfaces.add(surfaceId);
     return true;
   }
 
@@ -826,6 +830,102 @@ void main() {
     expect(reply, isNot(contains('pwd')));
   });
 
+  test('/attach <n>.<m>.<k> binds down to a single tab', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+          FeishuTabStatus(
+              id: 'tab_b', title: 'two', cwd: null, focused: false),
+        ]),
+        FeishuPaneStatus(id: 'pane_2', number: 2, focused: false, tabs: []),
+        FeishuPaneStatus(id: 'pane_3', number: 3, focused: false, tabs: [
+          FeishuTabStatus(
+              id: 'tab_c', title: 'three', cwd: null, focused: true),
+          FeishuTabStatus(
+              id: 'tab_d', title: 'four', cwd: null, focused: false),
+        ]),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    // Pane 3's second tab — the one the user is NOT looking at.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 1.3.2',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(sent.last.$2, contains('pane 3 · tab 2'));
+
+    // A command focuses that pane AND that tab before it runs.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    expect(bridge.targets, ['ws_1']);
+    expect(bridge.focusedPanes, ['pane_3']);
+    expect(bridge.focusedSurfaces, ['tab_d']);
+  });
+
+  test('/status numbers the tabs and flags a stale pane binding',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_live', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+          FeishuTabStatus(
+              id: 'tab_b', title: 'two', cwd: null, focused: false),
+        ]),
+      ];
+    final sent = <(String, String)>[];
+    // Bind to a pane id that no longer exists (a restart made every
+    // pane id fresh); the seed lands in the router's own store file.
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      seedBindings: {
+        'oc_chat': FeishuChatBinding(
+          chatId: 'oc_chat',
+          chatType: 'p2p',
+          workspaceId: 'ws_1',
+          workspaceName: 'octodo',
+          paneId: 'pane_dead',
+          paneNumber: 3,
+          boundAt: DateTime.now(),
+          boundBy: 'ou_owner',
+        ),
+      },
+    );
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_status',
+      text: '/status',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final reply = sent.last.$2;
+    expect(reply, contains('1. one  [focused]'));
+    expect(reply, contains('2. two'));
+    expect(reply, contains('The bound pane is gone'));
+  });
+
   // ── Phase 2: cards, bindings, confirmations ────────────────────
 
   test('a long output is one pager card, pages replace it in place',
@@ -1494,6 +1594,8 @@ Future<FeishuIntegration> _routerFor({
   void Function(String chat, Map<String, dynamic> card)? onCard,
   void Function(String token, Map<String, dynamic> card)? onUpdateCard,
   void Function(File approvalFile)? approvalFileOut,
+  File? bindingFile,
+  Map<String, FeishuChatBinding>? seedBindings,
   Duration outputWindow = const Duration(seconds: 5),
   Duration maxOutputWindow = const Duration(minutes: 5),
   OpencodeGateway? gateway,
@@ -1509,6 +1611,12 @@ Future<FeishuIntegration> _routerFor({
       File('${dir.path}${Platform.pathSeparator}a.json');
   approvalFileOut?.call(approvalFile);
 
+  final bindingStoreFile = bindingFile ??
+      File('${dir.path}${Platform.pathSeparator}b.json');
+  if (seedBindings != null) {
+    await FeishuBindingStore(bindingStoreFile).save(seedBindings);
+  }
+
   final api = _RecordingApiClient(onSend ?? (_, _) {},
       onImage: onImage, onCard: onCard, onUpdateCard: onUpdateCard);
   final integration = FeishuIntegration(
@@ -1516,8 +1624,7 @@ Future<FeishuIntegration> _routerFor({
     channel: channel ?? _FakeChannel(),
     api: api,
     credentialStore: store,
-    bindingStore: FeishuBindingStore(
-        File('${dir.path}${Platform.pathSeparator}b.json')),
+    bindingStore: FeishuBindingStore(bindingStoreFile),
     approvalStore: FeishuApprovalStore(approvalFile),
     outputWindow: outputWindow,
     maxOutputWindow: maxOutputWindow,

@@ -111,11 +111,11 @@ abstract class FeishuHostBridge {
   /// (the `/status` readout).
   FeishuLayoutStatus layoutOf(String? workspaceId);
 
-  /// Make the pane [paneId] the target of the commands in
-  /// [workspaceId] (null = the active workspace) — the addressing
-  /// primitive behind a pane-level binding. False when the pane is
-  /// gone.
-  bool focusPane(String? workspaceId, String paneId);
+  /// Make the pane [paneId] — and the tab [surfaceId] inside it when
+  /// given — the target of the commands in [workspaceId] (null = the
+  /// active workspace) — the addressing primitive behind a pane- or
+  /// tab-level binding. False when the pane (or the tab) is gone.
+  bool focusPane(String? workspaceId, String paneId, {String? surfaceId});
 
   /// Write [command] (already newline-terminated by the router) into
   /// the focused terminal of [workspaceId]. No-op when no terminal
@@ -764,7 +764,8 @@ class FeishuIntegration {
     final target = binding?.workspaceId ?? workspaceId;
     final name = _workspaceName(workspaces, target);
     lines.add('Target: ${name ?? 'the active workspace'}'
-        '${binding?.paneNumber == null ? '' : ' · pane ${binding!.paneNumber}'}');
+        '${binding?.paneNumber == null ? '' : ' · pane ${binding!.paneNumber}'}'
+        '${binding?.surfaceNumber == null ? '' : ' · tab ${binding!.surfaceNumber}'}');
 
     final layout = bridge.layoutOf(target);
     if (layout.panes.isEmpty) {
@@ -775,12 +776,24 @@ class FeishuIntegration {
         lines.add('  ${pane.number}.'
             '${pane.focused ? ' [focused]' : ''}'
             '${binding?.paneId == pane.id ? ' [bound]' : ''}');
-        for (final tab in pane.tabs) {
+        for (var i = 0; i < pane.tabs.length; i++) {
+          final tab = pane.tabs[i];
           final cwd = tab.cwd;
-          lines.add('     ${tab.focused ? '>' : ' '} '
-              '${tab.title.isEmpty ? tab.id : tab.title}'
-              '${cwd == null ? '' : '  ($cwd)'}');
+          final marks = [
+            if (tab.focused) 'focused',
+            if (binding?.surfaceId == tab.id) 'bound',
+          ];
+          lines.add('     ${i + 1}. ${tab.title.isEmpty ? tab.id : tab.title}'
+              '${cwd == null ? '' : '  ($cwd)'}'
+              '${marks.isEmpty ? '' : '  [${marks.join(', ')}]'}');
         }
+      }
+      // A binding can outlive its pane (pane ids are fresh every
+      // launch) — say so instead of leaving [bound] mysteriously
+      // missing.
+      if (binding?.paneId != null &&
+          !layout.panes.any((p) => p.id == binding!.paneId)) {
+        lines.add('The bound pane is gone — /attach <ws>.<pane>[.<tab>] again.');
       }
     }
     await api.sendText(chatId, lines.join('\n')).catchError((_) {});
@@ -797,7 +810,8 @@ class FeishuIntegration {
   }
 
   /// `/attach <n>` — bind to the n-th workspace; `/attach <n>.<m>` —
-  /// to its m-th pane. The numbers are the ones `/status` prints.
+  /// to its m-th pane; `/attach <n>.<m>.<k>` — to the k-th tab of
+  /// that pane. The numbers are the ones `/status` prints.
   /// [boundBy] records who made the binding (§3.2).
   Future<void> _attachByNumber(String chatId, String spec,
       {String boundBy = ''}) async {
@@ -805,7 +819,9 @@ class FeishuIntegration {
     final workspaceNumber = int.tryParse(parts.first.trim());
     if (workspaceNumber == null) {
       await api
-          .sendText(chatId, 'Usage: /attach <workspace> or /attach <workspace>.<pane>')
+          .sendText(chatId,
+              'Usage: /attach <workspace>[.<pane>[.<tab>]] — /status '
+              'lists the numbers.')
           .catchError((_) {});
       return;
     }
@@ -820,9 +836,11 @@ class FeishuIntegration {
 
     String? paneId;
     int? paneNumber;
+    String? surfaceId;
+    int? surfaceNumber;
+    final panes = bridge.layoutOf(workspace.id).panes;
     if (parts.length > 1) {
       final number = int.tryParse(parts[1].trim());
-      final panes = bridge.layoutOf(workspace.id).panes;
       if (number == null || number < 1 || number > panes.length) {
         await api
             .sendText(chatId, 'No pane $number — /status lists them.')
@@ -831,6 +849,19 @@ class FeishuIntegration {
       }
       paneId = panes[number - 1].id;
       paneNumber = number;
+      if (parts.length > 2) {
+        final tabs = panes[number - 1].tabs;
+        final tab = int.tryParse(parts[2].trim());
+        if (tab == null || tab < 1 || tab > tabs.length) {
+          await api
+              .sendText(chatId,
+                  'No tab $tab in pane $number — /status lists them.')
+              .catchError((_) {});
+          return;
+        }
+        surfaceId = tabs[tab - 1].id;
+        surfaceNumber = tab;
+      }
     }
 
     _bindings[chatId] = FeishuChatBinding(
@@ -840,6 +871,8 @@ class FeishuIntegration {
       workspaceName: workspace.name,
       paneId: paneId,
       paneNumber: paneNumber,
+      surfaceId: surfaceId,
+      surfaceNumber: surfaceNumber,
       boundAt: DateTime.now(),
       boundBy: boundBy,
     );
@@ -847,17 +880,21 @@ class FeishuIntegration {
     await api
         .sendText(chatId,
             'Now driving ${workspace.name}'
-            '${paneNumber == null ? '' : ' · pane $paneNumber'}.')
+            '${paneNumber == null ? '' : ' · pane $paneNumber'}'
+            '${surfaceNumber == null ? '' : ' · tab $surfaceNumber'}.')
         .catchError((_) {});
   }
 
-  /// Make the pane a binding points at the target of the commands
-  /// (a pane-level binding addresses one pane, not "whatever is
-  /// focused right now").
+  /// Make the pane — and the tab — a binding points at the target of
+  /// the commands (a pane- or tab-level binding addresses one place,
+  /// not "whatever is focused right now").
   void _focusBoundPane(String chatId, String? workspaceId) {
-    final paneId = _bindings[chatId]?.paneId;
-    if (paneId == null) return;
-    if (!bridge.focusPane(workspaceId, paneId)) {
+    final binding = _bindings[chatId];
+    if (binding == null) return;
+    if (binding.paneId == null && binding.surfaceId == null) return;
+    final ok = bridge.focusPane(workspaceId, binding.paneId ?? '',
+        surfaceId: binding.surfaceId);
+    if (!ok) {
       _log.info('feishu: the bound pane of chat $chatId is gone');
     }
   }
@@ -1695,7 +1732,9 @@ class _NullHostBridge implements FeishuHostBridge {
       const FeishuLayoutStatus([]);
 
   @override
-  bool focusPane(String? workspaceId, String paneId) => false;
+  bool focusPane(String? workspaceId, String paneId,
+          {String? surfaceId}) =>
+      false;
 
   @override
   void runCommand(String? workspaceId, String command) {}

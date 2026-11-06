@@ -44,6 +44,15 @@ class FeishuChatBinding {
   /// only; the id is what counts.
   final int? paneNumber;
 
+  /// The tab (surface) inside that pane this chat drives, when the
+  /// binding is tab-level (`/attach <ws>.<pane>.<tab>`). Null = the
+  /// pane's focused tab.
+  final String? surfaceId;
+
+  /// The tab's number within its pane at binding time — for display
+  /// only; the id is what counts.
+  final int? surfaceNumber;
+
   /// When the binding was made.
   final DateTime boundAt;
 
@@ -59,6 +68,8 @@ class FeishuChatBinding {
     required this.boundBy,
     this.paneId,
     this.paneNumber,
+    this.surfaceId,
+    this.surfaceNumber,
   });
 
   Map<String, dynamic> toJson() => {
@@ -68,6 +79,8 @@ class FeishuChatBinding {
         'workspaceName': workspaceName,
         'paneId': paneId,
         'paneNumber': paneNumber,
+        'surfaceId': surfaceId,
+        'surfaceNumber': surfaceNumber,
         'boundAt': boundAt.toIso8601String(),
         'boundBy': boundBy,
       };
@@ -86,6 +99,9 @@ class FeishuChatBinding {
           json['workspaceName'] is String ? json['workspaceName'] as String : '',
       paneId: json['paneId'] is String ? json['paneId'] as String : null,
       paneNumber: json['paneNumber'] is int ? json['paneNumber'] as int : null,
+      surfaceId: json['surfaceId'] is String ? json['surfaceId'] as String : null,
+      surfaceNumber:
+          json['surfaceNumber'] is int ? json['surfaceNumber'] as int : null,
       boundAt: boundAt ?? DateTime.now(),
       boundBy: json['boundBy'] is String ? json['boundBy'] as String : '',
     );
