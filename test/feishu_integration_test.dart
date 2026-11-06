@@ -1085,6 +1085,39 @@ void main() {
     expect(sent.last.$2, contains('only tab'));
   });
 
+  test('/help lists the commands', () async {
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: _RecordingBridge(),
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_help',
+      text: '/help',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final reply = sent.single.$2;
+    for (final command in [
+      '/status',
+      '/attach',
+      '/detach',
+      '/newtab',
+      '/closetab',
+      '/raw',
+      '/history',
+      '/run <token>',
+    ]) {
+      expect(reply, contains(command), reason: 'help mentions $command');
+    }
+    expect(reply, contains('read-only'),
+        reason: 'help states the binding permission model');
+  });
+
   // ── Phase 2: cards, bindings, confirmations ────────────────────
 
   test('a long output is one pager card, pages replace it in place',

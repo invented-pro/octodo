@@ -456,6 +456,13 @@ class FeishuIntegration {
       return;
     }
 
+    // 5. `/help` — what this chat can do. Read-only: it answers for
+    //    everyone whitelisted.
+    if (event.text == '/help') {
+      unawaited(api.sendText(event.chatId, _helpText()).catchError((_) {}));
+      return;
+    }
+
     // 5a. `/attach` — pick the workspace this chat drives. The
     //     picker is a card: buttons are far easier to hit on a
     //     phone than a numbered list (design doc §3.2).
@@ -687,6 +694,26 @@ class FeishuIntegration {
         'by another member — only they may send commands here. '
         '/status still works for you.';
   }
+
+  /// The `/help` text — the remote control's whole surface.
+  String _helpText() => 'Octodo remote control — commands:\n'
+      '/status — workspaces, panes, tabs; what is focused and what '
+      'this chat drives\n'
+      '/attach — pick a workspace (a card); /attach <ws>[.<pane>.'
+      '[.<tab>]] binds by the numbers /status prints\n'
+      '/detach — unbind; follow whatever the desktop has focused\n'
+      '/newtab — open a tab in the bound pane (re-binds to it)\n'
+      '/closetab — close the focused tab (never the last one)\n'
+      '/raw <keys> — raw keystrokes into the terminal, TUIs included '
+      '(/raw /quit)\n'
+      '/history — the terminal\'s last screen (a PNG when the desktop '
+      'can render it)\n'
+      'Plain text runs in the target terminal and answers with its '
+      'output.\n'
+      'Dangerous commands ask first — Run once / Always / Cancel on a '
+      'card (or /run <token> / /cancel as text).\n'
+      'A bound chat is read-only for everyone except the member who '
+      'bound it.';
 
   /// Send another page of a long output (design doc §5 — long
   /// outputs are navigated with card buttons, not concatenated
