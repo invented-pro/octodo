@@ -278,7 +278,7 @@ class _Header extends StatelessWidget {
               borderRadius: BorderRadius.circular(6),
             ),
             child: Center(
-              child: Icon(Icons.smartphone, size: 16, color: palette.accentBlue),
+              child: Icon(Icons.phonelink, size: 16, color: palette.accentBlue),
             ),
           ),
           const SizedBox(width: 10),

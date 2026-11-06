@@ -1908,7 +1908,7 @@ class _WorkspaceDrawer extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(
-                        Icons.smartphone,
+                        Icons.phonelink,
                         size: 14,
                         color: palette.brightness == Brightness.dark
                             ? palette.textMuted
