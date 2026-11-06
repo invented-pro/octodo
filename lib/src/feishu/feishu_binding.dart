@@ -35,6 +35,15 @@ class FeishuChatBinding {
   /// is what counts.
   final String workspaceName;
 
+  /// The pane inside that workspace this chat drives, when the
+  /// binding is pane-level (the design's optional `pane_id`). Null =
+  /// the workspace's focused pane.
+  final String? paneId;
+
+  /// The pane's number in the layout at binding time — for display
+  /// only; the id is what counts.
+  final int? paneNumber;
+
   /// When the binding was made.
   final DateTime boundAt;
 
@@ -48,6 +57,8 @@ class FeishuChatBinding {
     required this.workspaceName,
     required this.boundAt,
     required this.boundBy,
+    this.paneId,
+    this.paneNumber,
   });
 
   Map<String, dynamic> toJson() => {
@@ -55,6 +66,8 @@ class FeishuChatBinding {
         'chatType': chatType,
         'workspaceId': workspaceId,
         'workspaceName': workspaceName,
+        'paneId': paneId,
+        'paneNumber': paneNumber,
         'boundAt': boundAt.toIso8601String(),
         'boundBy': boundBy,
       };
@@ -71,6 +84,8 @@ class FeishuChatBinding {
       workspaceId: workspaceId,
       workspaceName:
           json['workspaceName'] is String ? json['workspaceName'] as String : '',
+      paneId: json['paneId'] is String ? json['paneId'] as String : null,
+      paneNumber: json['paneNumber'] is int ? json['paneNumber'] as int : null,
       boundAt: boundAt ?? DateTime.now(),
       boundBy: json['boundBy'] is String ? json['boundBy'] as String : '',
     );

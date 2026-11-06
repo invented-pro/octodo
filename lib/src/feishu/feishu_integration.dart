@@ -32,7 +32,11 @@ import 'opencode_client.dart';
 class FeishuWorkspace {
   final String id;
   final String name;
-  const FeishuWorkspace(this.id, this.name);
+
+  /// True for the workspace the desktop has in front.
+  final bool active;
+
+  const FeishuWorkspace(this.id, this.name, {this.active = false});
 }
 
 /// One terminal tab (a surface) of a pane.
@@ -57,6 +61,10 @@ class FeishuPaneStatus {
   /// The pane's stable id.
   final String id;
 
+  /// The pane's number in the layout — 1-based, left to right and
+  /// top to bottom. What the user types to address it.
+  final int number;
+
   /// True for the pane the user is in.
   final bool focused;
 
@@ -64,6 +72,7 @@ class FeishuPaneStatus {
 
   const FeishuPaneStatus({
     required this.id,
+    required this.number,
     required this.focused,
     required this.tabs,
   });
@@ -100,6 +109,12 @@ abstract class FeishuHostBridge {
   /// which of them is focused — "where is the user right now"
   /// (the `/status` readout).
   FeishuLayoutStatus layoutOf(String? workspaceId);
+
+  /// Make the pane [paneId] the target of the commands in
+  /// [workspaceId] (null = the active workspace) — the addressing
+  /// primitive behind a pane-level binding. False when the pane is
+  /// gone.
+  bool focusPane(String? workspaceId, String paneId);
 
   /// Write [command] (already newline-terminated by the router) into
   /// the focused terminal of [workspaceId]. No-op when no terminal
@@ -412,8 +427,15 @@ class FeishuIntegration {
     // 5a. `/attach` — pick the workspace this chat drives. The
     //     picker is a card: buttons are far easier to hit on a
     //     phone than a numbered list (design doc §3.2).
+    //     `/attach <n>` / `/attach <n>.<m>` address it by the
+    //     numbers `/status` prints.
     if (event.text == '/attach') {
       unawaited(_sendWorkspacePicker(event.chatId));
+      return;
+    }
+    if (event.text.startsWith('/attach ')) {
+      unawaited(_attachByNumber(
+          event.chatId, event.text.substring('/attach '.length).trim()));
       return;
     }
 
@@ -609,42 +631,123 @@ class FeishuIntegration {
         .catchError((_) {});
   }
 
-  /// `/status` — where the user is right now: the bound workspace,
-  /// its panes, their tabs, and which one has the focus.
+  /// `/status` — where the user is right now: the workspaces, the
+  /// bound one, its panes (numbered) and the focused tab.
   Future<void> _sendStatus(String chatId, String? workspaceId) async {
     final workspaces = bridge.listWorkspaces();
     final binding = _bindings[chatId];
     final lines = <String>[];
 
-    final name = binding?.workspaceName ??
-        (workspaceId == null
-            ? null
-            : workspaces
-                .where((w) => w.id == workspaceId)
-                .map((w) => w.name)
-                .firstOrNull);
-    lines.add(binding == null
-        ? 'Target: the active workspace'
-        : 'Target: ${name ?? workspaceId} (bound)');
+    // The workspaces — numbered, the active and the bound one marked.
+    lines.add('Workspaces:');
+    for (var i = 0; i < workspaces.length; i++) {
+      final workspace = workspaces[i];
+      final marks = [
+        if (workspace.active) 'active',
+        if (binding?.workspaceId == workspace.id) 'bound',
+      ];
+      lines.add('  ${i + 1}. ${workspace.name}'
+          '${marks.isEmpty ? '' : '  (${marks.join(', ')})'}');
+    }
 
-    final layout = bridge.layoutOf(workspaceId);
+    // The pane layout of the target workspace.
+    final target = binding?.workspaceId ?? workspaceId;
+    final name = _workspaceName(workspaces, target);
+    lines.add('Target: ${name ?? 'the active workspace'}'
+        '${binding?.paneNumber == null ? '' : ' · pane ${binding!.paneNumber}'}');
+
+    final layout = bridge.layoutOf(target);
     if (layout.panes.isEmpty) {
-      lines.add('No terminal panes yet.');
+      lines.add('Panes: none yet');
     } else {
-      lines.add('Panes: ${layout.panes.length}');
-      for (var i = 0; i < layout.panes.length; i++) {
-        final pane = layout.panes[i];
-        lines.add('  ${pane.focused ? '▸' : ' '} pane ${i + 1}'
-            '${pane.focused ? ' (focused)' : ''}');
+      lines.add('Panes:');
+      for (final pane in layout.panes) {
+        lines.add('  ${pane.number}.'
+            '${pane.focused ? ' [focused]' : ''}'
+            '${binding?.paneId == pane.id ? ' [bound]' : ''}');
         for (final tab in pane.tabs) {
           final cwd = tab.cwd;
-          lines.add('    ${tab.focused ? '▸' : ' '} '
+          lines.add('     ${tab.focused ? '>' : ' '} '
               '${tab.title.isEmpty ? tab.id : tab.title}'
               '${cwd == null ? '' : '  ($cwd)'}');
         }
       }
     }
     await api.sendText(chatId, lines.join('\n')).catchError((_) {});
+  }
+
+  /// The name of the workspace with [id], or null when unknown.
+  static String? _workspaceName(
+      List<FeishuWorkspace> workspaces, String? id) {
+    if (id == null) return null;
+    for (final workspace in workspaces) {
+      if (workspace.id == id) return workspace.name;
+    }
+    return null;
+  }
+
+  /// `/attach <n>` — bind to the n-th workspace; `/attach <n>.<m>` —
+  /// to its m-th pane. The numbers are the ones `/status` prints.
+  Future<void> _attachByNumber(String chatId, String spec) async {
+    final parts = spec.split('.');
+    final workspaceNumber = int.tryParse(parts.first.trim());
+    if (workspaceNumber == null) {
+      await api
+          .sendText(chatId, 'Usage: /attach <workspace> or /attach <workspace>.<pane>')
+          .catchError((_) {});
+      return;
+    }
+    final workspaces = bridge.listWorkspaces();
+    if (workspaceNumber < 1 || workspaceNumber > workspaces.length) {
+      await api
+          .sendText(chatId, 'No workspace $workspaceNumber — /status lists them.')
+          .catchError((_) {});
+      return;
+    }
+    final workspace = workspaces[workspaceNumber - 1];
+
+    String? paneId;
+    int? paneNumber;
+    if (parts.length > 1) {
+      final number = int.tryParse(parts[1].trim());
+      final panes = bridge.layoutOf(workspace.id).panes;
+      if (number == null || number < 1 || number > panes.length) {
+        await api
+            .sendText(chatId, 'No pane $number — /status lists them.')
+            .catchError((_) {});
+        return;
+      }
+      paneId = panes[number - 1].id;
+      paneNumber = number;
+    }
+
+    _bindings[chatId] = FeishuChatBinding(
+      chatId: chatId,
+      chatType: 'p2p',
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+      paneId: paneId,
+      paneNumber: paneNumber,
+      boundAt: DateTime.now(),
+      boundBy: _credentials?.ownerOpenId ?? '',
+    );
+    await _saveBindings();
+    await api
+        .sendText(chatId,
+            'Now driving ${workspace.name}'
+            '${paneNumber == null ? '' : ' · pane $paneNumber'}.')
+        .catchError((_) {});
+  }
+
+  /// Make the pane a binding points at the target of the commands
+  /// (a pane-level binding addresses one pane, not "whatever is
+  /// focused right now").
+  void _focusBoundPane(String chatId, String? workspaceId) {
+    final paneId = _bindings[chatId]?.paneId;
+    if (paneId == null) return;
+    if (!bridge.focusPane(workspaceId, paneId)) {
+      _log.info('feishu: the bound pane of chat $chatId is gone');
+    }
   }
 
   /// Send the workspace picker card — the `/attach` flow (design doc
@@ -783,6 +886,9 @@ class FeishuIntegration {
   /// output for the reply (the plain-command path — line output,
   /// not a screen mirror). Shared by direct commands and `/ai`.
   void _writeAndCapture(String chatId, String commandLine, String? workspaceId) {
+    // A pane-level binding addresses one pane: make it the target
+    // before anything is written.
+    _focusBoundPane(chatId, workspaceId);
     // A new command flushes any pending output capture first.
     _capture?.flush();
     final output = bridge.subscribeOutput(workspaceId);
@@ -996,6 +1102,7 @@ class FeishuIntegration {
   void _mirrorIntoTui(FeishuInboundEvent event,
       {String? text, String? workspaceId}) {
     final line = text ?? event.text;
+    _focusBoundPane(event.chatId, workspaceId);
     _capture?.flush();
     final output = bridge.subscribeOutput(workspaceId);
     if (output == null) {
@@ -1329,6 +1436,9 @@ class _NullHostBridge implements FeishuHostBridge {
   @override
   FeishuLayoutStatus layoutOf(String? workspaceId) =>
       const FeishuLayoutStatus([]);
+
+  @override
+  bool focusPane(String? workspaceId, String paneId) => false;
 
   @override
   void runCommand(String? workspaceId, String command) {}

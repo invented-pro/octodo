@@ -79,12 +79,21 @@ class _RecordingBridge implements FeishuHostBridge {
   /// The pane layout the fake reports to `/status`.
   List<FeishuPaneStatus> panes = const [];
 
+  /// The panes the fake was asked to focus.
+  final List<String> focusedPanes = [];
+
   @override
   List<FeishuWorkspace> listWorkspaces() => workspaces;
 
   @override
   FeishuLayoutStatus layoutOf(String? workspaceId) =>
       FeishuLayoutStatus(panes);
+
+  @override
+  bool focusPane(String? workspaceId, String paneId) {
+    focusedPanes.add(paneId);
+    return true;
+  }
 
   @override
   void runCommand(String? workspaceId, String command) {
@@ -806,6 +815,7 @@ void main() {
       ..panes = const [
         FeishuPaneStatus(
           id: 'pane_1',
+          number: 1,
           focused: true,
           tabs: [
             FeishuTabStatus(
@@ -822,7 +832,7 @@ void main() {
             ),
           ],
         ),
-        FeishuPaneStatus(id: 'pane_2', focused: false, tabs: []),
+        FeishuPaneStatus(id: 'pane_2', number: 2, focused: false, tabs: []),
       ];
     final sent = <(String, String)>[];
     final integration = await _routerFor(
@@ -841,11 +851,56 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     final reply = sent.single.$2;
+    expect(reply, contains('Workspaces:'));
+    expect(reply, contains('1. octodo'));
     expect(reply, contains('Target: the active workspace'));
-    expect(reply, contains('Panes: 2'));
-    expect(reply, contains('pane 1 (focused)'));
+    expect(reply, contains('Panes:'));
+    expect(reply, contains('1. [focused]'));
+    expect(reply, contains('2.'));
     expect(reply, contains('opencode'));
     expect(reply, contains(r'E:\src\octodo'));
+  });
+
+  test('/attach <n> binds the chat to the n-th workspace, <n>.<m> to '
+      'its m-th pane', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [
+        FeishuWorkspace('ws_1', 'octodo'),
+        FeishuWorkspace('ws_2', 'docs'),
+      ]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: []),
+        FeishuPaneStatus(id: 'pane_2', number: 2, focused: false, tabs: []),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 2.2',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(sent.last.$2, contains('docs'));
+    expect(sent.last.$2, contains('pane 2'));
+
+    // The command now goes to that workspace — and the pane is
+    // focused first, so it lands in the right one.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    expect(bridge.targets, ['ws_2']);
+    expect(bridge.focusedPanes, ['pane_2']);
   });
 
   test('/attach sends the workspace picker card', () async {

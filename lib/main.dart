@@ -2795,7 +2795,8 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
   @override
   List<FeishuWorkspace> listWorkspaces() => [
         for (final entry in shell._workspaces)
-          FeishuWorkspace(entry.id, entry.name),
+          FeishuWorkspace(entry.id, entry.name,
+              active: identical(entry, shell._activeWorkspace)),
       ];
 
   @override
@@ -2807,6 +2808,7 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
       for (final pane in panes)
         FeishuPaneStatus(
           id: pane.id,
+          number: pane.number,
           focused: pane.focused,
           tabs: [
             for (final tab in pane.tabs)
@@ -2820,6 +2822,14 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
         ),
     ]);
   }
+
+  @override
+  bool focusPane(String? workspaceId, String paneId) =>
+      _entryFor(workspaceId)
+          ?.key
+          .currentState
+          ?.focusPaneById(paneId) ??
+      false;
 
   @override
   void runCommand(String? workspaceId, String command) {

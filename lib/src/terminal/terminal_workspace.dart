@@ -102,6 +102,11 @@ class PaneStatus {
   /// The pane's stable id (survives splits and moves).
   final String id;
 
+  /// The pane's number in the layout — 1-based, left to right and
+  /// top to bottom. The number is what a user types ("pane 2"); the
+  /// id is what the app addresses.
+  final int number;
+
   /// True for the pane the user is in.
   final bool focused;
 
@@ -110,6 +115,7 @@ class PaneStatus {
 
   const PaneStatus({
     required this.id,
+    required this.number,
     required this.focused,
     required this.tabs,
   });
@@ -1865,12 +1871,13 @@ function prompt {
     }
     final focusedTab = focused?.focusedSurface?.id;
     return [
-      for (final leaf in leaves)
+      for (var i = 0; i < leaves.length; i++)
         PaneStatus(
-          id: leaf.id,
-          focused: identical(leaf, focused),
+          id: leaves[i].id,
+          number: i + 1,
+          focused: identical(leaves[i], focused),
           tabs: [
-            for (final surface in leaf.surfaces)
+            for (final surface in leaves[i].surfaces)
               TabStatus(
                 id: surface.id,
                 title: surface.chipTitle,
@@ -1881,6 +1888,43 @@ function prompt {
           ],
         ),
     ];
+  }
+
+  /// Focus the pane with [paneId] — and the tab [surfaceId] inside it
+  /// when given.
+  ///
+  /// This is the addressing primitive for pane-level bindings: the
+  /// commands then go to that pane's focused terminal, and the
+  /// desktop shows which pane the bot is driving. False when the
+  /// pane (or the tab) is gone.
+  bool focusPaneById(String paneId, {String? surfaceId}) {
+    final root = _rootPane;
+    if (root == null) return false;
+    final leaves = <PaneContainer>[];
+    if (root is PaneContainer) {
+      leaves.add(root);
+    } else if (root is PaneSplit) {
+      root.forEachLeaf(leaves.add);
+    }
+    PaneContainer? match;
+    for (final leaf in leaves) {
+      if (leaf.id == paneId) {
+        match = leaf;
+        break;
+      }
+    }
+    if (match == null) return false;
+    if (surfaceId == null) {
+      _focusContainer(match);
+      return true;
+    }
+    for (final surface in match.surfaces) {
+      if (surface.id == surfaceId) {
+        _selectSurfaceInContainer(match, surface);
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Resolve the [TerminalViewState] currently receiving keyboard
