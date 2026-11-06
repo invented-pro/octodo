@@ -2343,7 +2343,6 @@ Future<FeishuIntegration> _routerFor({
   void Function(String chat, Map<String, dynamic> card)? onCard,
   void Function(String token, Map<String, dynamic> card)? onUpdateCard,
   void Function(File approvalFile)? approvalFileOut,
-  File? bindingFile,
   Map<String, FeishuChatBinding>? seedBindings,
 
   /// Chats already greeted. Defaults to the standard test chat so
@@ -2374,12 +2373,6 @@ Future<FeishuIntegration> _routerFor({
       File('${dir.path}${Platform.pathSeparator}a.json');
   approvalFileOut?.call(approvalFile);
 
-  final bindingStoreFile = bindingFile ??
-      File('${dir.path}${Platform.pathSeparator}b.json');
-  if (seedBindings != null) {
-    await FeishuBindingStore(bindingStoreFile).save(seedBindings);
-  }
-
   final greetingFile = File('${dir.path}${Platform.pathSeparator}g.json');
   await FeishuGreetingStore(greetingFile)
       .save(greeted ?? {'oc_chat'});
@@ -2393,7 +2386,7 @@ Future<FeishuIntegration> _routerFor({
     channel: channel ?? _FakeChannel(),
     api: api,
     credentialStore: store,
-    bindingStore: FeishuBindingStore(bindingStoreFile),
+    initialBindings: seedBindings,
     approvalStore: FeishuApprovalStore(approvalFile),
     greetingStore: FeishuGreetingStore(greetingFile),
     lease: FeishuConnectionLease(lock,

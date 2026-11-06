@@ -303,10 +303,10 @@ class FeishuIntegration {
   final _tuiApps = <String, String>{};
 
   /// Which workspace each chat drives (design doc §3, phase 2).
+  /// Session-scoped: workspace ids (`ws-0`, …) are per-process, so
+  /// a binding saved to disk could only ever point at a dead
+  /// session — bindings live in memory and start clean on relaunch.
   final Map<String, FeishuChatBinding> _bindings = {};
-
-  /// Where the bindings are persisted.
-  final FeishuBindingStore bindingStore;
 
   /// Dangerous commands waiting for the user's confirmation — the
   /// token → command map behind the confirmation card.
@@ -349,7 +349,7 @@ class FeishuIntegration {
     FeishuEventChannel? channel,
     FeishuApiClient? api,
     FeishuCredentialStore? credentialStore,
-    FeishuBindingStore? bindingStore,
+    Map<String, FeishuChatBinding>? initialBindings,
     FeishuApprovalStore? approvalStore,
     FeishuGreetingStore? greetingStore,
     FeishuConnectionLease? lease,
@@ -362,10 +362,11 @@ class FeishuIntegration {
         api = api ?? FeishuApiClient(),
         credentialStore =
             credentialStore ?? FeishuCredentialStore.resolve(),
-        bindingStore = bindingStore ?? FeishuBindingStore.resolve(),
         approvalStore = approvalStore ?? FeishuApprovalStore.resolve(),
         greetingStore = greetingStore ?? FeishuGreetingStore.resolve(),
-        lease = lease ?? FeishuConnectionLease.resolve();
+        lease = lease ?? FeishuConnectionLease.resolve() {
+    _bindings.addAll(initialBindings ?? const {});
+  }
 
   static FeishuIntegration? _instance;
 
@@ -437,7 +438,6 @@ class FeishuIntegration {
     // 3 s, so the channel asks us and writes our reply back.
     channel.cardActionHandler = _handleCardAction;
     bridge.watchTaskResults(_onTaskResult);
-    await _loadBindings();
     await _loadApprovals();
     await _loadGreetings();
     await channel.start(creds);
@@ -492,24 +492,6 @@ class FeishuIntegration {
     _log.info('feishu: connection claimed');
     if (_running) return;
     await _connectTransport(_credentials!);
-  }
-
-  /// Read the persisted chat bindings (design doc §3 — a chat keeps
-  /// its workspace across restarts).
-  Future<void> _loadBindings() async {
-    final loaded = await bindingStore.load();
-    _bindings
-      ..clear()
-      ..addAll(loaded);
-    if (loaded.isNotEmpty) {
-      _log.info('feishu: ${loaded.length} chat binding(s) restored');
-    }
-  }
-
-  /// Persist the bindings (best effort — a failed write must not
-  /// break the chat).
-  Future<void> _saveBindings() async {
-    await bindingStore.save(_bindings);
   }
 
   /// Read the persisted "always approve" grants (§4.2).
@@ -967,7 +949,6 @@ class FeishuIntegration {
       boundAt: DateTime.now(),
       boundBy: operatorOpenId,
     );
-    await _saveBindings();
     _log.info('feishu: chat $chatId bound to workspace ${match.id} '
         'by $operatorOpenId');
     return cardResponse(
@@ -989,7 +970,6 @@ class FeishuIntegration {
           .catchError((_) {});
       return;
     }
-    await _saveBindings();
     _log.info('feishu: chat $chatId unbound');
     await api
         .sendText(chatId,
@@ -1210,7 +1190,6 @@ class FeishuIntegration {
         boundAt: binding.boundAt,
         boundBy: binding.boundBy,
       );
-      await _saveBindings();
     }
     await api
         .sendText(chatId,
@@ -1297,7 +1276,6 @@ class FeishuIntegration {
             boundAt: binding.boundAt,
             boundBy: binding.boundBy,
           );
-          await _saveBindings();
           follow = ' Now driving pane ${nowPane.number}'
               ' · tab $nowTabNumber'
               '${nowTab.title.isEmpty ? '' : ' (${nowTab.title})'}.';
@@ -1379,7 +1357,6 @@ class FeishuIntegration {
       boundAt: DateTime.now(),
       boundBy: boundBy,
     );
-    await _saveBindings();
     await api
         .sendText(chatId,
             'Now driving ${workspace.name}'
@@ -1436,7 +1413,6 @@ class FeishuIntegration {
       boundAt: binding.boundAt,
       boundBy: binding.boundBy,
     );
-    unawaited(_saveBindings());
     _log.info('feishu: chat $chatId binding healed to pane '
         '${binding.paneNumber} by position');
   }

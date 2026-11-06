@@ -8,17 +8,9 @@
 //   * conversation level — one Feishu chat ↔ one Octodo workspace (or
 //     pane). This file.
 //
-// The bindings live next to the credentials so a restart keeps them:
-//
-//   <userHome>/.config/Octodo/feishu/bindings.json
-//
-// The store is file-system only; the router above owns the policy
-// (auto-binding, /attach, /detach).
-
-import 'dart:convert';
-import 'dart:io';
-
-import 'package:path/path.dart' as p;
+// Bindings are session-scoped, in memory only: workspace ids
+// (`ws-0`, …) are per-process, so a binding saved to disk could only
+// ever point at a dead session.
 
 /// One chat's binding.
 class FeishuChatBinding {
@@ -108,58 +100,3 @@ class FeishuChatBinding {
   }
 }
 
-/// Loads / saves the bindings file.
-class FeishuBindingStore {
-  final File file;
-
-  FeishuBindingStore(this.file);
-
-  factory FeishuBindingStore.resolve({String? userHome}) {
-    final home = userHome ??
-        Platform.environment['USERPROFILE'] ??
-        Platform.environment['HOME'] ??
-        '';
-    return FeishuBindingStore(
-      File(p.join(home, '.config', 'Octodo', 'feishu', 'bindings.json')),
-    );
-  }
-
-  /// The bindings, keyed by chat id. A missing or broken file means
-  /// "no bindings" — never an error the user has to see.
-  Future<Map<String, FeishuChatBinding>> load() async {
-    try {
-      final raw = await file.readAsString();
-      if (raw.trim().isEmpty) return {};
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map<String, dynamic>) return {};
-      final out = <String, FeishuChatBinding>{};
-      for (final entry in decoded.entries) {
-        final value = entry.value;
-        if (value is! Map<String, dynamic>) continue;
-        final binding = FeishuChatBinding.fromJson(value);
-        // The binding's own chat id is authoritative — the map key
-        // is only a container.
-        if (binding != null) out[binding.chatId] = binding;
-      }
-      return out;
-    } on FileSystemException {
-      return {};
-    } on FormatException {
-      return {};
-    }
-  }
-
-  /// Persist [bindings] (keyed by chat id). Failures are swallowed:
-  /// a binding that cannot be written must not break the chat.
-  Future<void> save(Map<String, FeishuChatBinding> bindings) async {
-    try {
-      await file.parent.create(recursive: true);
-      final payload = <String, dynamic>{
-        for (final entry in bindings.entries) entry.key: entry.value.toJson(),
-      };
-      await file.writeAsString(jsonEncode(payload));
-    } on FileSystemException {
-      // Ignored on purpose — see above.
-    }
-  }
-}
