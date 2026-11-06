@@ -137,8 +137,8 @@ class FeishuIntegration {
   _OutputCapture? _capture;
 
   /// The Enter keystroke still waiting to follow a TUI text write
-  /// (see [_writeTuiLine]) — at most one, cancelled by the next
-  /// write so rapid messages can't stack Enters.
+  /// (see [_writeTuiLine]) — at most one; the next write flushes it
+  /// so two messages never share one composer.
   Timer? _pendingTuiEnter;
 
   /// Tail of the one-at-a-time TUI chat chain: two Feishu messages
@@ -529,10 +529,27 @@ class FeishuIntegration {
   /// plain-shell path (`_writeAndCapture`) is unaffected: a
   /// shell's line discipline handles text+CR in one write fine.
   void _writeTuiLine(String line) {
-    _pendingTuiEnter?.cancel();
+    // A pending Enter belongs to the *previous* line: send it now
+    // so this line starts in a fresh composer. Cancelling it
+    // instead merged two messages into one submission — the second
+    // line landed in the first one's composer, and the first
+    // message was never sent at all.
+    _flushTuiEnter();
     bridge.runCommand(line);
-    _pendingTuiEnter =
-        Timer(const Duration(milliseconds: 150), () => bridge.runCommand('\n'));
+    _pendingTuiEnter = Timer(const Duration(milliseconds: 150), () {
+      _pendingTuiEnter = null;
+      bridge.runCommand('\n');
+    });
+  }
+
+  /// Send the Enter waiting to follow a TUI text write right now
+  /// (see [_writeTuiLine]).
+  void _flushTuiEnter() {
+    final pending = _pendingTuiEnter;
+    if (pending == null) return;
+    pending.cancel();
+    _pendingTuiEnter = null;
+    bridge.runCommand('\n');
   }
 
   void _onEvent(FeishuInboundEvent event) => handleEvent(event);

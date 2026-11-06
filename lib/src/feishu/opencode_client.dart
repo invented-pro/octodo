@@ -73,6 +73,11 @@ class OpencodeLocalGateway implements OpencodeGateway {
   final Logger _log = moduleLogger('feishu.opencode');
   final Duration _startupTimeout;
 
+  /// Slack between our clock and the server's when comparing event
+  /// stamps — the window that decides which events belong to the
+  /// current turn.
+  static const int _kClockSkew = 250;
+
   /// First port tried for our serve instance; increments on
   /// conflict. The user's own serve (e.g. on 4096) is left alone —
   /// every opencode server shares the same session database.
@@ -418,10 +423,14 @@ class OpencodeLocalGateway implements OpencodeGateway {
     }
     final feed = await _openFeed(base, auth);
     try {
+      // The turn starts here: everything the server emits from now
+      // on is ours. Captured before the prompt is sent — the reply
+      // can start streaming within milliseconds of it.
+      final t0 = DateTime.now().millisecondsSinceEpoch - _kClockSkew;
       final sent = await _json('POST', '$base/api/session/$sessionId/prompt',
           auth, jsonEncode({'text': message}));
       if (sent == null) return null;
-      return await _collectReply(sessionId, feed);
+      return await _collectReply(sessionId, feed, t0);
     } finally {
       await feed.close();
     }
@@ -439,7 +448,14 @@ class OpencodeLocalGateway implements OpencodeGateway {
     // within milliseconds of the submit.
     final feed = await _openFeed(base, auth);
     try {
-      final afterMs = DateTime.now().millisecondsSinceEpoch;
+      // The turn starts here — and the window has to be captured
+      // BEFORE typing: the model can answer within milliseconds of
+      // the submit, while the session lookup below polls for a few
+      // seconds. Measuring the window when the collector attaches
+      // dropped the reply's first chunks.
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final t0 = now - _kClockSkew;
+      final afterMs = now;
       type(message);
       final sessionId =
           await _awaitTuiSession(base, auth, directory, afterMs);
@@ -449,7 +465,7 @@ class OpencodeLocalGateway implements OpencodeGateway {
       }
       _tuiSessions[_dirKey(directory)] = sessionId;
       _log.info('opencode: TUI turn in session $sessionId');
-      final reply = await _collectReply(sessionId, feed);
+      final reply = await _collectReply(sessionId, feed, t0);
       return (sessionId: sessionId, reply: reply);
     } finally {
       await feed.close();
@@ -538,16 +554,18 @@ class OpencodeLocalGateway implements OpencodeGateway {
   /// Collect the assistant's reply text of the turn running in
   /// [sessionId] — the feed's frames (buffered ones included),
   /// filtered to that session, until the execution terminates.
+  /// [t0] is the turn's start stamp: frames created before it belong
+  /// to an earlier turn and are ignored.
   /// When the execution failed (provider error, rate limit, …) the
   /// error message is returned instead: a silent "no reply" would
   /// be a dead end for the user.
-  Future<String?> _collectReply(String sessionId, _EventFeed feed) async {
+  Future<String?> _collectReply(
+      String sessionId, _EventFeed feed, int t0) async {
     final texts = <String>[];
     final errors = <String>[];
     final done = Completer<void>();
-    final t0 = DateTime.now().millisecondsSinceEpoch - 3000;
     final sub = feed.events.listen(
-      (ev) => _onEvent(ev, sessionId, t0, texts, errors, done),
+      (ev) => routeEvent(ev, sessionId, t0, texts, errors, done),
       onDone: () {
         if (!done.isCompleted) done.complete();
       },
@@ -564,9 +582,24 @@ class OpencodeLocalGateway implements OpencodeGateway {
     }
   }
 
+  /// The reply of a turn, computed from raw event frames — the
+  /// collector's logic without the stream. Public for tests.
+  static String? replyOf(
+      List<Map<String, dynamic>> events, String sessionId, int t0) {
+    final texts = <String>[];
+    final errors = <String>[];
+    final done = Completer<void>();
+    for (final ev in events) {
+      routeEvent(ev, sessionId, t0, texts, errors, done);
+    }
+    if (texts.isNotEmpty) return texts.join('\n\n');
+    if (errors.isNotEmpty) return '⚠️ ${errors.join('\n')}';
+    return null;
+  }
+
   /// Route one SSE event: collect the response text for our
   /// session, finish on the execution terminators.
-  void _onEvent(Map<String, dynamic> ev, String sessionId, int t0,
+  static void routeEvent(Map<String, dynamic> ev, String sessionId, int t0,
       List<String> texts, List<String> errors, Completer<void> done) {
     final type = ev['type'];
     if (type is! String) return;

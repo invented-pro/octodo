@@ -369,6 +369,45 @@ void main() {
     expect(bridge.commands, ['hi', '\n']);
   });
 
+  test('two quick messages into a TUI are two submissions, not one',
+      () async {
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..inAltScreen = true
+      ..screenLines =[' some tui ', ' > '];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      outputWindow: const Duration(milliseconds: 30),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_one',
+      text: 'one',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_two',
+      text: 'two',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+
+    // The second message arrives before the first one's Enter. The
+    // pending Enter is flushed, not dropped: the first message is
+    // submitted on its own, and the second one starts in a fresh
+    // composer. Dropping it merged both into a single submission
+    // and the first message was never sent.
+    expect(bridge.commands, ['one', '\n', 'two', '\n']);
+  });
+
   test('/history of an opencode TUI returns the conversation tail '
       'as clean text', () async {
     final bridge = _RecordingBridge()
