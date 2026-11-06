@@ -138,6 +138,27 @@ class _RecordingBridge implements FeishuHostBridge {
   @override
   bool closeTab(String? workspaceId) {
     closeTabCalls.add(workspaceId);
+    // Simulate the app: the focused tab goes away, its neighbor takes
+    // the focus.
+    panes = [
+      for (final p in panes)
+        if (p.focused && p.tabs.length > 1)
+          FeishuPaneStatus(
+            id: p.id,
+            number: p.number,
+            focused: true,
+            tabs: [
+              for (var i = 1; i < p.tabs.length; i++)
+                FeishuTabStatus(
+                    id: p.tabs[i].id,
+                    title: p.tabs[i].title,
+                    cwd: p.tabs[i].cwd,
+                    focused: i == 1),
+            ],
+          )
+        else
+          p,
+    ];
     return true;
   }
 
@@ -1054,6 +1075,18 @@ void main() {
 
     expect(bridge.closeTabCalls, ['ws_1']);
     expect(sent.last.$2, contains('Closed "one"'));
+    expect(sent.last.$2, contains('Now driving pane 1 · tab 1'),
+        reason: 'the binding follows the successor tab');
+
+    // The follow-up command lands in the successor, not the dead tab.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    expect(bridge.focusedSurfaces.last, 'tab_b');
   });
 
   test('/closetab refuses the only tab of the only pane', () async {

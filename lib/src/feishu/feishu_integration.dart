@@ -703,7 +703,8 @@ class FeishuIntegration {
       '[.<tab>]] binds by the numbers /status prints\n'
       '/detach — unbind; follow whatever the desktop has focused\n'
       '/newtab — open a tab in the bound pane (re-binds to it)\n'
-      '/closetab — close the focused tab (never the last one)\n'
+      '/closetab — close the focused tab and follow what takes its '
+      'place (never the last one)\n'
       '/raw <keys> — raw keystrokes into the terminal, TUIs included '
       '(/raw /quit)\n'
       '/history — the terminal\'s last screen (a PNG when the desktop '
@@ -971,10 +972,53 @@ class FeishuIntegration {
       return;
     }
     final title = tab.title.isEmpty ? 'untitled' : tab.title;
+    // Follow whatever took the closed tab's place — the binding must
+    // not point at a dead tab.
+    var follow = '';
+    if (binding != null && binding.workspaceId == target) {
+      final now = bridge.layoutOf(target);
+      FeishuPaneStatus? nowPane;
+      for (final p in now.panes) {
+        if (p.focused) {
+          nowPane = p;
+          break;
+        }
+      }
+      if (nowPane != null) {
+        FeishuTabStatus? nowTab;
+        var nowTabNumber = 0;
+        for (var i = 0; i < nowPane.tabs.length; i++) {
+          if (nowPane.tabs[i].focused) {
+            nowTab = nowPane.tabs[i];
+            nowTabNumber = i + 1;
+            break;
+          }
+        }
+        if (nowTab != null) {
+          _bindings[chatId] = FeishuChatBinding(
+            chatId: binding.chatId,
+            chatType: binding.chatType,
+            workspaceId: binding.workspaceId,
+            workspaceName: binding.workspaceName,
+            paneId: nowPane.id,
+            paneNumber: nowPane.number,
+            surfaceId: nowTab.id,
+            surfaceNumber: nowTabNumber,
+            boundAt: binding.boundAt,
+            boundBy: binding.boundBy,
+          );
+          await _saveBindings();
+          follow = ' Now driving pane ${nowPane.number}'
+              ' · tab $nowTabNumber'
+              '${nowTab.title.isEmpty ? '' : ' (${nowTab.title})'}.';
+        }
+      }
+    }
     await api
         .sendText(chatId,
-            'Closed "$title" (pane ${pane.number} · tab $tabNumber). '
-            'Numbers may have shifted — /status to re-check.')
+            'Closed "$title" (pane ${pane.number} · tab $tabNumber).'
+            '$follow'
+            ' Numbers may have shifted — /status to re-check.')
         .catchError((_) {});
   }
 
