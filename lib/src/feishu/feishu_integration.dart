@@ -26,6 +26,7 @@ import 'feishu_cards.dart';
 import 'feishu_credentials.dart';
 import 'feishu_event_channel.dart';
 import 'feishu_greetings.dart';
+import 'feishu_lease.dart';
 import 'feishu_ws_channel.dart';
 import 'opencode_client.dart';
 
@@ -320,6 +321,20 @@ class FeishuIntegration {
   final FeishuGreetingStore greetingStore;
   final Set<String> _greeted = {};
 
+  /// The connection lease (multi-instance): Feishu load-balances
+  /// events across every live connection of the app, so only this
+  /// instance may hold the connection — the others stand by.
+  final FeishuConnectionLease lease;
+
+  /// How often a standby instance retries the takeover.
+  final Duration leasePoll;
+
+  /// Non-null while another instance holds the connection (owner
+  /// pid, or null when unknown). The Mobile App panel reads this.
+  final ValueNotifier<FeishuStandby?> standby =
+      ValueNotifier<FeishuStandby?>(null);
+  Timer? _takeoverPoll;
+
   FeishuIntegration({
     required this.bridge,
     FeishuEventChannel? channel,
@@ -328,6 +343,8 @@ class FeishuIntegration {
     FeishuBindingStore? bindingStore,
     FeishuApprovalStore? approvalStore,
     FeishuGreetingStore? greetingStore,
+    FeishuConnectionLease? lease,
+    this.leasePoll = const Duration(seconds: 5),
     this.outputWindow = _kOutputWindowDefault,
     this.maxOutputWindow = _kOutputMaxWindowDefault,
     OpencodeGateway? opencode,
@@ -338,7 +355,8 @@ class FeishuIntegration {
             credentialStore ?? FeishuCredentialStore.resolve(),
         bindingStore = bindingStore ?? FeishuBindingStore.resolve(),
         approvalStore = approvalStore ?? FeishuApprovalStore.resolve(),
-        greetingStore = greetingStore ?? FeishuGreetingStore.resolve();
+        greetingStore = greetingStore ?? FeishuGreetingStore.resolve(),
+        lease = lease ?? FeishuConnectionLease.resolve();
 
   static FeishuIntegration? _instance;
 
@@ -374,6 +392,30 @@ class FeishuIntegration {
       await _stop();
     }
     final creds = _credentials!;
+
+    // Connection lease: acquire, or stand by while another instance
+    // holds the connection (it will be taken over when that one
+    // exits or dies). Binding is not enough here — two connected
+    // instances would split Feishu's events at random.
+    lease.onLost ??= _onLeaseLost;
+    final acquired = lease.tryAcquire();
+    if (!acquired.acquired) {
+      final holder = acquired.holderPid;
+      _log.info('feishu: connection held by another instance '
+          '${holder == null ? '' : '(pid $holder) '}— standby');
+      standby.value = FeishuStandby(acquired.holderPid);
+      _startTakeoverPoll();
+      return;
+    }
+    await _connectTransport(creds);
+  }
+
+  /// The transport half of [_start] — runs once the lease is ours.
+  Future<void> _connectTransport(FeishuCredentials creds) async {
+    standby.value = null;
+    _takeoverPoll?.cancel();
+    _takeoverPoll = null;
+    lease.startHeartbeat();
     _running = true;
     _boundAppId = creds.appId;
     api.bind(creds);
@@ -390,6 +432,40 @@ class FeishuIntegration {
     await _loadGreetings();
     await channel.start(creds);
     _log.info('feishu: integration started for ${creds.appIdPreview}');
+  }
+
+  /// The lease moved on underneath us (this instance was declared
+  /// stale while suspended, then woke) — stop the channel and join
+  /// the standby pool.
+  void _onLeaseLost() {
+    if (!_running) return;
+    _log.warning('feishu: lost the connection lease — standing by');
+    _running = false;
+    _boundAppId = null;
+    _eventsSub?.cancel();
+    _eventsSub = null;
+    _stateSub?.cancel();
+    _stateSub = null;
+    _capture?.flush();
+    unawaited(channel.stop());
+    standby.value = FeishuStandby(lease.inspectHolder());
+    _startTakeoverPoll();
+  }
+
+  void _startTakeoverPoll() {
+    _takeoverPoll?.cancel();
+    _takeoverPoll = Timer.periodic(leasePoll, (_) => _tryTakeover());
+  }
+
+  Future<void> _tryTakeover() async {
+    if (_running || _credentials == null) return; // leading, or unbound
+    final acquired = lease.tryAcquire();
+    if (!acquired.acquired) {
+      standby.value = FeishuStandby(acquired.holderPid);
+      return;
+    }
+    _log.info('feishu: took over the Feishu connection');
+    await _connectTransport(_credentials!);
   }
 
   /// Read the persisted chat bindings (design doc §3 — a chat keeps
@@ -456,6 +532,13 @@ class FeishuIntegration {
   String? _boundAppId;
 
   Future<void> _stop() async {
+    // Standby cleanup runs even when this instance never connected:
+    // the takeover poll must die with the integration, and the lease
+    // release is a no-op unless the lease is actually ours.
+    _takeoverPoll?.cancel();
+    _takeoverPoll = null;
+    standby.value = null;
+    lease.release();
     if (!_running) return;
     _running = false;
     _boundAppId = null;

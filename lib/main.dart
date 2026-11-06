@@ -1610,7 +1610,10 @@ class _AppShellState extends State<AppShell>
               onAcceptReorder: _reorderWorkspaceById,
               updateModel: _updateModel,
               updateController: _updateController,
-              onOpenMobileApp: () => showMobileAppsPanel(context),
+              onOpenMobileApp: () => showMobileAppsPanel(
+                context,
+                standby: _feishu?.standby,
+              ),
             ),
             // ── Active workspace content ──────────────────────
             Expanded(

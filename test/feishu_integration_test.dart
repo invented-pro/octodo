@@ -15,6 +15,7 @@ import 'package:octodo/src/feishu/feishu_credentials.dart';
 import 'package:octodo/src/feishu/feishu_event_channel.dart';
 import 'package:octodo/src/feishu/feishu_greetings.dart';
 import 'package:octodo/src/feishu/feishu_integration.dart';
+import 'package:octodo/src/feishu/feishu_lease.dart';
 import 'package:octodo/src/feishu/opencode_client.dart';
 
 class _FakeChannel implements FeishuEventChannel {
@@ -301,6 +302,16 @@ FeishuCredentials _ownerCreds({List<String> allowed = const ['ou_owner']}) =>
       allowedOpenIds: allowed,
     );
 
+/// A credential store inside [dir] with [creds] already saved —
+/// the multi-instance tests bind through it.
+Future<FeishuCredentialStore> _storeIn(
+    Directory dir, FeishuCredentials creds) async {
+  final store = FeishuCredentialStore(
+      File('${dir.path}${Platform.pathSeparator}c.json'));
+  await store.save(creds);
+  return store;
+}
+
 void main() {
   test('sync starts the channel when bound, stops when unbound', () async {
     final dir = Directory.systemTemp.createTempSync('feishu_int');
@@ -309,10 +320,13 @@ void main() {
         File('${dir.path}${Platform.pathSeparator}c.json'));
 
     final channel = _FakeChannel();
+    final lock = Directory(
+        '${dir.path}${Platform.pathSeparator}lease.lock');
     final integration = FeishuIntegration(
       bridge: _RecordingBridge(),
       channel: channel,
       credentialStore: store,
+      lease: FeishuConnectionLease(lock),
     );
 
     // No binding → nothing runs (credentials are the only gate).
@@ -323,10 +337,106 @@ void main() {
     await integration.sync();
     expect(channel.startCalls, 1);
     expect(channel.startedWith!.appId, 'cli_x');
+    expect(integration.standby.value, isNull);
 
-    // Unbind (credentials deleted) → the channel stops.
+    // Unbind (credentials deleted) → the channel stops, and the
+    // lease goes with it.
     await store.delete();
     await integration.sync();
+    expect(channel.stopCalls, 1);
+    expect(lock.existsSync(), isFalse,
+        reason: 'a clean stop releases the lease');
+    integration.dispose();
+  });
+
+  test('a standby instance does not connect — the holder does',
+      () async {
+    final root = Directory.systemTemp.createTempSync('feishu_multi');
+    addTearDown(() => root.deleteSync(recursive: true));
+    final lock = Directory(
+        '${root.path}${Platform.pathSeparator}lease.lock');
+
+    // The other instance leads (and dies hard, with no release).
+    FeishuConnectionLease(lock, pid: 4242).tryAcquire();
+
+    final channel = _FakeChannel();
+    final integration = FeishuIntegration(
+      bridge: _RecordingBridge(),
+      channel: channel,
+      credentialStore: await _storeIn(root, _ownerCreds()),
+      lease: FeishuConnectionLease(lock, pid: 5353),
+    );
+    addTearDown(integration.dispose);
+    await integration.sync();
+
+    expect(channel.startCalls, 0,
+        reason: 'the connection belongs to pid 4242');
+    expect(integration.isRunning, isFalse);
+    expect(integration.standby.value?.ownerPid, 4242);
+  });
+
+  test('the standby instance takes over when the holder exits',
+      () async {
+    final root = Directory.systemTemp.createTempSync('feishu_multi');
+    addTearDown(() => root.deleteSync(recursive: true));
+    final lock = Directory(
+        '${root.path}${Platform.pathSeparator}lease.lock');
+
+    final holder = FeishuConnectionLease(lock, pid: 4242)
+      ..tryAcquire();
+
+    final channel = _FakeChannel();
+    final integration = FeishuIntegration(
+      bridge: _RecordingBridge(),
+      channel: channel,
+      credentialStore: await _storeIn(root, _ownerCreds()),
+      lease: FeishuConnectionLease(lock, pid: 5353),
+      leasePoll: const Duration(milliseconds: 10),
+    );
+    addTearDown(integration.dispose);
+    await integration.sync();
+    expect(integration.isRunning, isFalse);
+
+    // The leader exits cleanly → the lock dir disappears → the
+    // standby's poll picks the connection up.
+    holder.release();
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    expect(integration.isRunning, isTrue);
+    expect(integration.standby.value, isNull);
+    expect(channel.startCalls, 1);
+  });
+
+  test('the leader demotes when the lease moves on underneath it',
+      () async {
+    final root = Directory.systemTemp.createTempSync('feishu_multi');
+    addTearDown(() => root.deleteSync(recursive: true));
+    final lock = Directory(
+        '${root.path}${Platform.pathSeparator}lease.lock');
+
+    final channel = _FakeChannel();
+    final integration = FeishuIntegration(
+      bridge: _RecordingBridge(),
+      channel: channel,
+      credentialStore: await _storeIn(root, _ownerCreds()),
+      lease: FeishuConnectionLease(lock, pid: 5353,
+          heartbeatEvery: const Duration(milliseconds: 20)),
+      leasePoll: const Duration(milliseconds: 10),
+    );
+    addTearDown(integration.dispose);
+    await integration.sync();
+    expect(integration.isRunning, isTrue);
+
+    // This instance was declared stale while the machine slept and
+    // another one claimed the connection; on wake its heartbeat
+    // discovers a foreign pid and must fence, not overwrite.
+    File('${lock.path}${Platform.pathSeparator}owner.json')
+        .writeAsStringSync('{"pid": 9999, "heartbeat": '
+            '${DateTime.now().millisecondsSinceEpoch}}');
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+
+    expect(integration.isRunning, isFalse, reason: 'demoted');
+    expect(integration.standby.value?.ownerPid, 9999);
     expect(channel.stopCalls, 1);
   });
 
@@ -2186,6 +2296,15 @@ Future<FeishuIntegration> _routerFor({
   /// existing tests don't get a surprise /help card on their first
   /// message; the greeting test passes an empty set.
   Set<String>? greeted,
+
+  /// The connection-lease directory. Defaults to one inside the
+  /// temp dir — never the real profile: the running app holds that
+  /// lease, and the tests would all go standby.
+  Directory? leaseDir,
+  int? leasePid,
+  Duration? leaseHeartbeat,
+  Duration? leaseStaleAfter,
+  Duration leasePoll = const Duration(seconds: 5),
   Duration outputWindow = const Duration(seconds: 5),
   Duration maxOutputWindow = const Duration(minutes: 5),
   OpencodeGateway? gateway,
@@ -2211,6 +2330,8 @@ Future<FeishuIntegration> _routerFor({
   await FeishuGreetingStore(greetingFile)
       .save(greeted ?? {'oc_chat'});
 
+  final lock = leaseDir ??
+      Directory('${dir.path}${Platform.pathSeparator}lease.lock');
   final api = _RecordingApiClient(onSend ?? (_, _) {},
       onImage: onImage, onCard: onCard, onUpdateCard: onUpdateCard);
   final integration = FeishuIntegration(
@@ -2221,10 +2342,16 @@ Future<FeishuIntegration> _routerFor({
     bindingStore: FeishuBindingStore(bindingStoreFile),
     approvalStore: FeishuApprovalStore(approvalFile),
     greetingStore: FeishuGreetingStore(greetingFile),
+    lease: FeishuConnectionLease(lock,
+        pid: leasePid,
+        heartbeatEvery: leaseHeartbeat ?? const Duration(hours: 1),
+        staleAfter: leaseStaleAfter ?? const Duration(hours: 1)),
+    leasePoll: leasePoll,
     outputWindow: outputWindow,
     maxOutputWindow: maxOutputWindow,
     opencode: gateway ?? _FakeGateway(),
   );
+  addTearDown(integration.dispose);
   // Load the credentials written above so the whitelist is active.
   await integration.sync();
   return integration;

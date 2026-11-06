@@ -11,17 +11,23 @@
 //   connected       → bound-app summary + Unbind
 //   expired/failed  → reason + Retry
 //
+// When another octodo instance holds the Feishu connection (the
+// multi-instance connection lease), the card shows that instead —
+// one line, no buttons.
+//
 // Remote control is always on once a bot is bound — credentials are
 // the only gate, so the panel has no switch at all.
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import '../../src/feishu/feishu_binding_flow.dart';
+import '../../src/feishu/feishu_lease.dart';
 import '../../src/theme/palette_context.dart';
 import '../../src/theme/palettes.dart';
 import '../settings/chrome/settings_card.dart';
@@ -49,7 +55,12 @@ class FeishuBrandIcon extends StatelessWidget {
 }
 
 class MobileAppsPanel extends StatefulWidget {
-  const MobileAppsPanel({super.key});
+  /// Non-null while another octodo instance holds the Feishu
+  /// connection — the Feishu card then shows who holds it instead
+  /// of the binding lifecycle. Comes from the app shell.
+  final ValueListenable<FeishuStandby?>? standby;
+
+  const MobileAppsPanel({super.key, this.standby});
 
   @override
   State<MobileAppsPanel> createState() => _MobileAppsPanelState();
@@ -140,8 +151,16 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
 
   Widget _bindingCard(ThemePalette palette) {
     return ListenableBuilder(
-      listenable: _flow,
+      listenable: Listenable.merge([
+        _flow,
+        if (widget.standby != null) widget.standby,
+      ]),
       builder: (context, _) {
+        // Another instance holds the Feishu connection — this one
+        // shows that, whatever the local binding phase says (the
+        // binding is disk state; the connection is not ours).
+        final standby = widget.standby?.value;
+        if (standby != null) return _standbyRow(palette, standby);
         switch (_flow.phase) {
           case FeishuBindingPhase.connected:
             return _connectedRow(palette);
@@ -155,6 +174,21 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
             return _idleRow(palette);
         }
       },
+    );
+  }
+
+  /// This instance lost the lease — one factual line, no connect or
+  /// unbind buttons (the holder ignores disk changes until it
+  /// re-syncs, so binding from here would silently do nothing).
+  Widget _standbyRow(ThemePalette palette, FeishuStandby standby) {
+    final holder = standby.ownerPid == null
+        ? 'another octodo instance'
+        : 'another octodo instance (PID ${standby.ownerPid})';
+    return SettingsCardRow(
+      leading: _brandLeading(palette),
+      title: 'Feishu',
+      subtitle: 'Held by $holder.',
+      trailing: const SizedBox.shrink(),
     );
   }
 
@@ -436,10 +470,13 @@ class _FeishuQrDialogState extends State<_FeishuQrDialog> {
 
 // ── Show the panel ─────────────────────────────────────────────────
 
-Future<void> showMobileAppsPanel(BuildContext context) {
+Future<void> showMobileAppsPanel(
+  BuildContext context, {
+  ValueListenable<FeishuStandby?>? standby,
+}) {
   return showDialog<void>(
     context: context,
     barrierColor: Colors.black.withValues(alpha: 0.5),
-    builder: (_) => const MobileAppsPanel(),
+    builder: (_) => MobileAppsPanel(standby: standby),
   );
 }
