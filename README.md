@@ -30,6 +30,9 @@ English | [中文简体](./README.zh-CN.md)
 * **Smart Notification**
   * Instant notifications for completed long-running tasks.
   * Integrated agent monitoring to keep you informed.
+* **Mobile App Access**
+  * Drive Octodo from your phone over chat — Feishu (Lark) first.
+  * Commands, terminal output and task results land straight in the chat.
 * **Zero-Config Auto-Discovery**
   * Instant detection of all local shells right out of the box.
   * Seamless, automatic integration with **WSL** distributions.
@@ -242,6 +245,31 @@ Windows, macOS, and Linux all auto-dismiss native banners after a few seconds. O
 - **Re-alert until read** — while a notification is still unread and Octodo is in the background, the banner is re-posted every 30 seconds (same id, so Notification Center replaces instead of stacking) until you click it, open the terminal, or swipe it away. Controlled by **Settings → General → Keep re-alerting until read**.
 - **Dock bounce (macOS)** — a banner posted while Octodo is backgrounded also bounces the dock icon until you switch over.
 - **"Alerts" style (macOS)** — for a banner that literally never auto-dismisses, switch Octodo to *Alerts* in System Settings → Notifications. **Settings → General → Open system notification settings** takes you there directly.
+
+---
+
+## Mobile App Access
+
+Drive Octodo from your phone: chat with a bot and it runs commands in your terminals — full-screen TUIs included. Feishu (Lark) is the first mobile app; more are on the way.
+
+### Connect
+
+1. Open the **Mobile App Access** dialog — drawer → phone icon.
+2. Scan the QR code with Feishu on your phone and confirm.
+
+Octodo keeps **one** Feishu connection at a time. The drawer's phone icon shows a light-green dot while this instance holds it and an amber ring while another one does — open Mobile App Access and press **Claim** to take the connection over.
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `/status` | Where you are: the tab this chat drives and every tab you can switch to |
+| `/attach` | Pick the workspace to drive (a card); `/attach 1.2.3` binds by address |
+| `/detach` | Unbind — the chat follows the desktop focus again |
+| `/newtab` / `/closetab` | Open or close a tab in the bound pane |
+| `/raw <keys>` | Raw keystrokes into the terminal — TUIs included (`/raw /quit`) |
+| `/history` | Replay the terminal's last screen |
+| plain text | Runs in the bound terminal and answers with its output |
 
 ---
 
