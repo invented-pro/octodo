@@ -79,12 +79,15 @@ class _RecordingBridge implements FeishuHostBridge {
 
 /// Server-side of the opencode path, faked: [ready] gates both
 /// ensure() and chat(); [tail] is what conversationTail returns.
+/// [submits] models a TUI that accepts what is typed into it — a
+/// modal that swallows the text is the same as submits=false.
 class _FakeGateway implements OpencodeGateway {
   bool ready = false;
   String? reply;
   String? tail;
   String? lastDir;
   String? lastMsg;
+  bool submits = true;
 
   @override
   Future<bool> ensure() async => ready;
@@ -100,6 +103,17 @@ class _FakeGateway implements OpencodeGateway {
   Future<String?> conversationTail(String directory, {int limit = 6}) async {
     lastDir = directory;
     return ready ? tail : null;
+  }
+
+  @override
+  Future<({String? sessionId, String? reply})> tuiTurn(
+      String directory, String message, void Function(String) type) async {
+    lastDir = directory;
+    lastMsg = message;
+    if (!ready) return (sessionId: null, reply: null);
+    type(message);
+    if (!submits) return (sessionId: null, reply: null);
+    return (sessionId: 'ses_typed', reply: reply);
   }
 }
 
@@ -332,8 +346,11 @@ void main() {
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     // The text IS relayed — the user may be driving the TUI on
-    // purpose (chat input, 'q', '/' …).
-    expect(bridge.commands, ['hi\n']);
+    // purpose (chat input, 'q', '/' …). Text first; Enter lands
+    // as its own write ~150ms later (see _writeTuiLine). The write
+    // goes through the TUI chat queue, so give it a tick.
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(bridge.commands, ['hi']);
 
     // The TUI redraws as the message lands and the assistant
     // streams; every chunk keeps the mirror waiting for quiet.
@@ -347,9 +364,12 @@ void main() {
     expect(sent.length, 1);
     expect(sent.single.$2,
         ' opencode\n\n assistant: Hello! How can I help?\n\n > hi');
+    // …and Enter landed as its own delayed write.
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    expect(bridge.commands, ['hi', '\n']);
   });
 
-  test('/screen of an opencode TUI returns the conversation tail '
+  test('/history of an opencode TUI returns the conversation tail '
       'as clean text', () async {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
@@ -372,7 +392,7 @@ void main() {
       senderOpenId: 'ou_owner',
       chatId: 'oc_chat',
       messageId: 'om_scr',
-      text: '/screen',
+      text: '/history',
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
@@ -381,7 +401,7 @@ void main() {
     expect(images, isEmpty, reason: 'conversation beats a picture');
   });
 
-  test('/screen sends a rendered PNG when available, the text '
+  test('/history sends a rendered PNG when available, the text '
       'reconstruction otherwise', () async {
     final bridge = _RecordingBridge()
       ..screenLines = ['', ' opencode ', ' > ']
@@ -399,7 +419,7 @@ void main() {
       senderOpenId: 'ou_owner',
       chatId: 'oc_chat',
       messageId: 'om_img',
-      text: '/screen',
+      text: '/history',
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     await Future<void>.delayed(const Duration(milliseconds: 30));
@@ -419,7 +439,7 @@ void main() {
       senderOpenId: 'ou_owner',
       chatId: 'oc_chat',
       messageId: 'om_txt',
-      text: '/screen',
+      text: '/history',
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     await Future<void>.delayed(const Duration(milliseconds: 30));
@@ -458,12 +478,12 @@ void main() {
     // The launch is sniffed (echoed `opencode` right before the
     // screen switch) — the opencode-specific announcement, not
     // the generic hint, and never the box-drawing junk.
-    expect(sent.single.$2, contains('opencode is running'));
+    expect(sent.single.$2, contains('opencode detected'));
     expect(sent.single.$2, isNot(contains('┌')));
   });
 
-  test('messages into a running opencode TUI auto-route via the server',
-      () async {
+  test('messages into a running opencode TUI are typed into it, so '
+      'they land in the session it displays', () async {
     final bridge = _RecordingBridge()..cwd = 'E:\\proj';
     final gateway = _FakeGateway()
       ..ready = true
@@ -491,10 +511,12 @@ void main() {
         .add(utf8.encode('PS E:\\proj> opencode\r\n'));
     bridge.outputController.add(utf8.encode('\x1b[?1049h\x1b[H'));
     await Future<void>.delayed(const Duration(milliseconds: 80));
-    expect(sent.single.$2, contains('opencode is running'));
+    expect(sent.single.$2, contains('opencode detected'));
 
-    // Follow-up chat while the TUI owns the terminal: server path,
-    // pure text reply, no keystrokes typed into the TUI.
+    // Follow-up chat while the TUI owns the terminal: the text is
+    // TYPED INTO the TUI (it then submits to the session it shows
+    // — including a brand-new one the server doesn't know yet), and
+    // the reply comes back as pure text.
     sent.clear();
     bridge.inAltScreen = true;
     integration.handleEvent(FeishuInboundEvent(
@@ -504,16 +526,16 @@ void main() {
       text: 'status?',
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
-    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await Future<void>.delayed(const Duration(milliseconds: 250));
 
-    expect(bridge.commands, ['opencode\n'],
-        reason: 'only the launch itself hit the terminal');
+    expect(bridge.commands, ['opencode\n', 'status?', '\n'],
+        reason: 'typed into the TUI; Enter follows as its own write');
     expect(gateway.lastMsg, 'status?');
     expect(sent.single.$2, 'the answer');
   });
 
   test('a locally-launched opencode TUI is recognized from its '
-      'screen and routed via the server', () async {
+      'screen and driven through the server', () async {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
       ..inAltScreen = true
@@ -544,14 +566,44 @@ void main() {
       text: 'status?',
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
-    await Future<void>.delayed(const Duration(milliseconds: 50));
+    await Future<void>.delayed(const Duration(milliseconds: 250));
 
-    expect(bridge.commands, isEmpty, reason: 'server path, no keystrokes');
+    expect(bridge.commands, ['status?', '\n'],
+        reason: 'the TUI decides which session it lands in');
     expect(gateway.lastMsg, 'status?');
     expect(sent.single.$2, 'the answer');
   });
 
-  test('/type relays raw text into a TUI even when it is opencode',
+  test('a message the TUI never submits gets a hint, not silence',
+      () async {
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..inAltScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > '];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = false;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_nosub',
+      text: 'hello?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    expect(sent.single.$2, contains('nothing came back'));
+  });
+
+  test('/raw relays raw text into a TUI even when it is opencode',
       () async {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
@@ -569,15 +621,20 @@ void main() {
       senderOpenId: 'ou_owner',
       chatId: 'oc_chat',
       messageId: 'om_type',
-      text: '/type q',
+      text: '/raw q',
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
 
     // Raw keys go into the TUI (quit it), the server is bypassed
-    // (the default fake gateway is not ready and never consulted),
-    // and the reply is the mirrored screen (verbatim spacing).
-    expect(bridge.commands, ['q\n']);
-    await Future<void>.delayed(const Duration(milliseconds: 80));
+    // (the default fake gateway is not ready and never consulted).
+    // The text lands immediately…
+    expect(bridge.commands, ['q']);
+    // …and Enter follows as its OWN write ~150ms later: TUIs parse
+    // input per keypress, and text+CR in a single write gets the
+    // CR swallowed (opencode's /quit hung on screen until split).
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(bridge.commands, ['q', '\n']);
+    // The reply is the mirrored screen (verbatim spacing).
     expect(sent.single.$2, ' opencode  ⟨build⟩\n > ');
   });
 

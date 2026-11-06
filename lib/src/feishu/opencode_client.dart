@@ -46,6 +46,23 @@ abstract class OpencodeGateway {
   /// as clean text ("🧑 …" / "🤖 …"), or null when there is no
   /// session or no server. Find-only — never creates a session.
   Future<String?> conversationTail(String directory, {int limit});
+
+  /// One turn driven through the desktop TUI itself.
+  ///
+  /// [type] writes the message into the TUI (the router owns the
+  /// terminal); the TUI then submits it to whatever session it is
+  /// displaying — creating a fresh one when its composer is empty.
+  /// A TUI creates that session lazily (on its first local
+  /// message), so the server cannot know about it beforehand, and
+  /// guessing server-side is what made Feishu messages land in a
+  /// stale conversation. Typing is deterministic by construction.
+  ///
+  /// Returns the session the TUI used and the assistant's reply
+  /// text (collected from the server's event stream). A null
+  /// session means the TUI never submitted (a modal had the
+  /// keyboard).
+  Future<({String? sessionId, String? reply})> tuiTurn(
+      String directory, String message, void Function(String) type);
 }
 
 /// Gateway over a locally-managed `opencode serve` process.
@@ -70,6 +87,16 @@ class OpencodeLocalGateway implements OpencodeGateway {
   /// background service, which must never be killed by us).
   bool _ownsServe = false;
   final List<StreamSubscription<String>> _serveLogs = [];
+
+  /// Tail of the one-at-a-time chat chain — see [chat].
+  Future<void> _chatQueue = Future<void>.value();
+
+  /// The session the desktop TUI last used for a directory (the one
+  /// our own typed message was submitted into), keyed by the
+  /// normalized directory. A TUI creates its session lazily, so the
+  /// session it just used may not carry a `viewed` stamp yet — this
+  /// remembers it for /history and the next turn.
+  final Map<String, String> _tuiSessions = {};
 
   @override
   Future<bool> ensure() async {
@@ -366,8 +393,21 @@ class OpencodeLocalGateway implements OpencodeGateway {
 
   // ── Chat ──────────────────────────────────────────────────────
 
+  /// One turn of the conversation, serialized: chats run strictly
+  /// one at a time in arrival order. Two parallel prompts into
+  /// one session would race — each SSE subscription collects any
+  /// `session.text.ended` in that session, so interleaved turns
+  /// return swapped or duplicated replies.
   @override
-  Future<String?> chat(String directory, String message) async {
+  Future<String?> chat(String directory, String message) {
+    final task = _chatQueue
+        .then((_) => _chatNow(directory, message))
+        .catchError((_) => null);
+    _chatQueue = task.then<void>((_) {}, onError: (_) {});
+    return task;
+  }
+
+  Future<String?> _chatNow(String directory, String message) async {
     if (!await ensure()) return null;
     final base = _baseUrl!;
     final auth = _authHeader!;
@@ -376,66 +416,158 @@ class OpencodeLocalGateway implements OpencodeGateway {
       _log.warning('opencode: no session for $directory');
       return null;
     }
-
-    final texts = <String>[];
-    var done = Completer<void>();
-    final t0 = DateTime.now().millisecondsSinceEpoch - 3000;
-
-    // Subscribe BEFORE sending so no completion event is missed.
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
-    StreamSubscription<String>? sseSub;
+    final feed = await _openFeed(base, auth);
     try {
-      final req = await client.getUrl(Uri.parse('$base/api/event'));
-      req.headers.set(HttpHeaders.authorizationHeader, auth);
-      req.headers.set(HttpHeaders.acceptHeader, 'text/event-stream');
-      final res = await req.close();
-      if (res.statusCode != 200) {
-        _log.warning('opencode: /api/event -> ${res.statusCode}');
-        return null;
-      }
-      var dataLine = <String>[];
-      sseSub = res.transform(utf8.decoder).transform(const LineSplitter()).listen(
-        (line) {
-          if (line.isEmpty) {
-            final payload = dataLine.join('\n');
-            dataLine = [];
-            if (!payload.startsWith('{')) return;
-            final ev = jsonDecode(payload);
-            if (ev is! Map<String, dynamic>) return;
-            _onEvent(ev, sessionId, t0, texts, done);
-          } else if (line.startsWith('data:')) {
-            dataLine.add(line.substring(5).trimLeft());
-          }
-        },
-        onError: (Object e) {
-          if (!done.isCompleted) done.complete();
-        },
-        onDone: () {
-          if (!done.isCompleted) done.complete();
-        },
-      );
-
       final sent = await _json('POST', '$base/api/session/$sessionId/prompt',
           auth, jsonEncode({'text': message}));
       if (sent == null) return null;
-
-      await done.future.timeout(const Duration(minutes: 5), onTimeout: () {
-        _log.warning('opencode: chat timed out (session $sessionId)');
-      });
-      return texts.isEmpty ? null : texts.join('\n\n');
-    } catch (e) {
-      _log.warning('opencode: chat failed ($e)');
-      return texts.isEmpty ? null : texts.join('\n\n');
+      return await _collectReply(sessionId, feed);
     } finally {
-      await sseSub?.cancel();
-      client.close();
+      await feed.close();
+    }
+  }
+
+  // ── TUI-driven turn ───────────────────────────────────────────
+
+  @override
+  Future<({String? sessionId, String? reply})> tuiTurn(
+      String directory, String message, void Function(String) type) async {
+    if (!await ensure()) return (sessionId: null, reply: null);
+    final base = _baseUrl!;
+    final auth = _authHeader!;
+    // Subscribe BEFORE typing: the reply can start streaming
+    // within milliseconds of the submit.
+    final feed = await _openFeed(base, auth);
+    try {
+      final afterMs = DateTime.now().millisecondsSinceEpoch;
+      type(message);
+      final sessionId =
+          await _awaitTuiSession(base, auth, directory, afterMs);
+      if (sessionId == null) {
+        _log.info('opencode: the TUI did not submit the message');
+        return (sessionId: null, reply: null);
+      }
+      _tuiSessions[_dirKey(directory)] = sessionId;
+      _log.info('opencode: TUI turn in session $sessionId');
+      final reply = await _collectReply(sessionId, feed);
+      return (sessionId: sessionId, reply: reply);
+    } finally {
+      await feed.close();
+    }
+  }
+
+  /// The session the TUI just submitted into: the one holding a
+  /// user message created after [afterMs]. Null when nothing was
+  /// submitted within the window — a modal (session picker, help
+  /// overlay) had the keyboard and swallowed the text.
+  Future<String?> _awaitTuiSession(
+      String base, String auth, String directory, int afterMs) async {
+    for (var round = 0; round < 15; round++) {
+      final list = await _json('GET', '$base/api/session', auth, null);
+      final data = list?['data'];
+      if (data is List) {
+        // Only sessions touched after our typing can hold the
+        // message — the rest are pruned before any request.
+        for (final raw in _sessionsOf(data, directory)) {
+          if (_stamp(raw) < afterMs) continue;
+          final id = raw['id'];
+          if (id is! String) continue;
+          if (await _hasFreshUserMessage(base, auth, id, afterMs)) {
+            return id;
+          }
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    }
+    return null;
+  }
+
+  /// The sessions rooted at [directory], freshest first.
+  static List<Map<String, dynamic>> _sessionsOf(
+      List<dynamic> data, String directory) {
+    final out = <Map<String, dynamic>>[];
+    for (final raw in data) {
+      if (raw is! Map<String, dynamic>) continue;
+      final loc = raw['location'];
+      if (loc is! Map<String, dynamic>) continue;
+      final dir = loc['directory'];
+      if (dir is! String || !_sameDir(dir, directory)) continue;
+      out.add(raw);
+    }
+    out.sort((a, b) => _stamp(b).compareTo(_stamp(a)));
+    return out;
+  }
+
+  /// The newest activity stamp of a session (viewed / updated /
+  /// created) — when the session was last touched.
+  static int _stamp(Map<String, dynamic> raw) {
+    final time = raw['time'];
+    if (time is! Map<String, dynamic>) return -1;
+    var stamp = -1;
+    for (final key in const ['viewed', 'updated', 'created']) {
+      final value = time[key] as int? ?? -1;
+      if (value > stamp) stamp = value;
+    }
+    return stamp;
+  }
+
+  /// True when [sessionId] holds a user message created after
+  /// [afterMs] — i.e. the TUI submitted our text there.
+  Future<bool> _hasFreshUserMessage(
+      String base, String auth, String sessionId, int afterMs) async {
+    final res = await _json(
+        'GET', '$base/api/session/$sessionId/message', auth, null);
+    final data = res?['data'];
+    if (data is! List) return false;
+    for (final raw in data) {
+      if (raw is! Map<String, dynamic>) continue;
+      if (raw['type'] != 'user') continue;
+      final time = raw['time'];
+      if (time is! Map<String, dynamic>) continue;
+      if ((time['created'] as int? ?? -1) >= afterMs) return true;
+    }
+    return false;
+  }
+
+  Future<_EventFeed> _openFeed(String base, String auth) async {
+    final feed = _EventFeed(base, auth);
+    await feed.open();
+    return feed;
+  }
+
+  /// Collect the assistant's reply text of the turn running in
+  /// [sessionId] — the feed's frames (buffered ones included),
+  /// filtered to that session, until the execution terminates.
+  /// When the execution failed (provider error, rate limit, …) the
+  /// error message is returned instead: a silent "no reply" would
+  /// be a dead end for the user.
+  Future<String?> _collectReply(String sessionId, _EventFeed feed) async {
+    final texts = <String>[];
+    final errors = <String>[];
+    final done = Completer<void>();
+    final t0 = DateTime.now().millisecondsSinceEpoch - 3000;
+    final sub = feed.events.listen(
+      (ev) => _onEvent(ev, sessionId, t0, texts, errors, done),
+      onDone: () {
+        if (!done.isCompleted) done.complete();
+      },
+    );
+    try {
+      await done.future.timeout(const Duration(minutes: 5), onTimeout: () {
+        _log.warning('opencode: reply timed out (session $sessionId)');
+      });
+      if (texts.isNotEmpty) return texts.join('\n\n');
+      if (errors.isNotEmpty) return '⚠️ ${errors.join('\n')}';
+      return null;
+    } finally {
+      await sub.cancel();
     }
   }
 
   /// Route one SSE event: collect the response text for our
   /// session, finish on the execution terminators.
   void _onEvent(Map<String, dynamic> ev, String sessionId, int t0,
-      List<String> texts, Completer<void> done) {
+      List<String> texts, List<String> errors, Completer<void> done) {
     final type = ev['type'];
     if (type is! String) return;
     final created = ev['created'];
@@ -450,8 +582,16 @@ class OpencodeLocalGateway implements OpencodeGateway {
       case 'session.execution.succeeded':
       case 'session.execution.failed':
       case 'session.execution.aborted':
+        if (type != 'session.execution.succeeded') {
+          final error = data['error'];
+          if (error is Map<String, dynamic>) {
+            final message = (error['message'] ?? error['type'] ?? '').toString();
+            if (message.isNotEmpty) errors.add(message);
+          }
+        }
         if (!done.isCompleted) done.complete();
-    }  }
+    }
+  }
 
   Future<String?> _findOrCreateSession(
       String base, String auth, String directory) async {
@@ -469,26 +609,87 @@ class OpencodeLocalGateway implements OpencodeGateway {
     final list = await _json('GET', '$base/api/session', auth, null);
     final data = list?['data'];
     if (data is! List) return null;
-    Map<String, dynamic>? best;
-    var bestUpdated = -1;
+    final picked = pickSessionId(data, directory);
+    // The session the TUI used for our last message wins when it
+    // was touched at least as recently as the viewed candidate: a
+    // TUI creates its session lazily, so the one we typed into may
+    // not carry a viewed stamp yet — while a session the user
+    // picked in the TUI always does (and then it wins).
+    final remembered = _tuiSessions[_dirKey(directory)];
+    if (remembered != null && picked != null) {
+      for (final raw in data) {
+        if (raw is! Map<String, dynamic>) continue;
+        if (raw['id'] != remembered) continue;
+        if (_stamp(raw) >= _timeOf(data, picked, 'viewed')) {
+          return remembered;
+        }
+      }
+    }
+    return picked;
+  }
+
+  /// The time field of the session [id] within [data], -1 when
+  /// unknown.
+  static int _timeOf(List<dynamic> data, String id, String key) {
     for (final raw in data) {
+      if (raw is! Map<String, dynamic>) continue;
+      if (raw['id'] != id) continue;
+      return _timeInt(raw, key);
+    }
+    return -1;
+  }
+
+  /// A directory key for the session memory (case/separator
+  /// insensitive, like [_sameDir]).
+  static String _dirKey(String directory) =>
+      directory.replaceAll('/', '\\').toLowerCase();
+
+  /// One time field of a session, -1 when absent.
+  static int _timeInt(Map<String, dynamic> raw, String key) {
+    final time = raw['time'];
+    if (time is! Map<String, dynamic>) return -1;
+    return time[key] as int? ?? -1;
+  }
+
+  /// The session a Feishu message belongs to: the one a client is
+  /// DISPLAYING, not the one most recently chatted into.
+  ///
+  /// `time.viewed` is stamped by opencode clients every time they
+  /// show a session — a freshly launched TUI resumes the newest
+  /// session and stamps it; a user switching sessions in the TUI
+  /// picker stamps the new one. Ranking by `viewed` therefore
+  /// follows the desktop TUI. Ranking by `updated` instead loses
+  /// permanently: every Feishu message refreshes the session it
+  /// lands in, so a once-wrong pick keeps outranking the session
+  /// the TUI just switched to (field-observed: messages stuck in
+  /// yesterday's session all day). `updated` only breaks ties
+  /// among sessions no client has ever viewed (headless probes).
+  static String? pickSessionId(List<dynamic> sessions, String directory) {
+    Map<String, dynamic>? bestViewed, bestUpdated;
+    var bestViewedAt = -1, bestUpdatedAt = -1;
+    for (final raw in sessions) {
       if (raw is! Map<String, dynamic>) continue;
       final loc = raw['location'];
       if (loc is! Map<String, dynamic>) continue;
       final dir = loc['directory'];
       if (dir is! String || !_sameDir(dir, directory)) continue;
       final time = raw['time'];
-      final updated =
-          time is Map<String, dynamic> ? (time['updated'] as int? ?? -1) : -1;
-      if (updated >= bestUpdated) {
-        bestUpdated = updated;
-        best = raw;
+      if (time is! Map<String, dynamic>) continue;
+      final viewed = time['viewed'] as int? ?? -1;
+      final updated = time['updated'] as int? ?? -1;
+      if (viewed > bestViewedAt) {
+        bestViewedAt = viewed;
+        bestViewed = raw;
+      }
+      if (updated > bestUpdatedAt) {
+        bestUpdatedAt = updated;
+        bestUpdated = raw;
       }
     }
-    return best?['id'] as String?;
+    return (bestViewed ?? bestUpdated)?['id'] as String?;
   }
 
-  // ── Conversation tail (/screen) ───────────────────────────────
+  // ── Conversation tail (/history) ──────────────────────────────
 
   @override
   Future<String?> conversationTail(String directory, {int limit = 6}) async {
@@ -534,5 +735,67 @@ class OpencodeLocalGateway implements OpencodeGateway {
   static bool _sameDir(String a, String b) {
     String norm(String s) => s.replaceAll('/', '\\').toLowerCase();
     return norm(a) == norm(b);
+  }
+}
+
+/// A live subscription to the server's event stream. The frames are
+/// buffered until a collector attaches, so a collector can come
+/// after the interesting events already fired (the TUI's submit, the
+/// first reply chunks) without missing them.
+class _EventFeed {
+  _EventFeed(this.base, this.auth);
+  final String base;
+  final String auth;
+  final Logger _log = moduleLogger('feishu.opencode');
+  final _controller = StreamController<Map<String, dynamic>>();
+  HttpClient? _client;
+  StreamSubscription<String>? _sub;
+
+  Stream<Map<String, dynamic>> get events => _controller.stream;
+
+  Future<void> open() async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    _client = client;
+    try {
+      final req = await client.getUrl(Uri.parse('$base/api/event'));
+      req.headers.set(HttpHeaders.authorizationHeader, auth);
+      req.headers.set(HttpHeaders.acceptHeader, 'text/event-stream');
+      final res = await req.close();
+      if (res.statusCode != 200) {
+        _log.warning('opencode: /api/event -> ${res.statusCode}');
+        await close();
+        return;
+      }
+      var dataLine = <String>[];
+      _sub = res.transform(utf8.decoder).transform(const LineSplitter()).listen(
+        (line) {
+          if (line.isEmpty) {
+            final payload = dataLine.join('\n');
+            dataLine = [];
+            if (!payload.startsWith('{')) return;
+            try {
+              final ev = jsonDecode(payload);
+              if (ev is Map<String, dynamic>) _controller.add(ev);
+            } catch (_) {}
+          } else if (line.startsWith('data:')) {
+            dataLine.add(line.substring(5).trimLeft());
+          }
+        },
+        onError: (Object e) {
+          _log.warning('opencode: event stream error ($e)');
+        },
+      );
+    } catch (e) {
+      _log.warning('opencode: event stream failed ($e)');
+      await close();
+    }
+  }
+
+  Future<void> close() async {
+    await _sub?.cancel();
+    _sub = null;
+    _client?.close();
+    _client = null;
+    if (!_controller.isClosed) await _controller.close();
   }
 }

@@ -62,7 +62,7 @@ abstract class FeishuHostBridge {
   String? activeTerminalCwd();
 
   /// The focused terminal rendered to PNG (its enclosing repaint
-  /// boundary rasterized) — `/screen` sends this to the phone.
+  /// boundary rasterized) — `/history` sends this to the phone.
   /// Null when there is no active terminal (or it can't be
   /// rasterized yet).
   Future<Uint8List?> snapshotActiveTerminalPng();
@@ -92,22 +92,26 @@ const int _kOutputMaxBytes = 15 * 1024;
 /// What the router answers when a full-screen TUI without a
 /// server adapter owns the terminal: the text is relayed and the
 /// rendered screen mirrored back — layout noise is unavoidable
-/// for unknown apps, hence the pointer to /screen.
-const String _kTuiHint = 'A full-screen app is running in the desktop '
-    'terminal — your message was relayed into it and the reply below is '
-    'its rendered screen.\n'
-    '/screen shows the screen (image or text); /type <keys> sends raw '
-    'keys (e.g. /type /q).';
+/// for unknown apps, hence the pointer to /history.
+const String _kTuiHint = 'A full-screen app owns the desktop terminal — '
+    'your message was typed into it; below is its screen.\n'
+    '/history — the screen. /raw <keys> — raw keys (e.g. /raw /quit).';
 
 /// What the router answers when the TUI that just launched is
-/// opencode: the router itself routes through the opencode server
-/// from now on, so replies are pure text.
-const String _kOpencodeTuiHint = 'opencode is running in the desktop '
-    'terminal — messages sent here go through the opencode server (the '
-    'same one the TUI uses, so both stay in sync) and replies come back '
-    'as plain text.\n'
-    '/screen returns the conversation; /type <keys> sends raw keys '
-    '(e.g. /type /q).';
+/// opencode: the router types into it and answers from the
+/// opencode server.
+const String _kOpencodeTuiHint = 'opencode detected — your messages are '
+    'typed into it, so it shows them in its current session.\n'
+    '/history — the conversation. /raw <keys> — raw keys '
+    '(e.g. /raw /quit).';
+
+/// The TUI had the keyboard but did not submit the message — a
+/// modal (session picker, help overlay) swallowed it, or the app
+/// runs against a different opencode server than this gateway.
+const String _kTuiNotSubmitted = 'The message was typed into the app, '
+    'but nothing came back — a menu or dialog may have the keyboard '
+    '(close it and send again), or the app talks to another opencode '
+    'server.';
 
 class FeishuIntegration {
   final FeishuEventChannel channel;
@@ -131,6 +135,16 @@ class FeishuIntegration {
   /// Active output capture (one at a time; a new command flushes
   /// the previous capture immediately).
   _OutputCapture? _capture;
+
+  /// The Enter keystroke still waiting to follow a TUI text write
+  /// (see [_writeTuiLine]) — at most one, cancelled by the next
+  /// write so rapid messages can't stack Enters.
+  Timer? _pendingTuiEnter;
+
+  /// Tail of the one-at-a-time TUI chat chain: two Feishu messages
+  /// must not interleave in the TUI's composer (they would merge
+  /// into one submission).
+  Future<void> _tuiChatQueue = Future<void>.value();
 
   /// Idle window that ends a command's output capture (injectable).
   final Duration outputWindow;
@@ -265,24 +279,25 @@ class FeishuIntegration {
     // 4. Text only; empty text (stickers etc.) is ignored.
     if (event.text.isEmpty) return;
 
-    // 5. `/screen` replies with what the terminal currently shows
-    //    — a rendered PNG snapshot (pixel-perfect for TUIs), the
-    //    text reconstruction only as fallback.
-    if (event.text == '/screen') {
+    // 5. `/history` replies with what the conversation/screen
+    //    currently shows — the server conversation tail when a
+    //    server-backed TUI owns the terminal, else a rendered PNG
+    //    snapshot, else the filtered screen text.
+    if (event.text == '/history') {
       _capture?.flush();
-      unawaited(_sendScreen(event.chatId));
+      unawaited(_sendHistory(event.chatId));
       return;
     }
 
-    // 5b. `/type <text>` — relay raw text into whatever owns the
+    // 5b. `/raw <text>` — relay raw text into whatever owns the
     //     terminal (a full-screen TUI included), bypassing the
     //     server routing: the escape hatch for TUI control (q,
     //     /, dd, …).
-    if (event.text == '/type' || event.text.startsWith('/type ')) {
-      final keys = event.text.substring(5).trim();
+    if (event.text == '/raw' || event.text.startsWith('/raw ')) {
+      final keys = event.text.substring(4).trim();
       if (keys.isEmpty) {
         unawaited(api
-            .sendText(event.chatId, 'Usage: /type <text>')
+            .sendText(event.chatId, 'Usage: /raw <text>')
             .catchError((_) {}));
         return;
       }
@@ -291,7 +306,7 @@ class FeishuIntegration {
       } else {
         _writeAndCapture(event.chatId, keys);
       }
-      _log.info('feishu: /type ${event.messageId} relayed');
+      _log.info('feishu: /raw ${event.messageId} relayed');
       return;
     }
 
@@ -306,7 +321,12 @@ class FeishuIntegration {
           _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotActiveScreen());
       final gateway = _gatewayFor(app);
       if (gateway != null) {
-        unawaited(_tuiServerChat(event, gateway));
+        // Serialized: the messages go into the TUI's composer one
+        // after the other.
+        final task = _tuiChatQueue
+            .then((_) => _tuiServerChat(event, gateway))
+            .catchError((_) {});
+        _tuiChatQueue = task.then<void>((_) {}, onError: (_) {});
         return;
       }
       _mirrorIntoTui(event);
@@ -374,14 +394,15 @@ class FeishuIntegration {
   OpencodeGateway? _gatewayFor(String? app) =>
       app == 'opencode' ? opencode : null;
 
-  /// `/screen` — what the terminal shows, best source first:
+  /// `/history` — what the conversation/screen shows, best source
+  /// first:
   ///
   ///  1. A server-backed TUI's conversation tail (pure clean text
   ///     — better than any picture of it),
   ///  2. the rendered PNG (needs the bot's image-upload scope;
   ///     skipped silently when the platform denies it),
   ///  3. the screen grid as text, decoration lines dropped.
-  Future<void> _sendScreen(String chatId) async {
+  Future<void> _sendHistory(String chatId) async {
     final termId = bridge.activeTerminalId();
     final app =
         _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotActiveScreen());
@@ -422,33 +443,66 @@ class FeishuIntegration {
       RegExp(r'^[\s─━═│┃║╔╗╚╝╠╣╦╩╬┌┐└┘├┤┬┴┼╌╎┄┅·•◦=+-]*$');
 
   /// A message typed into a terminal owned by a TUI with a server
-  /// adapter: through the server (same session the desktop TUI
-  /// shows, pure text reply); the generic screen mirror when the
-  /// server is unreachable.
+  /// adapter.
+  ///
+  /// The text is typed INTO the TUI, so the TUI submits it to
+  /// whatever session it is displaying — including a brand-new one
+  /// the server hasn't heard of yet (a TUI creates its session
+  /// lazily, on the first local message). The reply comes from the
+  /// server's event stream as pure text, keyed by the session the
+  /// TUI just used.
   Future<void> _tuiServerChat(
       FeishuInboundEvent event, OpencodeGateway gateway) async {
     final cwd = bridge.activeTerminalCwd();
-    if (cwd != null && await gateway.ensure()) {
-      final reply = await gateway.chat(cwd, event.text);
-      if (reply != null && reply.isNotEmpty) {
-        _log.info('feishu: tui-chat ${event.messageId} via server');
-        await api.sendText(event.chatId, reply).catchError((_) {});
-        return;
-      }
+    if (cwd == null || !await gateway.ensure()) {
+      _log.info('feishu: tui-chat ${event.messageId} fell back to mirror');
+      _mirrorIntoTui(event);
+      return;
     }
-    _log.info('feishu: tui-chat ${event.messageId} fell back to mirror');
-    _mirrorIntoTui(event);
+    _capture?.flush();
+    final result = await gateway.tuiTurn(
+      cwd,
+      _oneLine(event.text),
+      (line) => _writeTuiLine(line),
+    );
+    final sessionId = result.sessionId;
+    final reply = result.reply;
+    if (sessionId == null) {
+      // The text was typed, but the TUI never submitted it — a
+      // modal (session picker, help) had the keyboard.
+      _log.info('feishu: tui-chat ${event.messageId} was not submitted');
+      await api
+          .sendText(event.chatId, _kTuiNotSubmitted)
+          .catchError((_) {});
+      return;
+    }
+    if (reply != null && reply.isNotEmpty) {
+      _log.info('feishu: tui-chat ${event.messageId} via the TUI '
+          '(session $sessionId)');
+      await api.sendText(event.chatId, reply).catchError((_) {});
+      return;
+    }
+    _log.info('feishu: tui-chat ${event.messageId} gave no reply text');
+    await api
+        .sendText(event.chatId,
+            'The app accepted the message, but produced no text reply.')
+        .catchError((_) {});
   }
+
+  /// One line of text: the TUI composer submits on Enter, so a
+  /// multi-line message must not carry its own line breaks.
+  static String _oneLine(String text) =>
+      text.replaceAll(RegExp(r'\s*\n+\s*'), ' ').trim();
 
   /// Relay the text into the TUI and mirror its rendered screen
   /// back once quiet (the generic TUI path). [text] overrides
-  /// [FeishuInboundEvent.text] for `/type`.
+  /// [FeishuInboundEvent.text] for `/raw`.
   void _mirrorIntoTui(FeishuInboundEvent event, {String? text}) {
     final line = text ?? event.text;
     _capture?.flush();
     final output = bridge.subscribeActiveOutput();
     if (output == null) {
-      bridge.runCommand('$line\n');
+      _writeTuiLine(line);
       unawaited(api
           .sendText(event.chatId, _kTuiHint)
           .catchError((_) {}));
@@ -464,12 +518,27 @@ class FeishuIntegration {
       onDone: () => _capture = null,
       screenOf: bridge.snapshotActiveScreen,
     );
-    bridge.runCommand('$line\n');
+    _writeTuiLine(line);
+  }
+
+  /// Write a line into a TUI as two separate PTY writes: the text
+  /// first, Enter ~150ms later. TUIs consume input keystroke by
+  /// keystroke, and a text+CR in one write can race the app's
+  /// input parser — the command then sits on screen, suspended,
+  /// its Enter swallowed (observed: opencode's `/quit`). The
+  /// plain-shell path (`_writeAndCapture`) is unaffected: a
+  /// shell's line discipline handles text+CR in one write fine.
+  void _writeTuiLine(String line) {
+    _pendingTuiEnter?.cancel();
+    bridge.runCommand(line);
+    _pendingTuiEnter =
+        Timer(const Duration(milliseconds: 150), () => bridge.runCommand('\n'));
   }
 
   void _onEvent(FeishuInboundEvent event) => handleEvent(event);
 
   Future<void> dispose() async {
+    _pendingTuiEnter?.cancel();
     await _stop();
     if (channel is FeishuWsChannel) {
       (channel as FeishuWsChannel).dispose();

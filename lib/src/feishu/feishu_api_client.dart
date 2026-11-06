@@ -146,7 +146,7 @@ class FeishuApiClient {
 
   /// Send [png] (a rendered terminal snapshot) to chat [chatId] as
   /// an image message: upload → image_id → message. Rare and
-  /// user-triggered (/screen), so it skips the text queue.
+  /// user-triggered (/history), so it skips the text queue.
   Future<void> sendImage(String chatId, Uint8List png) async {
     var token = await _tenantAccessToken();
     for (var attempt = 0; attempt < 2; attempt++) {

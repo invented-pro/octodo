@@ -596,7 +596,7 @@ class TerminalViewState extends State<TerminalView> {
     return lines;
   }
 
-  /// The terminal rendered to PNG — what the Feishu `/screen`
+  /// The terminal rendered to PNG — what the Feishu `/history`
   /// command sends to the phone. Encodes the nearest enclosing
   /// repaint boundary (the pane), not a text reconstruction, so
   /// TUI layout arrives pixel-perfect. Null when the view isn't
