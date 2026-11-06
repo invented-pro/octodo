@@ -1016,12 +1016,14 @@ void main() {
         ]),
       ];
     final sent = <(String, String)>[];
+    final cards = <Map<String, dynamic>>[];
     // Bind to a pane id that no longer exists (a restart made every
     // pane id fresh); the seed lands in the router's own store file.
     final integration = await _routerFor(
       creds: _ownerCreds(),
       bridge: bridge,
       onSend: (chat, text) => sent.add((chat, text)),
+      onCard: (_, card) => cards.add(card),
       seedBindings: {
         'oc_chat': FeishuChatBinding(
           chatId: 'oc_chat',
@@ -1044,7 +1046,7 @@ void main() {
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
-    final reply = sent.last.$2;
+    final reply = cardText(cards.single);
     expect(reply, contains('1. one  [focused]'));
     expect(reply, contains('2. two'));
     expect(reply, contains('The bound pane is gone'));
@@ -1181,11 +1183,11 @@ void main() {
   });
 
   test('/help lists the commands', () async {
-    final sent = <(String, String)>[];
+    final cards = <Map<String, dynamic>>[];
     final integration = await _routerFor(
       creds: _ownerCreds(),
       bridge: _RecordingBridge(),
-      onSend: (chat, text) => sent.add((chat, text)),
+      onCard: (_, card) => cards.add(card),
     );
     integration.handleEvent(FeishuInboundEvent(
       senderOpenId: 'ou_owner',
@@ -1196,7 +1198,7 @@ void main() {
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
-    final reply = sent.single.$2;
+    final reply = cardText(cards.single);
     for (final command in [
       '/status',
       '/attach',
@@ -1226,11 +1228,13 @@ void main() {
         ]),
       ];
     final sent = <(String, String)>[];
+    final cards = <Map<String, dynamic>>[];
     // The binding's ids are from the previous launch — both stale.
     final integration = await _routerFor(
       creds: _ownerCreds(),
       bridge: bridge,
       onSend: (chat, text) => sent.add((chat, text)),
+      onCard: (_, card) => cards.add(card),
       seedBindings: {
         'oc_chat': FeishuChatBinding(
           chatId: 'oc_chat',
@@ -1268,7 +1272,7 @@ void main() {
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    final reply = sent.last.$2;
+    final reply = cardText(cards.single);
     expect(reply, contains('1. [focused] [bound]'));
     expect(reply, contains('2. two  [bound]'));
   });
@@ -1356,11 +1360,11 @@ void main() {
         ]),
       ]
       ..screenBySurface['tab_build'] = const ['build output line'];
-    final sent = <(String, String)>[];
+    final cards = <Map<String, dynamic>>[];
     final integration = await _routerFor(
       creds: _ownerCreds(),
       bridge: bridge,
-      onSend: (chat, text) => sent.add((chat, text)),
+      onCard: (_, card) => cards.add(card),
     );
     // Bound to the shell tab; the build runs in the OTHER tab.
     integration.handleEvent(FeishuInboundEvent(
@@ -1379,14 +1383,15 @@ void main() {
       duration: Duration(minutes: 3, seconds: 12),
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    final reply = sent.last.$2;
-    expect(reply, contains('[1.1.1]'),
-        reason: 'non-bound results carry the ws.pane.tab address — '
-            'the same numbers /attach takes');
-    expect(reply, contains('✅ [1.1.1] build — task finished (exit 0, took 3m 12s)'));
-    expect(reply, contains('build output line'));
+    final card = cards.last;
+    expect(card['header']['template'], 'green',
+        reason: 'a clean exit reads green');
+    expect(card['header']['title']['content'], 'Task finished [1.1.1]');
+    final text = cardText(card);
+    expect(text, contains('**build** — exit 0, took 3m 12s'));
+    expect(text, contains('build output line'));
 
-    // A failing task is marked ❌.
+    // A failing task is red.
     bridge.taskResultSink?.call(const FeishuTaskResult(
       workspaceId: 'ws_1',
       surfaceId: 'tab_build',
@@ -1394,12 +1399,13 @@ void main() {
       duration: Duration(seconds: 41),
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(sent.last.$2, contains('❌ [1.1.1] build'));
-    expect(sent.last.$2, contains('took 41s'));
+    expect(cards.last['header']['template'], 'red');
+    expect(cards.last['header']['title']['content'], 'Task failed [1.1.1]');
+    expect(cardText(cards.last), contains('took 41s'));
 
     // The bound tab's own results are skipped — commands sent from
     // Feishu already answer through the output capture.
-    final before = sent.length;
+    final before = cards.length;
     bridge.taskResultSink?.call(const FeishuTaskResult(
       workspaceId: 'ws_1',
       surfaceId: 'tab_sh',
@@ -1407,7 +1413,7 @@ void main() {
       duration: Duration(minutes: 1),
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(sent.length, before, reason: 'no double-send for the bound tab');
+    expect(cards.length, before, reason: 'no double-send for the bound tab');
 
     // Another workspace's results go nowhere — nothing is bound.
     bridge.taskResultSink?.call(const FeishuTaskResult(
@@ -1417,7 +1423,7 @@ void main() {
       duration: Duration(minutes: 5),
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(sent.length, before);
+    expect(cards.length, before);
   });
 
   // ── Phase 2: cards, bindings, confirmations ────────────────────
@@ -1517,11 +1523,11 @@ void main() {
         ),
         FeishuPaneStatus(id: 'pane_2', number: 2, focused: false, tabs: []),
       ];
-    final sent = <(String, String)>[];
+    final cards = <Map<String, dynamic>>[];
     final integration = await _routerFor(
       creds: _ownerCreds(),
       bridge: bridge,
-      onSend: (chat, text) => sent.add((chat, text)),
+      onCard: (_, card) => cards.add(card),
     );
 
     integration.handleEvent(FeishuInboundEvent(
@@ -1533,15 +1539,17 @@ void main() {
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
-    final reply = sent.single.$2;
+    final reply = cardText(cards.single);
     expect(reply, contains('Workspaces:'));
     expect(reply, contains('1. octodo'));
-    expect(reply, contains('Target: the active workspace'));
     expect(reply, contains('Panes:'));
     expect(reply, contains('1. [focused]'));
     expect(reply, contains('2.'));
     expect(reply, contains('opencode'));
     expect(reply, contains(r'E:\src\octodo'));
+    // The target line is bold in its own div.
+    expect(cards.single['header']['title']['content'], 'Where you are');
+    expect(reply, contains('**Target: the active workspace**'));
   });
 
   test('/attach <n> binds the chat to the n-th workspace, <n>.<m> to '
@@ -1957,11 +1965,13 @@ void main() {
     final bridge = _RecordingBridge()
       ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')];
     final sent = <(String, String)>[];
+    final cards = <Map<String, dynamic>>[];
     final integration = await _routerFor(
       creds: _ownerCreds(allowed: ['ou_owner', 'ou_friend']),
       bridge: bridge,
       channel: _FakeChannel(),
       onSend: (chat, text) => sent.add((chat, text)),
+      onCard: (_, card) => cards.add(card),
     );
 
     // ou_owner binds the chat to ws_1.
@@ -1988,8 +1998,8 @@ void main() {
         reason: 'only the binder may drive the terminal (§3.2)');
     expect(sent.last.$2, contains('another member'));
 
-    // /status stays open — read-only.
-    final before = sent.length;
+    // /status stays open — read-only (it answers with a card now).
+    final before = cards.length;
     integration.handleEvent(FeishuInboundEvent(
       senderOpenId: 'ou_friend',
       chatId: 'oc_chat',
@@ -1998,8 +2008,9 @@ void main() {
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(sent.length, greaterThan(before),
+    expect(cards.length, greaterThan(before),
         reason: 'read-only commands answer for everyone whitelisted');
+    expect(cardText(cards.last), contains('octodo'));
   });
 
   test('the picker card disables the current binding and offers unbind',
@@ -2128,6 +2139,15 @@ Future<FeishuIntegration> _routerFor({
   await integration.sync(enabled: true);
   return integration;
 }
+
+/// Flatten a card's div texts (lark_md / plain_text) into one string
+/// for content assertions.
+String cardText(Map<String, dynamic> card) =>
+    ((card['body'] as Map)['elements'] as List)
+        .whereType<Map>()
+        .where((e) => e['tag'] == 'div')
+        .map((e) => ((e['text'] as Map)['content'] ?? '').toString())
+        .join('\n');
 
 /// Subclass of the real client overriding the outbound path so no
 /// HTTP happens; sends are recorded via [onSend], images via

@@ -262,6 +262,106 @@ Map<String, dynamic> pagerCard({
   );
 }
 
+/// The /help card — the remote control's whole surface, sectioned.
+Map<String, dynamic> helpCard() => feishuCard(
+      title: 'Octodo remote control',
+      subtitle: 'commands',
+      elements: [
+        _mdSection('**Navigation**\n'
+            '**/status** — workspaces, panes, tabs; what is focused and '
+            'what this chat drives\n'
+            '**/attach** — pick a workspace (a card)\n'
+            '**/attach <ws>[.<pane>[.<tab>]]** — bind by the numbers '
+            '/status prints\n'
+            '**/detach** — unbind; follow the desktop focus'),
+        const {'tag': 'hr'},
+        _mdSection('**Tabs**\n'
+            '**/newtab** — open a tab in the bound pane (re-binds to it)\n'
+            '**/closetab** — close the focused tab and follow what takes '
+            'its place (never the last one)'),
+        const {'tag': 'hr'},
+        _mdSection('**Driving terminals**\n'
+            'Plain text runs in the target terminal and answers with its '
+            'output\n'
+            '**/raw <keys>** — raw keystrokes into the terminal, TUIs '
+            'included (/raw /quit)\n'
+            '**/history** — the terminal\'s last screen'),
+        const {'tag': 'hr'},
+        _mdSection('**Safety & feeds**\n'
+            'Dangerous commands ask first — Run once / Always / Cancel\n'
+            '**/run <token>** / **/cancel** — the text fallbacks\n'
+            'Long tasks finishing in any tab of the bound workspace send '
+            'their result here (✅/❌, tagged [ws.pane.tab])\n'
+            'A bound chat is read-only for everyone except the member who '
+            'bound it'),
+      ],
+    );
+
+/// One lark_md paragraph of the help card.
+Map<String, dynamic> _mdSection(String content) => {
+      'tag': 'div',
+      'text': {'tag': 'lark_md', 'content': content},
+    };
+
+/// The /status card — the target line bold, the layout tree in plain
+/// text (alignment survives).
+Map<String, dynamic> statusCard({
+  required String target,
+  required String body,
+}) =>
+    feishuCard(
+      title: 'Where you are',
+      elements: [
+        {
+          'tag': 'div',
+          'text': {'tag': 'lark_md', 'content': '**Target: $target**'},
+        },
+        {
+          'tag': 'div',
+          'text': {'tag': 'plain_text', 'content': body},
+        },
+      ],
+    );
+
+/// A task-completion card: colored header by exit code, the result in
+/// a code fence (plain text when the output itself contains fences).
+Map<String, dynamic> taskResultCard({
+  required bool success,
+  required String? address,
+  required String title,
+  required int? exitCode,
+  required String took,
+  required List<String> tail,
+}) {
+  final where = address == null ? '' : ' [$address]';
+  final name = title.isEmpty ? 'tab' : title;
+  final elements = <Map<String, dynamic>>[
+    {
+      'tag': 'div',
+      'text': {
+        'tag': 'lark_md',
+        'content': '**$name** — exit ${exitCode ?? '?'}, took $took',
+      },
+    },
+  ];
+  if (tail.isNotEmpty) {
+    final text = tail.join('\n');
+    final fenced = !text.contains('```');
+    elements.add({
+      'tag': 'div',
+      'text': {
+        'tag': fenced ? 'lark_md' : 'plain_text',
+        'content': fenced ? '```\n$text\n```' : text,
+      },
+    });
+  }
+  return feishuCard(
+    title: '${success ? 'Task finished' : 'Task failed'}$where',
+    template: success ? 'green' : 'red',
+    elements: elements,
+  );
+}
+
 /// The toast shown when a card button is pressed (the callback
 /// response body — it reaches the user as a popup on the card).
 Map<String, dynamic> cardToast(String content, {String type = 'success'}) =>

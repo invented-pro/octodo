@@ -494,7 +494,14 @@ class FeishuIntegration {
     // 5. `/help` — what this chat can do. Read-only: it answers for
     //    everyone whitelisted.
     if (event.text == '/help') {
-      unawaited(api.sendText(event.chatId, _helpText()).catchError((_) {}));
+      unawaited(() async {
+        try {
+          await api.sendCard(event.chatId, helpCard());
+        } catch (e) {
+          _log.warning('feishu: help card failed ($e)');
+          await api.sendText(event.chatId, _helpText()).catchError((_) {});
+        }
+      }());
       return;
     }
 
@@ -900,7 +907,26 @@ class FeishuIntegration {
         lines.add('The bound pane is gone — /attach <ws>.<pane>[.<tab>] again.');
       }
     }
-    await api.sendText(chatId, lines.join('\n')).catchError((_) {});
+    // Vivid: the tree keeps its alignment in a plain-text card body,
+    // the target line bold above it. Text fallback keeps every line.
+    final text = lines.join('\n');
+    try {
+      final targetLine =
+          lines.firstWhere((l) => l.startsWith('Target: '), orElse: () => '');
+      await api.sendCard(
+          chatId,
+          statusCard(
+            target: targetLine.isEmpty
+                ? ''
+                : targetLine.substring('Target: '.length),
+            body: lines
+                .where((l) => !l.startsWith('Target: '))
+                .join('\n'),
+          ));
+    } catch (e) {
+      _log.warning('feishu: status card failed ($e)');
+      await api.sendText(chatId, text).catchError((_) {});
+    }
   }
 
   /// The name of the workspace with [id], or null when unknown.
@@ -918,6 +944,11 @@ class FeishuIntegration {
   /// itself is skipped: commands sent from here already answer
   /// through the output capture, and this must not double-send.
   void _onTaskResult(FeishuTaskResult result) {
+    unawaited(_deliverTaskResult(result));
+  }
+
+  /// The async body of [_onTaskResult] — card sends await.
+  Future<void> _deliverTaskResult(FeishuTaskResult result) async {
     if (!_running) return;
     for (final binding in _bindings.values) {
       if (binding.workspaceId != result.workspaceId) continue;
@@ -938,13 +969,28 @@ class FeishuIntegration {
               result.workspaceId, result.surfaceId) ??
           const <String>[];
       final tail = _trimBlank(lines);
-      final body = [
-        '$mark ${address == null ? '' : '[$address] '}'
-            '${title == null || title.isEmpty ? 'tab' : title} — '
-            'task finished (exit ${rc ?? '?'}, took $took)',
-        ...tail,
-      ].join('\n');
-      unawaited(_sendReply(binding.chatId, body).catchError((_) {}));
+      try {
+        await api.sendCard(
+          binding.chatId,
+          taskResultCard(
+            success: rc == null || rc == 0,
+            address: address,
+            title: title ?? '',
+            exitCode: rc,
+            took: took,
+            tail: tail,
+          ),
+        );
+      } catch (e) {
+        _log.warning('feishu: task card failed ($e)');
+        final text = [
+          '$mark ${address == null ? '' : '[$address] '}'
+              '${title == null || title.isEmpty ? 'tab' : title} — '
+              'task finished (exit ${rc ?? '?'}, took $took)',
+          ...tail,
+        ].join('\n');
+        unawaited(_sendReply(binding.chatId, text).catchError((_) {}));
+      }
     }
   }
 
