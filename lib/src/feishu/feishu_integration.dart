@@ -1065,7 +1065,8 @@ class FeishuIntegration {
         lines.add('The bound pane is gone — /attach <ws>.<pane>[.<tab>] again.');
       }
 
-      lines.add('Tip: /attach 1.2.3 to switch');
+      lines.add('');
+      lines.add('Tip: /attach workspace.pane.tab to switch');
     }
 
     // Vivid: the blocks keep their alignment in a plain-text card

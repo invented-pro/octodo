@@ -1296,7 +1296,7 @@ void main() {
     expect(reply, contains('▸ 1.1.1'));
     expect(reply, contains('1.1.2\n  two'));
     expect(reply, contains('The bound pane is gone'));
-    expect(reply, contains('Tip: /attach 1.2.3 to switch'));
+    expect(reply, contains('\nTip: /attach workspace.pane.tab to switch'));
   });
 
   test('/newtab opens a tab in the bound pane and re-binds to it',
@@ -1797,7 +1797,7 @@ void main() {
     expect(reply, contains('1.1.1\n  pwsh'));
     // Empty pane 2 produces no block; the reminder is the last line.
     expect(reply, isNot(contains('\n2.1')));
-    expect(reply, contains('Tip: /attach 1.2.3 to switch'));
+    expect(reply, contains('Tip: /attach workspace.pane.tab to switch'));
     // The headline is bold in its own div.
     expect(cards.single['header']['title']['content'], 'Now driving');
     expect(reply, contains('**Following 1.1.2 "opencode"'));
