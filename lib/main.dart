@@ -1814,18 +1814,18 @@ class _WorkspaceDrawer extends StatelessWidget {
         ),
         if (dot != null)
           Positioned(
-            right: -2.5,
-            top: -2.5,
+            right: -3,
+            top: -3,
             child: Container(
-              width: 6,
-              height: 6,
+              width: 8,
+              height: 8,
               decoration: BoxDecoration(
                 color: dot,
                 shape: BoxShape.circle,
                 // The drawer surface lifts the dot off the glyph.
                 border: Border.all(
                   color: palette.drawerSurface,
-                  width: 1,
+                  width: 1.5,
                 ),
               ),
             ),
