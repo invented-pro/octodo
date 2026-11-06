@@ -1,16 +1,18 @@
-// The Feishu panel — a standalone dialog (opened from the drawer,
-// below the "New workspace" button) that owns everything Feishu:
-// the master toggle and the QR-binding card. Kept out of the
-// Settings dialog deliberately: the binding is an account-level
-// connection flow, not a preferences row.
+// The Mobile App panel — a standalone dialog (opened from the
+// drawer, below the "New workspace" button) covering the mobile-app
+// integrations. Feishu is the first; more are planned, so each app
+// renders as its own card and the dialog chrome stays app-neutral.
 //
-// Binding states map 1:1 to [FeishuBindingFlow] phases:
+// Feishu binding states map 1:1 to [FeishuBindingFlow] phases:
 //
 //   idle            → "Connect Feishu…" button + explainer
 //   requestingCode  → progress spinner
 //   waitingForScan  → QR dialog (auto-opened, countdown)
 //   connected       → bound-app summary + Unbind
 //   expired/failed  → reason + Retry
+//
+// Remote control is always on once a bot is bound (credentials are
+// the only gate) — shown as a description row, not a switch.
 
 import 'dart:async';
 
@@ -20,12 +22,10 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import '../../src/feishu/feishu_binding_flow.dart';
-import '../../src/settings/settings_runtime.dart';
 import '../../src/theme/palette_context.dart';
 import '../../src/theme/palettes.dart';
 import '../settings/chrome/settings_card.dart';
 import '../settings/chrome/settings_row.dart';
-import '../settings/widgets/trailing_widgets.dart';
 
 /// The official Lark/Feishu bird mark (ByteDance IconPark outline
 /// variant) as a monochrome asset tinted to [color].
@@ -48,14 +48,14 @@ class FeishuBrandIcon extends StatelessWidget {
   }
 }
 
-class FeishuPanel extends StatefulWidget {
-  const FeishuPanel({super.key});
+class MobileAppsPanel extends StatefulWidget {
+  const MobileAppsPanel({super.key});
 
   @override
-  State<FeishuPanel> createState() => _FeishuPanelState();
+  State<MobileAppsPanel> createState() => _MobileAppsPanelState();
 }
 
-class _FeishuPanelState extends State<FeishuPanel> {
+class _MobileAppsPanelState extends State<MobileAppsPanel> {
   late final FeishuBindingFlow _flow = FeishuBindingFlow.shared;
   void _onFlowChanged() {
     if (!mounted) return;
@@ -99,7 +99,6 @@ class _FeishuPanelState extends State<FeishuPanel> {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
-    final catalog = SettingsRuntime.instance.catalog;
     return Dialog(
       child: SizedBox(
         width: 560,
@@ -114,22 +113,24 @@ class _FeishuPanelState extends State<FeishuPanel> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Feishu — the first mobile app. The whole
+                    // binding lifecycle lives in this one card;
+                    // future apps get their own card beside it.
                     SettingsCard(
                       children: [
-                        SettingsCardRow(
-                          jsonKey: catalog.feishu.enabled.key,
-                          title: catalog.feishu.enabled.title,
-                          subtitle: catalog.feishu.enabled.subtitle,
-                          leadingIcon: catalog.feishu.enabled.icon,
-                          trailing: BoolToggleTrailing(
-                            setting: catalog.feishu.enabled,
-                            store: SettingsRuntime.instance.store,
-                          ),
-                        ),
+                        _bindingCard(palette),
+                        _alwaysOnRow(palette),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    SettingsCard(children: [_bindingCard(palette)]),
+                    const SizedBox(height: 12),
+                    Text(
+                      'More mobile apps are coming soon.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: palette.textMuted,
+                        fontSize: 11,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -137,6 +138,19 @@ class _FeishuPanelState extends State<FeishuPanel> {
           ],
         ),
       ),
+    );
+  }
+
+  /// Remote control has no switch: the binding is the gate. Stated
+  /// as a description so the card never implies an off state.
+  Widget _alwaysOnRow(ThemePalette palette) {
+    return SettingsCardRow(
+      leadingIcon: Icons.bolt_outlined,
+      title: 'Remote control is always on',
+      subtitle:
+          'Once a bot is bound, whitelisted chats drive this '
+          "app's terminals — there is no switch.",
+      trailing: const SizedBox.shrink(),
     );
   }
 
@@ -160,13 +174,29 @@ class _FeishuPanelState extends State<FeishuPanel> {
     );
   }
 
+  /// The Feishu brand mark as a row leading widget.
+  Widget _brandLeading(ThemePalette palette) {
+    return Container(
+      width: 26,
+      height: 26,
+      decoration: BoxDecoration(
+        color: palette.accentBlue.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Center(
+        child: FeishuBrandIcon(color: palette.accentBlue, size: 14),
+      ),
+    );
+  }
+
   Widget _idleRow(ThemePalette palette) {
     return SettingsCardRow(
-      leadingIcon: Icons.qr_code_2,
-      title: 'No bot bound',
+      leading: _brandLeading(palette),
+      title: 'Feishu',
       subtitle:
-          'Scan once with Feishu to create a private bot app with the '
-          'permissions Octodo needs. Credentials stay on this machine.',
+          'Not connected. Scan once with Feishu to create a private bot '
+          'app with the permissions Octodo needs. Credentials stay on '
+          'this machine.',
       trailing: FilledButton.icon(
         onPressed: () => _flow.start(),
         icon: const Icon(Icons.link, size: 16),
@@ -177,9 +207,10 @@ class _FeishuPanelState extends State<FeishuPanel> {
 
   Widget _inProgressRow(ThemePalette palette) {
     return SettingsCardRow(
-      leadingIcon: Icons.qr_code_2,
-      title: 'Starting QR binding…',
-      subtitle: 'Contacting the Feishu accounts service for a device code.',
+      leading: _brandLeading(palette),
+      title: 'Feishu',
+      subtitle: 'Starting QR binding — contacting the Feishu accounts '
+          'service for a device code.',
       trailing: const SizedBox(
         width: 18,
         height: 18,
@@ -194,10 +225,11 @@ class _FeishuPanelState extends State<FeishuPanel> {
         ? 'Feishu'
         : (creds.isLark ? 'Lark' : 'Feishu');
     return SettingsCardRow(
-      leadingIcon: Icons.verified_outlined,
-      title: 'Bound to ${creds?.appIdPreview ?? 'app'}',
+      leading: _brandLeading(palette),
+      title: 'Feishu · Connected',
       subtitle:
-          '$brand bot created ${creds == null ? '' : _formatBoundAt(creds.boundAt)}. '
+          'Bound to ${creds?.appIdPreview ?? 'app'}, created '
+          '${creds == null ? '' : _formatBoundAt(creds.boundAt)}. '
           'Message the bot in $brand to run commands here.',
       trailing: OutlinedButton(
         onPressed: () => _flow.unbind(),
@@ -209,8 +241,8 @@ class _FeishuPanelState extends State<FeishuPanel> {
   Widget _terminalRow(ThemePalette palette) {
     final expired = _flow.phase == FeishuBindingPhase.expired;
     return SettingsCardRow(
-      leadingIcon: expired ? Icons.timer_off_outlined : Icons.error_outline,
-      title: expired ? 'QR code expired' : 'Binding failed',
+      leading: _brandLeading(palette),
+      title: expired ? 'Feishu · QR code expired' : 'Feishu · Binding failed',
       subtitle: _flow.errorMessage ?? 'Try again.',
       trailing: expired
           ? FilledButton.icon(
@@ -262,15 +294,12 @@ class _Header extends StatelessWidget {
               borderRadius: BorderRadius.circular(6),
             ),
             child: Center(
-              child: FeishuBrandIcon(
-                color: palette.accentBlue,
-                size: 15,
-              ),
+              child: Icon(Icons.smartphone, size: 16, color: palette.accentBlue),
             ),
           ),
           const SizedBox(width: 10),
           Text(
-            'Feishu',
+            'Mobile App Access',
             style: TextStyle(
               color: palette.textPrimary,
               fontSize: 14,
@@ -423,10 +452,10 @@ class _FeishuQrDialogState extends State<_FeishuQrDialog> {
 
 // ── Show the panel ─────────────────────────────────────────────────
 
-Future<void> showFeishuPanel(BuildContext context) {
+Future<void> showMobileAppsPanel(BuildContext context) {
   return showDialog<void>(
     context: context,
     barrierColor: Colors.black.withValues(alpha: 0.5),
-    builder: (_) => const FeishuPanel(),
+    builder: (_) => const MobileAppsPanel(),
   );
 }

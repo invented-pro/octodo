@@ -39,7 +39,6 @@ class SettingsCatalog {
   final terminal = TerminalSettingsSection();
   final shortcuts = ShortcutSettingsSection();
   final update = UpdateSettingsSection();
-  final feishu = FeishuSettingsSection();
 
   /// All settings in declaration order. Used by the settings UI
   /// to build the section list and by the schema validator.
@@ -48,7 +47,6 @@ class SettingsCatalog {
     yield* terminal.all;
     yield* shortcuts.all;
     yield* update.all;
-    yield* feishu.all;
   }
 }
 
@@ -414,26 +412,5 @@ class UpdateSettingsSection {
     yield autoCheck;
     yield repository;
     yield fallbackUrl;
-  }
-}
-
-/// Remote control via a Feishu (Lark) bot — the QR-binding
-/// integration under `lib/src/feishu/`. The toggle is the master
-/// switch for the runtime (phase 2: gates the WebSocket event
-/// channel); binding / unbinding credentials is owned by the
-/// Feishu settings section UI, not by this catalog entry.
-class FeishuSettingsSection {
-  final enabled = BoolSetting(
-    'feishu.enabled',
-    defaultValue: false,
-    title: 'Feishu remote control',
-    subtitle:
-        'Bind a Feishu (Lark) bot by scanning a QR code, then chat with it '
-        'to run commands in this workspace from your phone.',
-    icon: Icons.forum_outlined,
-  );
-
-  Iterable<Setting<dynamic>> get all sync* {
-    yield enabled;
   }
 }

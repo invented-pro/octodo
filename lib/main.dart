@@ -598,22 +598,16 @@ class _AppShellState extends State<AppShell>
   }
 
   /// Wire the Feishu remote control: create the integration with a
-  /// bridge into the active workspace's focused terminal, sync it
-  /// with the settings toggle + stored credentials, and re-sync
-  /// when either changes (a QR bind/unbind flips the credentials on
-  /// disk; the toggle flips the master switch).
+  /// bridge into the active workspace's focused terminal, and sync it
+  /// with the stored credentials (and re-sync when a QR bind/unbind
+  /// flips the credentials on disk). Remote control is always on —
+  /// the binding is the only gate.
   void _initFeishuIntegration() {
     final bridge = _AppShellFeishuBridge(this);
     _feishuBridge = bridge;
     final integration = FeishuIntegration(bridge: bridge);
     _feishu = integration;
-    unawaited(integration.sync(
-      enabled: SettingsRuntime.instance.store
-          .get<bool>(SettingsRuntime.instance.catalog.feishu.enabled),
-    ));
-    _feishuEnabledSub = SettingsRuntime.instance.store
-        .watch<bool>(SettingsRuntime.instance.catalog.feishu.enabled)
-        .listen((enabled) => unawaited(integration.sync(enabled: enabled)));
+    unawaited(integration.sync());
     FeishuBindingFlow.shared.addListener(_onFeishuFlowChanged);
   }
 
@@ -624,10 +618,7 @@ class _AppShellState extends State<AppShell>
     // store and starts/stops the channel accordingly.
     if (phase == FeishuBindingPhase.connected ||
         phase == FeishuBindingPhase.idle) {
-      unawaited(_feishu?.sync(
-        enabled: SettingsRuntime.instance.store
-            .get<bool>(SettingsRuntime.instance.catalog.feishu.enabled),
-      ));
+      unawaited(_feishu?.sync());
     }
   }
 
@@ -922,7 +913,6 @@ class _AppShellState extends State<AppShell>
   /// The bridge created in [_initFeishuIntegration] — the task-result
   /// sink lives on it (see the workspace `onAttention` callback).
   _AppShellFeishuBridge? _feishuBridge;
-  StreamSubscription<bool>? _feishuEnabledSub;
 
   /// Install in [initState]; uninstall in [dispose].
   void _installEarlyKeyHandler() {
@@ -1556,7 +1546,6 @@ class _AppShellState extends State<AppShell>
   @override
   void dispose() {
     _shortcutsEnabledSub?.cancel();
-    _feishuEnabledSub?.cancel();
     FeishuBindingFlow.shared.removeListener(_onFeishuFlowChanged);
     _feishu?.dispose();
     _notificationsEnabledSub?.cancel();
@@ -1621,7 +1610,7 @@ class _AppShellState extends State<AppShell>
               onAcceptReorder: _reorderWorkspaceById,
               updateModel: _updateModel,
               updateController: _updateController,
-              onOpenFeishu: () => showFeishuPanel(context),
+              onOpenMobileApp: () => showMobileAppsPanel(context),
             ),
             // ── Active workspace content ──────────────────────
             Expanded(
@@ -1756,8 +1745,10 @@ class _WorkspaceDrawer extends StatelessWidget {
   final UpdateStateModel updateModel;
   final UpdateController updateController;
 
-  /// Opens the Feishu panel (drawer button below "New workspace").
-  final VoidCallback onOpenFeishu;
+  /// Opens the Mobile App panel (drawer button below "New
+  /// workspace") — the hub for the mobile-app integrations, Feishu
+  /// being the first.
+  final VoidCallback onOpenMobileApp;
 
   const _WorkspaceDrawer({
     required this.workspaces,
@@ -1772,7 +1763,7 @@ class _WorkspaceDrawer extends StatelessWidget {
     required this.onAcceptReorder,
     required this.updateModel,
     required this.updateController,
-    required this.onOpenFeishu,
+    required this.onOpenMobileApp,
   });
 
   static const double _expandedWidth = 200;
@@ -1894,16 +1885,17 @@ class _WorkspaceDrawer extends StatelessWidget {
               ),
             ),
           ),
-          // Feishu entry below the New Workspace button — opens the
-          // standalone Feishu panel (QR binding + master toggle).
-          // Styled after the Settings button, but with the official
-          // bird mark instead of a Material glyph.
+          // Mobile App entry below the New Workspace button — opens
+          // the Mobile App panel (Feishu binding + future apps).
+          // Styled after the Settings button, with a phone glyph:
+          // Feishu is the first mobile app, not the identity of the
+          // whole entry.
           MouseRegion(
             cursor: SystemMouseCursors.click,
             child: GestureDetector(
-              onTap: onOpenFeishu,
+              onTap: onOpenMobileApp,
               child: Tooltip(
-                message: 'Feishu',
+                message: 'Mobile App',
                 child: Container(
                   height: 28,
                   margin: const EdgeInsets.fromLTRB(4, 0, 4, 4),
@@ -1915,7 +1907,8 @@ class _WorkspaceDrawer extends StatelessWidget {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      FeishuBrandIcon(
+                      Icon(
+                        Icons.smartphone,
                         size: 14,
                         color: palette.brightness == Brightness.dark
                             ? palette.textMuted
@@ -1924,7 +1917,7 @@ class _WorkspaceDrawer extends StatelessWidget {
                       if (!collapsed) ...[
                         const SizedBox(width: 6),
                         Text(
-                          'Feishu',
+                          'Mobile App',
                           style: TextStyle(
                             fontSize: 11,
                             color: palette.textSecondary,

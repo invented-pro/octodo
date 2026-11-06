@@ -25,6 +25,7 @@ import 'feishu_binding.dart';
 import 'feishu_cards.dart';
 import 'feishu_credentials.dart';
 import 'feishu_event_channel.dart';
+import 'feishu_greetings.dart';
 import 'feishu_ws_channel.dart';
 import 'opencode_client.dart';
 
@@ -314,6 +315,11 @@ class FeishuIntegration {
   final FeishuApprovalStore approvalStore;
   final Map<String, FeishuApproval> _approvals = {};
 
+  /// Chats already greeted — the `/help` card goes out on a chat's
+  /// first message, once ever (persisted so restarts stay quiet).
+  final FeishuGreetingStore greetingStore;
+  final Set<String> _greeted = {};
+
   FeishuIntegration({
     required this.bridge,
     FeishuEventChannel? channel,
@@ -321,6 +327,7 @@ class FeishuIntegration {
     FeishuCredentialStore? credentialStore,
     FeishuBindingStore? bindingStore,
     FeishuApprovalStore? approvalStore,
+    FeishuGreetingStore? greetingStore,
     this.outputWindow = _kOutputWindowDefault,
     this.maxOutputWindow = _kOutputMaxWindowDefault,
     OpencodeGateway? opencode,
@@ -330,7 +337,8 @@ class FeishuIntegration {
         credentialStore =
             credentialStore ?? FeishuCredentialStore.resolve(),
         bindingStore = bindingStore ?? FeishuBindingStore.resolve(),
-        approvalStore = approvalStore ?? FeishuApprovalStore.resolve();
+        approvalStore = approvalStore ?? FeishuApprovalStore.resolve(),
+        greetingStore = greetingStore ?? FeishuGreetingStore.resolve();
 
   static FeishuIntegration? _instance;
 
@@ -343,15 +351,15 @@ class FeishuIntegration {
       _instance = value;
 
   /// Re-read credentials and (re)start or stop the channel. Called
-  /// at app start, on settings/credential changes, and after a QR
-  /// (un)bind. [enabled] is the `feishu.enabled` setting.
-  Future<void> sync({required bool enabled}) async {
+  /// at app start and after a QR (un)bind. Remote control is always
+  /// on — the only gate is whether a bot is bound.
+  Future<void> sync() async {
     _credentials = await credentialStore.load();
     // Decision trace: a stop/start in the field log is only
     // attributable if we can see what sync decided and why.
-    _log.info('feishu: sync enabled=$enabled '
-        'bound=${_credentials != null} running=$_running');
-    if (!enabled || _credentials == null) {
+    _log.info('feishu: sync bound=${_credentials != null} '
+        'running=$_running');
+    if (_credentials == null) {
       await _stop();
       return;
     }
@@ -379,6 +387,7 @@ class FeishuIntegration {
     bridge.watchTaskResults(_onTaskResult);
     await _loadBindings();
     await _loadApprovals();
+    await _loadGreetings();
     await channel.start(creds);
     _log.info('feishu: integration started for ${creds.appIdPreview}');
   }
@@ -415,6 +424,33 @@ class FeishuIntegration {
   /// Persist the approval grants (best effort).
   Future<void> _saveApprovals() async {
     await approvalStore.save(_approvals);
+  }
+
+  /// Read the greeted chats (best effort — see the store).
+  Future<void> _loadGreetings() async {
+    final loaded = await greetingStore.load();
+    _greeted
+      ..clear()
+      ..addAll(loaded);
+    if (loaded.isNotEmpty) {
+      _log.info('feishu: ${loaded.length} greeted chat(s) restored');
+    }
+  }
+
+  /// Persist the greeted chats (best effort).
+  Future<void> _saveGreetings() async {
+    await greetingStore.save(_greeted);
+  }
+
+  /// The `/help` card — what this chat can do. Falls back to the
+  /// plain-text listing when the API rejects the card.
+  Future<void> _sendHelp(String chatId) async {
+    try {
+      await api.sendCard(chatId, helpCard());
+    } catch (e) {
+      _log.warning('feishu: help card failed ($e)');
+      await api.sendText(chatId, _helpText()).catchError((_) {});
+    }
   }
 
   String? _boundAppId;
@@ -475,6 +511,16 @@ class FeishuIntegration {
     // 4. Text only; empty text (stickers etc.) is ignored.
     if (event.text.isEmpty) return;
 
+    // 4a. First message from this chat, ever — introduce the surface
+    //     before answering (the answer still flows below). Persisted,
+    //     so each chat sees the /help card exactly once. A stranger's
+    //     first message never reaches here (dropped above, silently).
+    if (!_greeted.contains(event.chatId)) {
+      _greeted.add(event.chatId);
+      unawaited(_saveGreetings());
+      unawaited(_sendHelp(event.chatId));
+    }
+
     // The workspace this chat drives: its own binding, or the active
     // workspace when it has none (design doc §3.2 — before the user
     // picks one, the binding follows the active workspace).
@@ -494,14 +540,7 @@ class FeishuIntegration {
     // 5. `/help` — what this chat can do. Read-only: it answers for
     //    everyone whitelisted.
     if (event.text == '/help') {
-      unawaited(() async {
-        try {
-          await api.sendCard(event.chatId, helpCard());
-        } catch (e) {
-          _log.warning('feishu: help card failed ($e)');
-          await api.sendText(event.chatId, _helpText()).catchError((_) {});
-        }
-      }());
+      unawaited(_sendHelp(event.chatId));
       return;
     }
 

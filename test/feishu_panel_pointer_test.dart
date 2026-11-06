@@ -33,7 +33,6 @@ import 'package:octodo/src/settings/settings_store.dart';
 import 'package:octodo/src/theme/app_theme.dart';
 import 'package:octodo/src/theme/palettes.dart';
 import 'package:octodo/ui/feishu/feishu_panel.dart';
-
 class _StubClient implements FeishuDeviceFlowClient {
   @override
   final Duration requestTimeout = const Duration(seconds: 5);
@@ -128,7 +127,7 @@ void main() {
 
     await tester.pumpWidget(MaterialApp(
       theme: buildAppTheme(palette: AppPalettes.byId('catppuccin-mocha')),
-      home: const Scaffold(body: Center(child: FeishuPanel())),
+      home: const Scaffold(body: Center(child: MobileAppsPanel())),
     ));
 
     // Click "Connect Feishu…".

@@ -13,6 +13,7 @@ import 'package:octodo/src/feishu/feishu_approval.dart';
 import 'package:octodo/src/feishu/feishu_binding.dart';
 import 'package:octodo/src/feishu/feishu_credentials.dart';
 import 'package:octodo/src/feishu/feishu_event_channel.dart';
+import 'package:octodo/src/feishu/feishu_greetings.dart';
 import 'package:octodo/src/feishu/feishu_integration.dart';
 import 'package:octodo/src/feishu/opencode_client.dart';
 
@@ -301,7 +302,7 @@ FeishuCredentials _ownerCreds({List<String> allowed = const ['ou_owner']}) =>
     );
 
 void main() {
-  test('sync starts the channel only when enabled and bound', () async {
+  test('sync starts the channel when bound, stops when unbound', () async {
     final dir = Directory.systemTemp.createTempSync('feishu_int');
     addTearDown(() => dir.deleteSync(recursive: true));
     final store = FeishuCredentialStore(
@@ -314,16 +315,95 @@ void main() {
       credentialStore: store,
     );
 
-    await integration.sync(enabled: false);
+    // No binding → nothing runs (credentials are the only gate).
+    await integration.sync();
     expect(channel.startCalls, 0);
 
     await store.save(_ownerCreds());
-    await integration.sync(enabled: true);
+    await integration.sync();
     expect(channel.startCalls, 1);
     expect(channel.startedWith!.appId, 'cli_x');
 
-    await integration.sync(enabled: false);
+    // Unbind (credentials deleted) → the channel stops.
+    await store.delete();
+    await integration.sync();
     expect(channel.stopCalls, 1);
+  });
+
+  test('a chat is greeted with the /help card on its first message '
+      'only', () async {
+    final cards = <Map<String, dynamic>>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: _RecordingBridge(),
+      onCard: (_, card) => cards.add(card),
+      greeted: {},
+    );
+    final t = DateTime.now().millisecondsSinceEpoch;
+
+    // First message: the help card goes out (before the command's
+    // own answer).
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_first',
+      text: '/status',
+      createTime: t,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(cards, hasLength(2), reason: 'greeting + the /status answer');
+    expect(cardText(cards.first), contains('/status'),
+        reason: 'the greeting is the help card');
+
+    // Second message: no second greeting.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_second',
+      text: '/status',
+      createTime: t,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(cards, hasLength(3), reason: 'only the /status answer');
+
+    // After a restart (a fresh router loading the persisted greeted
+    // set) the chat is not re-greeted.
+    final afterRestart = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: _RecordingBridge(),
+      onCard: (_, card) => cards.add(card),
+      greeted: {'oc_chat'},
+    );
+    afterRestart.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_after_restart',
+      text: '/status',
+      createTime: t,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(cards, hasLength(4),
+        reason: 'only the /status answer, no re-greet after restart');
+  });
+
+  test('a stranger never triggers a greeting — silence', () async {
+    final cards = <Map<String, dynamic>>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: _RecordingBridge(),
+      onCard: (_, card) => cards.add(card),
+      greeted: {},
+    );
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_stranger',
+      chatId: 'oc_new',
+      messageId: 'om_stranger',
+      text: 'hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(cards, isEmpty,
+        reason: 'unlisted senders are dropped silently — no greeting');
   });
 
   test('unlisted senders are dropped silently', () async {
@@ -2101,6 +2181,11 @@ Future<FeishuIntegration> _routerFor({
   void Function(File approvalFile)? approvalFileOut,
   File? bindingFile,
   Map<String, FeishuChatBinding>? seedBindings,
+
+  /// Chats already greeted. Defaults to the standard test chat so
+  /// existing tests don't get a surprise /help card on their first
+  /// message; the greeting test passes an empty set.
+  Set<String>? greeted,
   Duration outputWindow = const Duration(seconds: 5),
   Duration maxOutputWindow = const Duration(minutes: 5),
   OpencodeGateway? gateway,
@@ -2122,6 +2207,10 @@ Future<FeishuIntegration> _routerFor({
     await FeishuBindingStore(bindingStoreFile).save(seedBindings);
   }
 
+  final greetingFile = File('${dir.path}${Platform.pathSeparator}g.json');
+  await FeishuGreetingStore(greetingFile)
+      .save(greeted ?? {'oc_chat'});
+
   final api = _RecordingApiClient(onSend ?? (_, _) {},
       onImage: onImage, onCard: onCard, onUpdateCard: onUpdateCard);
   final integration = FeishuIntegration(
@@ -2131,12 +2220,13 @@ Future<FeishuIntegration> _routerFor({
     credentialStore: store,
     bindingStore: FeishuBindingStore(bindingStoreFile),
     approvalStore: FeishuApprovalStore(approvalFile),
+    greetingStore: FeishuGreetingStore(greetingFile),
     outputWindow: outputWindow,
     maxOutputWindow: maxOutputWindow,
     opencode: gateway ?? _FakeGateway(),
   );
   // Load the credentials written above so the whitelist is active.
-  await integration.sync(enabled: true);
+  await integration.sync();
   return integration;
 }
 

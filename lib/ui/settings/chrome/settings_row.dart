@@ -17,6 +17,10 @@ class SettingsCardRow extends StatelessWidget {
   final String title;
   final String? subtitle;
   final IconData? leadingIcon;
+
+  /// A custom leading widget (e.g. a brand mark) — wins over
+  /// [leadingIcon] when both are given.
+  final Widget? leading;
   final Widget trailing;
   final GlobalKey? rowKey;
   final bool showJsonPaths;
@@ -34,6 +38,7 @@ class SettingsCardRow extends StatelessWidget {
     required this.title,
     this.subtitle,
     this.leadingIcon,
+    this.leading,
     required this.trailing,
     this.showJsonPaths = false,
     this.onTap,
@@ -52,7 +57,10 @@ class SettingsCardRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          if (leadingIcon != null) ...[
+          if (leading != null) ...[
+            leading!,
+            const SizedBox(width: 12),
+          ] else if (leadingIcon != null) ...[
             Icon(leadingIcon, size: 16, color: palette.accentBlue),
             const SizedBox(width: 12),
           ],
