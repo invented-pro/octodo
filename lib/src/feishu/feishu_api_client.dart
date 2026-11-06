@@ -194,6 +194,42 @@ class FeishuApiClient {
     await _sendMessage(chatId, 'interactive', jsonEncode(card));
   }
 
+  /// Deferred card update (design doc §1.2, mode B): replace the card
+  /// a callback [token] points at with the full [card] JSON. The
+  /// token arrives on every `card.action.trigger`; it is valid for
+  /// 30 minutes and usable at most twice — and the call must happen
+  /// *after* the callback response, never in parallel.
+  Future<void> updateCard({
+    required String token,
+    required Map<String, dynamic> card,
+  }) async {
+    var access = await _tenantAccessToken();
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final response = await _http
+          .post(
+            Uri.parse('$_domain/open-apis/interactive/v1/card/update'),
+            headers: {
+              'authorization': 'Bearer $access',
+              'content-type': 'application/json; charset=utf-8',
+            },
+            body: jsonEncode({'token': token, 'card': card}),
+          )
+          .timeout(const Duration(seconds: 30));
+      final body = _decode(response);
+      final code = (body['code'] as num?)?.toInt() ?? -1;
+      if (code == 0) return;
+      // Token expired / invalid → refresh once and retry.
+      if (attempt == 0 &&
+          (code == 99991663 || code == 99991661 || code == 99991668)) {
+        _token = null;
+        access = await _tenantAccessToken();
+        continue;
+      }
+      _log.warning('feishu: card update failed: $code ${body['msg']}');
+      throw FeishuApiException(code, '${body['msg']}');
+    }
+  }
+
   Future<void> _sendMessage(String chatId, String msgType, String content) async {
     var token = await _tenantAccessToken();
     for (var attempt = 0; attempt < 2; attempt++) {

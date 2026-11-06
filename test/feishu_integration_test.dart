@@ -9,6 +9,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:octodo/src/feishu/feishu_api_client.dart';
+import 'package:octodo/src/feishu/feishu_approval.dart';
 import 'package:octodo/src/feishu/feishu_binding.dart';
 import 'package:octodo/src/feishu/feishu_credentials.dart';
 import 'package:octodo/src/feishu/feishu_event_channel.dart';
@@ -758,7 +759,8 @@ void main() {
 
   // ── Phase 2: cards, bindings, confirmations ────────────────────
 
-  test('a long output is paginated with a pager card', () async {
+  test('a long output is one pager card, pages replace it in place',
+      () async {
     final bridge = _RecordingBridge();
     final sent = <(String, String)>[];
     final cards = <Map<String, dynamic>>[];
@@ -786,26 +788,44 @@ void main() {
     bridge.outputController.add(utf8.encode('PS C:\\Users\\Sun> '));
     await Future<void>.delayed(const Duration(milliseconds: 120));
 
-    expect(sent.length, 1, reason: 'the first page goes out as text');
-    expect(cards.length, 1, reason: 'and a pager card offers the rest');
-    final elements = (cards.single['body'] as Map)['elements'] as List;
-    final action = elements.firstWhere((e) => (e as Map)['tag'] == 'action');
-    final buttons = (action as Map)['actions'] as List;
+    expect(sent, isEmpty,
+        reason: 'the output lives in the card, not in chat messages');
+    expect(cards.length, 1, reason: 'one pager card carries page 1');
+    final body = cards.single['body'] as Map;
+    final pageDiv = (body['elements'] as List)
+        .firstWhere((e) => (e as Map)['tag'] == 'div') as Map;
+    expect((pageDiv['text'] as Map)['tag'], 'plain_text',
+        reason: 'terminal output is plain text (§2.1)');
+    final pageOne = (pageDiv['text'] as Map)['content'] as String;
+    expect(cards.single['config']['update_multi'], isTrue,
+        reason: 'the card must be re-updatable in place');
+
+    final action = (body['elements'] as List)
+        .firstWhere((e) => (e as Map)['tag'] == 'action') as Map;
+    final buttons = (action)['actions'] as List;
     final nextValue = ((buttons.first as Map)['value']) as Map<String, dynamic>;
     expect(nextValue['a'], 'page');
     expect(nextValue['p'], '1');
 
-    // The user taps "Next": the second page goes out.
-    await channel.handler!(FeishuCardActionEvent(
+    // The user taps "Next": the card is replaced in place (mode A) —
+    // the chat gains no new message.
+    final answer = await channel.handler!(FeishuCardActionEvent(
       operatorOpenId: 'ou_owner',
       chatId: 'oc_chat',
       messageId: 'om_card',
       token: 'c-1',
       value: nextValue,
     ));
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-    expect(sent.length, 2);
-    expect(sent.last.$2, isNot(sent.first.$2));
+    expect(sent, isEmpty);
+    final card = answer!['card'] as Map;
+    expect(card['type'], 'raw');
+    final updated = card['data'] as Map;
+    expect(updated['header']['subtitle']['content'], 'page 2 / 2');
+    final updatedDiv = ((updated['body'] as Map)['elements'] as List)
+        .firstWhere((e) => (e as Map)['tag'] == 'div') as Map;
+    final pageTwo = (updatedDiv['text'] as Map)['content'] as String;
+    expect(pageTwo, isNot(pageOne),
+        reason: 'the card now shows a different chunk of the output');
   });
 
   test('/status reports the workspace, its panes and the focused tab',
@@ -1042,12 +1062,14 @@ void main() {
   test('a dangerous command waits for the confirmation card', () async {
     final bridge = _RecordingBridge();
     final cards = <Map<String, dynamic>>[];
+    final updates = <(String, Map<String, dynamic>)>[];
     final channel = _FakeChannel();
     final integration = await _routerFor(
       creds: _ownerCreds(),
       bridge: bridge,
       channel: channel,
       onCard: (_, card) => cards.add(card),
+      onUpdateCard: (token, card) => updates.add((token, card)),
     );
 
     integration.handleEvent(FeishuInboundEvent(
@@ -1065,10 +1087,14 @@ void main() {
     final elements = (cards.single['body'] as Map)['elements'] as List;
     final action = elements.firstWhere((e) => (e as Map)['tag'] == 'action');
     final buttons = (action as Map)['actions'] as List;
+    expect(buttons.length, 3, reason: 'run once / always / cancel (§4.1)');
     final runValue = ((buttons.first as Map)['value']) as Map<String, dynamic>;
     expect(runValue['a'], 'confirm');
+    expect(runValue['d'], 'once');
+    expect(((buttons[1] as Map)['value'])['d'], 'always');
+    expect(((buttons.last as Map)['value'])['a'], 'cancel');
 
-    // The user presses "Run": the command goes out.
+    // The user presses "Run once": the command goes out.
     final answer = await channel.handler!(FeishuCardActionEvent(
       operatorOpenId: 'ou_owner',
       chatId: 'oc_chat',
@@ -1078,10 +1104,93 @@ void main() {
     ));
     expect((answer!['toast'] as Map)['content'], 'Running.');
     expect(bridge.commands, ['rm -rf build\n']);
+
+    // After the answer, the card settles into its terminal state
+    // (mode B — the deferred update spends the callback token).
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    expect(updates.length, 1);
+    expect(updates.single.$1, 'c-1');
+    expect(updates.single.$2['header']['title']['content'],
+        'Command dispatched');
+    expect(updates.single.$2['body']['elements'], hasLength(1),
+        reason: 'no buttons left on the terminal state');
   });
 
-  test('a declined dangerous command never runs', () async {
-    final bridge = _RecordingBridge();
+  test('"Always" grants the pattern for the bound workspace', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')];
+    final cards = <Map<String, dynamic>>[];
+    final channel = _FakeChannel();
+    File? approvalFile;
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+      onCard: (_, card) => cards.add(card),
+      approvalFileOut: (f) => approvalFile = f,
+    );
+
+    // Bind the chat to ws_1 — a grant is keyed to a bound workspace.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 1',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    Future<(String, Map<String, dynamic>)> askAndAlways(String id) async {
+      integration.handleEvent(FeishuInboundEvent(
+        senderOpenId: 'ou_owner',
+        chatId: 'oc_chat',
+        messageId: 'om_$id',
+        text: 'rm -rf $id',
+        createTime: DateTime.now().millisecondsSinceEpoch,
+      ));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      final elements = (cards.last['body'] as Map)['elements'] as List;
+      final action =
+          elements.firstWhere((e) => (e as Map)['tag'] == 'action') as Map;
+      final alwaysValue = ((action['actions'] as List)[1] as Map)['value']
+          as Map<String, dynamic>;
+      final answer = await channel.handler!(FeishuCardActionEvent(
+        operatorOpenId: 'ou_owner',
+        chatId: 'oc_chat',
+        messageId: 'om_card_$id',
+        token: 'c-$id',
+        value: alwaysValue,
+      ));
+      return (id, answer!);
+    }
+
+    // First occurrence: asks; "Always" runs it and records the grant.
+    final (id, answer) = await askAndAlways('first');
+    expect((answer['toast'] as Map)['content'], 'Running.');
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    final grants =
+        await FeishuApprovalStore(approvalFile!).load();
+    expect(grants, contains('ws_1\nrm -rf'),
+        reason: 'the grant is persisted for the restart');
+
+    // Second occurrence: same pattern, same workspace — no card, it
+    // just runs.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_second',
+      text: 'rm -rf second',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(cards.length, 1,
+        reason: 'the grant suppresses the second confirmation');
+    expect(bridge.commands.last, 'rm -rf second\n');
+  });
+
+  test('"Always" never bypasses the hard-deny patterns', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')];
     final cards = <Map<String, dynamic>>[];
     final channel = _FakeChannel();
     final integration = await _routerFor(
@@ -1089,6 +1198,68 @@ void main() {
       bridge: bridge,
       channel: channel,
       onCard: (_, card) => cards.add(card),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 1',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    Map<String, dynamic> alwaysValue() {
+      final elements = (cards.last['body'] as Map)['elements'] as List;
+      final action =
+          elements.firstWhere((e) => (e as Map)['tag'] == 'action') as Map;
+      return ((action['actions'] as List)[1] as Map)['value']
+          as Map<String, dynamic>;
+    }
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_format',
+      text: 'format e: /q',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(cards.length, 1);
+    await channel.handler!(FeishuCardActionEvent(
+      operatorOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_card',
+      token: 'c-1',
+      value: alwaysValue(),
+    ));
+    expect(bridge.commands.last, 'format e: /q\n');
+
+    // The identical command asks again — a hard-deny pattern is a
+    // human decision every time (§4.2).
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_format2',
+      text: 'format e: /q',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(cards.length, 2,
+        reason: 'format is hard-denied: "always" must not suppress it');
+  });
+
+  test('a declined dangerous command never runs', () async {
+    final bridge = _RecordingBridge();
+    final cards = <Map<String, dynamic>>[];
+    final updates = <(String, Map<String, dynamic>)>[];
+    final channel = _FakeChannel();
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+      onCard: (_, card) => cards.add(card),
+      onUpdateCard: (token, card) => updates.add((token, card)),
     );
 
     integration.handleEvent(FeishuInboundEvent(
@@ -1114,6 +1285,133 @@ void main() {
       value: cancelValue,
     ));
     expect(bridge.commands, isEmpty);
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    expect(updates.single.$2['header']['title']['content'], 'Cancelled');
+    expect(updates.single.$2['header']['template'], 'grey');
+  });
+
+  test('a non-binder may not drive a chat someone else bound', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(allowed: ['ou_owner', 'ou_friend']),
+      bridge: bridge,
+      channel: _FakeChannel(),
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    // ou_owner binds the chat to ws_1.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 1',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    // ou_friend (whitelisted, but not the binder) sends a command.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_friend',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hijacked',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(bridge.commands, isEmpty,
+        reason: 'only the binder may drive the terminal (§3.2)');
+    expect(sent.last.$2, contains('another member'));
+
+    // /status stays open — read-only.
+    final before = sent.length;
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_friend',
+      chatId: 'oc_chat',
+      messageId: 'om_status',
+      text: '/status',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(sent.length, greaterThan(before),
+        reason: 'read-only commands answer for everyone whitelisted');
+  });
+
+  test('the picker card disables the current binding and offers unbind',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [
+        FeishuWorkspace('ws_1', 'octodo'),
+        FeishuWorkspace('ws_2', 'docs'),
+      ];
+    final cards = <Map<String, dynamic>>[];
+    final channel = _FakeChannel();
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      channel: channel,
+      onCard: (_, card) => cards.add(card),
+    );
+
+    // Before binding: ws_1 is a plain, enabled button.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_pick0',
+      text: '/attach',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    List<Map> buttonsOf(Map card) => ((card['body'] as Map)['elements'] as List)
+        .where((e) => (e as Map)['tag'] == 'action')
+        .expand((e) => e['actions'] as List)
+        .cast<Map>()
+        .toList();
+
+    final before = buttonsOf(cards.last)
+        .firstWhere((b) => (b['value'] as Map)['id'] == 'ws_1');
+    expect(before['disabled'] ?? false, isFalse);
+    expect(before['type'], 'default');
+
+    // Press it: the answer re-renders the picker in place (mode A) —
+    // the bound workspace is disabled and marked, and an unbind
+    // button appears.
+    final answer = await channel.handler!(FeishuCardActionEvent(
+      operatorOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_card',
+      token: 'c-1',
+      value: {'a': 'attach', 'id': 'ws_1'},
+    ));
+    final card = answer!['card'] as Map;
+    expect(card['type'], 'raw');
+    final bound = buttonsOf(card['data'] as Map)
+        .firstWhere((b) => (b['value'] as Map)['id'] == 'ws_1');
+    expect(bound['disabled'], isTrue, reason: 'no double binding (§3.1)');
+    expect((bound['text'] as Map)['content'], contains('current'));
+    expect(
+      buttonsOf(card['data'] as Map)
+          .any((b) => (b['value'] as Map)['a'] == 'detach'),
+      isTrue,
+      reason: 'the bound chat gets an unbind button',
+    );
+    expect((answer['toast'] as Map)['content'], contains('octodo'));
+
+    // The next picker reflects the binding too.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_pick',
+      text: '/attach',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    final after = buttonsOf(cards.last)
+        .firstWhere((b) => (b['value'] as Map)['id'] == 'ws_1');
+    expect(after['disabled'], isTrue);
   });
 }
 
@@ -1125,6 +1423,8 @@ Future<FeishuIntegration> _routerFor({
   void Function(String chat, String text)? onSend,
   void Function(String chat, int bytes)? onImage,
   void Function(String chat, Map<String, dynamic> card)? onCard,
+  void Function(String token, Map<String, dynamic> card)? onUpdateCard,
+  void Function(File approvalFile)? approvalFileOut,
   Duration outputWindow = const Duration(seconds: 5),
   Duration maxOutputWindow = const Duration(minutes: 5),
   OpencodeGateway? gateway,
@@ -1136,8 +1436,12 @@ Future<FeishuIntegration> _routerFor({
       File('${dir.path}${Platform.pathSeparator}c.json'));
   await store.save(creds);
 
+  final approvalFile =
+      File('${dir.path}${Platform.pathSeparator}a.json');
+  approvalFileOut?.call(approvalFile);
+
   final api = _RecordingApiClient(onSend ?? (_, _) {},
-      onImage: onImage, onCard: onCard);
+      onImage: onImage, onCard: onCard, onUpdateCard: onUpdateCard);
   final integration = FeishuIntegration(
     bridge: bridge,
     channel: channel ?? _FakeChannel(),
@@ -1145,6 +1449,7 @@ Future<FeishuIntegration> _routerFor({
     credentialStore: store,
     bindingStore: FeishuBindingStore(
         File('${dir.path}${Platform.pathSeparator}b.json')),
+    approvalStore: FeishuApprovalStore(approvalFile),
     outputWindow: outputWindow,
     maxOutputWindow: maxOutputWindow,
     opencode: gateway ?? _FakeGateway(),
@@ -1156,12 +1461,16 @@ Future<FeishuIntegration> _routerFor({
 
 /// Subclass of the real client overriding the outbound path so no
 /// HTTP happens; sends are recorded via [onSend], images via
-/// [onImage], cards via [onCard].
+/// [onImage], cards via [onCard], deferred card updates via
+/// [onUpdateCard].
 class _RecordingApiClient extends FeishuApiClient {
   final void Function(String chat, String text) onSend;
   final void Function(String chat, int bytes)? onImage;
   final void Function(String chat, Map<String, dynamic> card)? onCard;
-  _RecordingApiClient(this.onSend, {this.onImage, this.onCard}) : super();
+  final void Function(String token, Map<String, dynamic> card)? onUpdateCard;
+  _RecordingApiClient(this.onSend,
+      {this.onImage, this.onCard, this.onUpdateCard})
+      : super();
 
   @override
   Future<void> sendText(String chatId, String text) async =>
@@ -1174,4 +1483,11 @@ class _RecordingApiClient extends FeishuApiClient {
   @override
   Future<void> sendCard(String chatId, Map<String, dynamic> card) async =>
       onCard?.call(chatId, card);
+
+  @override
+  Future<void> updateCard({
+    required String token,
+    required Map<String, dynamic> card,
+  }) async =>
+      onUpdateCard?.call(token, card);
 }

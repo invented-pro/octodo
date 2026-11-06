@@ -43,6 +43,24 @@ class CardActions {
 Map<String, dynamic> cardValue(String action, [Map<String, dynamic>? extra]) =>
     <String, dynamic>{'a': action, ...?extra};
 
+/// The callback's immediate response body (design doc §1.2, mode A —
+/// answered within the 3 s window). [card] replaces the card in
+/// place (`{type: raw, data: …}` per the callback protocol); [toast]
+/// pops a toast. Both are optional; neither means "leave the card
+/// unchanged".
+Map<String, dynamic> cardResponse({
+  Map<String, dynamic>? card,
+  Map<String, dynamic>? toast,
+}) =>
+    {
+      if (card != null)
+        'card': {
+          'type': 'raw',
+          'data': card,
+        },
+      'toast': ?toast,
+    };
+
 /// One pickable target on a card — a workspace of the desktop app.
 class CardTarget {
   final String id;
@@ -63,7 +81,10 @@ Map<String, dynamic> feishuCard({
 }) =>
     {
       'schema': '2.0',
-      'config': {'wide_screen_mode': true},
+      // `update_multi` lets the card be updated again after it is
+      // sent — the pager, the picker and the confirmation card all
+      // rely on in-place updates (§1.2).
+      'config': {'wide_screen_mode': true, 'update_multi': true},
       'header': {
         'template': template,
         'title': {'tag': 'plain_text', 'content': title},
@@ -82,16 +103,20 @@ Map<String, dynamic> cardButton({
   required String label,
   required Map<String, dynamic> value,
   String type = 'default',
+  bool disabled = false,
 }) =>
     {
       'tag': 'button',
       'text': {'tag': 'plain_text', 'content': label},
       'type': type,
       'value': value,
+      if (disabled) 'disabled': true,
     };
 
 /// The workspace picker: one button per workspace (design doc §3.2 —
-/// "卡片会话选择器"). The currently bound one is highlighted.
+/// "卡片会话选择器"). The currently bound one is marked and disabled
+/// (§3.1 — no double binding), and a chat that is bound gets an
+/// unbind button.
 Map<String, dynamic> workspaceSelectorCard(
   List<CardTarget> targets, {
   String? current,
@@ -103,26 +128,39 @@ Map<String, dynamic> workspaceSelectorCard(
         'tag': 'action',
         'actions': [
           cardButton(
-            label: target.detail == null
-                ? target.name
-                : '${target.name} · ${target.detail}',
+            label: target.id == current
+                ? '${target.name} · current'
+                : (target.detail == null
+                    ? target.name
+                    : '${target.name} · ${target.detail}'),
             value: cardValue(CardActions.attach, {'id': target.id}),
             type: target.id == current ? 'primary' : 'default',
+            disabled: target.id == current,
+          ),
+        ],
+      },
+    if (targets.isEmpty)
+      {
+        'tag': 'div',
+        'text': {'tag': 'lark_md', 'content': 'No workspaces yet.'},
+      },
+    if (current != null)
+      {
+        'tag': 'action',
+        'actions': [
+          cardButton(
+            label: 'Unbind — follow the active workspace',
+            value: cardValue(CardActions.detach),
           ),
         ],
       },
   ];
-  if (targets.isEmpty) {
-    elements.add({
-      'tag': 'div',
-      'text': {'tag': 'lark_md', 'content': 'No workspaces yet.'},
-    });
-  }
   return feishuCard(title: title, elements: elements);
 }
 
-/// The dangerous-command confirmation card: the command is shown, and
-/// the user must press "Run" before it is executed.
+/// The dangerous-command confirmation card: the command is shown,
+/// and the user picks Run once / Always / Cancel (§4.1). The buttons
+/// carry the token, never the command itself.
 Map<String, dynamic> confirmCard({
   required String command,
   required String token,
@@ -144,9 +182,15 @@ Map<String, dynamic> confirmCard({
           'tag': 'action',
           'actions': [
             cardButton(
-              label: 'Run',
-              value: cardValue(CardActions.confirm, {'t': token}),
+              label: 'Run once',
+              value: cardValue(CardActions.confirm,
+                  {'t': token, 'd': 'once'}),
               type: 'danger',
+            ),
+            cardButton(
+              label: 'Always in this workspace',
+              value: cardValue(CardActions.confirm,
+                  {'t': token, 'd': 'always'}),
             ),
             cardButton(
               label: 'Cancel',
@@ -157,21 +201,43 @@ Map<String, dynamic> confirmCard({
       ],
     );
 
-/// The long-output pager: the output's page plus "prev / next"
-/// buttons (design doc §5 — long outputs are navigated with card
-/// buttons, not concatenated text).
+/// The terminal state of an approval (§4.2): the confirmation card is
+/// replaced by the outcome via a deferred update — no buttons left to
+/// press.
+Map<String, dynamic> approvalDoneCard({
+  required String command,
+  required String outcome,
+  String template = 'green',
+}) =>
+    feishuCard(
+      title: outcome,
+      template: template,
+      elements: [
+        {
+          'tag': 'div',
+          'text': {
+            'tag': 'lark_md',
+            'content': '```\n$command\n```',
+          },
+        },
+      ],
+    );
+
+/// The long-output pager: the page's content (plain text, §2.1) plus
+/// "prev / next" buttons (design doc §5 — long outputs are navigated
+/// with card buttons, not concatenated text). Pressing one returns
+/// this card with the new page — the card is replaced in place.
 Map<String, dynamic> pagerCard({
   required String token,
   required int page,
   required int pages,
-  String? note,
+  required String content,
 }) {
   final elements = <Map<String, dynamic>>[
-    if (note != null)
-      {
-        'tag': 'div',
-        'text': {'tag': 'lark_md', 'content': note},
-      },
+    {
+      'tag': 'div',
+      'text': {'tag': 'plain_text', 'content': content},
+    },
     {
       'tag': 'action',
       'actions': [
@@ -198,6 +264,10 @@ Map<String, dynamic> pagerCard({
 
 /// The toast shown when a card button is pressed (the callback
 /// response body — it reaches the user as a popup on the card).
-Map<String, dynamic> cardToast(String content, {String type = 'success'}) => {
-      'toast': {'type': type, 'content': content},
-    };
+Map<String, dynamic> cardToast(String content, {String type = 'success'}) =>
+    {'toast': feishuToast(content, type: type)};
+
+/// The inner toast map — [cardToast] wraps it as a whole response
+/// body; [cardResponse] takes it directly.
+Map<String, dynamic> feishuToast(String content, {String type = 'success'}) =>
+    {'type': type, 'content': content};

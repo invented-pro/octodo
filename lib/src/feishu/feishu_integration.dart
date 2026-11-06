@@ -20,6 +20,7 @@ import 'package:flutter/foundation.dart';
 
 import '../log.dart';
 import 'feishu_api_client.dart';
+import 'feishu_approval.dart';
 import 'feishu_binding.dart';
 import 'feishu_cards.dart';
 import 'feishu_credentials.dart';
@@ -268,12 +269,18 @@ class FeishuIntegration {
   /// map behind the pager card.
   final Map<String, List<String>> _pageBuffers = {};
 
+  /// "Always approve" grants (design doc §4.2) — workspace + pattern
+  /// pairs that no longer ask for confirmation.
+  final FeishuApprovalStore approvalStore;
+  final Map<String, FeishuApproval> _approvals = {};
+
   FeishuIntegration({
     required this.bridge,
     FeishuEventChannel? channel,
     FeishuApiClient? api,
     FeishuCredentialStore? credentialStore,
     FeishuBindingStore? bindingStore,
+    FeishuApprovalStore? approvalStore,
     this.outputWindow = _kOutputWindowDefault,
     this.maxOutputWindow = _kOutputMaxWindowDefault,
     OpencodeGateway? opencode,
@@ -282,7 +289,8 @@ class FeishuIntegration {
         api = api ?? FeishuApiClient(),
         credentialStore =
             credentialStore ?? FeishuCredentialStore.resolve(),
-        bindingStore = bindingStore ?? FeishuBindingStore.resolve();
+        bindingStore = bindingStore ?? FeishuBindingStore.resolve(),
+        approvalStore = approvalStore ?? FeishuApprovalStore.resolve();
 
   static FeishuIntegration? _instance;
 
@@ -329,6 +337,7 @@ class FeishuIntegration {
     // 3 s, so the channel asks us and writes our reply back.
     channel.cardActionHandler = _handleCardAction;
     await _loadBindings();
+    await _loadApprovals();
     await channel.start(creds);
     _log.info('feishu: integration started for ${creds.appIdPreview}');
   }
@@ -349,6 +358,22 @@ class FeishuIntegration {
   /// break the chat).
   Future<void> _saveBindings() async {
     await bindingStore.save(_bindings);
+  }
+
+  /// Read the persisted "always approve" grants (§4.2).
+  Future<void> _loadApprovals() async {
+    final loaded = await approvalStore.load();
+    _approvals
+      ..clear()
+      ..addAll(loaded);
+    if (loaded.isNotEmpty) {
+      _log.info('feishu: ${loaded.length} approval grant(s) restored');
+    }
+  }
+
+  /// Persist the approval grants (best effort).
+  Future<void> _saveApprovals() async {
+    await approvalStore.save(_approvals);
   }
 
   String? _boundAppId;
@@ -430,12 +455,25 @@ class FeishuIntegration {
     //     `/attach <n>` / `/attach <n>.<m>` address it by the
     //     numbers `/status` prints.
     if (event.text == '/attach') {
+      if (!_mayDrive(event.chatId, event.senderOpenId)) {
+        unawaited(api
+            .sendText(event.chatId, _binderHint(event.chatId))
+            .catchError((_) {}));
+        return;
+      }
       unawaited(_sendWorkspacePicker(event.chatId));
       return;
     }
     if (event.text.startsWith('/attach ')) {
+      if (!_mayDrive(event.chatId, event.senderOpenId)) {
+        unawaited(api
+            .sendText(event.chatId, _binderHint(event.chatId))
+            .catchError((_) {}));
+        return;
+      }
       unawaited(_attachByNumber(
-          event.chatId, event.text.substring('/attach '.length).trim()));
+          event.chatId, event.text.substring('/attach '.length).trim(),
+          boundBy: event.senderOpenId));
       return;
     }
 
@@ -447,8 +485,14 @@ class FeishuIntegration {
     }
 
     // 5b. `/detach` — drop the binding; the chat follows the active
-    //     workspace again.
+    //     workspace again. The binder's decision (§3.2).
     if (event.text == '/detach') {
+      if (!_mayDrive(event.chatId, event.senderOpenId)) {
+        unawaited(api
+            .sendText(event.chatId, _binderHint(event.chatId))
+            .catchError((_) {}));
+        return;
+      }
       unawaited(_detach(event.chatId));
       return;
     }
@@ -464,6 +508,12 @@ class FeishuIntegration {
             .catchError((_) {}));
         return;
       }
+      if (!_mayDrive(event.chatId, event.senderOpenId)) {
+        unawaited(api
+            .sendText(event.chatId, _binderHint(event.chatId))
+            .catchError((_) {}));
+        return;
+      }
       _pendingCommands.remove(token);
       _writeAndCapture(
           event.chatId, pending.command, pending.workspaceId);
@@ -473,6 +523,20 @@ class FeishuIntegration {
       _pendingCommands.removeWhere((_, pending) =>
           pending.chatId == event.chatId);
       unawaited(api.sendText(event.chatId, 'Cancelled.').catchError((_) {}));
+      return;
+    }
+
+    // 6. §3.2 — in a bound chat only the member who made the binding
+    //    may drive the terminal; the rest of the whitelist stays
+    //    read-only (/status above still answers). Reaching here means
+    //    the text would be written into a terminal (directly or via
+    //    a TUI), so a non-binder is dropped.
+    if (!_mayDrive(event.chatId, event.senderOpenId)) {
+      _log.info('feishu: ${event.messageId} dropped — '
+          '${event.senderOpenId} is not the binder of ${event.chatId}');
+      unawaited(api
+          .sendText(event.chatId, _binderHint(event.chatId))
+          .catchError((_) {}));
       return;
     }
 
@@ -522,9 +586,11 @@ class FeishuIntegration {
 
     // 8. Execute: write into the bound terminal and watch its
     //    output for the aggregation window. A command that looks
-    //    destructive waits for the user's confirmation (a card).
+    //    destructive waits for the user's confirmation (a card) —
+    //    unless this workspace granted "always" for the pattern
+    //    (§4.2); the hard-denied patterns always ask.
     final dangerous = _dangerousPattern(event.text);
-    if (dangerous != null) {
+    if (dangerous != null && !_preApproved(workspaceId, dangerous)) {
       _log.info('feishu: ${event.messageId} held for confirmation '
           '("$dangerous")');
       unawaited(_askForConfirmation(
@@ -555,8 +621,13 @@ class FeishuIntegration {
     }
     switch (action.action) {
       case CardActions.attach:
-        return _attachToWorkspace(action.chatId, action.value['id'] as String?);
+        return _attachToWorkspace(action.chatId, action.value['id'] as String?,
+            action.operatorOpenId);
       case CardActions.detach:
+        if (!_mayDrive(action.chatId, action.operatorOpenId)) {
+          return cardToast('Only the member who bound this chat may unbind.',
+              type: 'error');
+        }
         await _detach(action.chatId);
         return cardToast('Back to the active workspace.');
       case CardActions.confirm:
@@ -569,9 +640,27 @@ class FeishuIntegration {
     return null;
   }
 
+  /// §3.2: in a chat with a binding, only the member who made it may
+  /// drive terminals or change the binding — the rest of the
+  /// whitelist stays read-only (/status still answers). A binding
+  /// with no recorded binder (legacy) lets anyone whitelisted drive.
+  bool _mayDrive(String chatId, String operatorOpenId) {
+    final binder = _bindings[chatId]?.boundBy;
+    return binder == null || binder.isEmpty || binder == operatorOpenId;
+  }
+
+  /// The hint a non-binder gets when they try to drive a bound chat.
+  String _binderHint(String chatId) {
+    final binding = _bindings[chatId];
+    return 'This chat is bound to ${binding?.workspaceName ?? 'a workspace'} '
+        'by another member — only they may send commands here. '
+        '/status still works for you.';
+  }
+
   /// Send another page of a long output (design doc §5 — long
   /// outputs are navigated with card buttons, not concatenated
-  /// text).
+  /// text). Mode A: the card is replaced in place — the chat stays
+  /// one card, no fragmented messages.
   Future<Map<String, dynamic>?> _showPage(FeishuCardActionEvent action) async {
     final token = action.value['t'] as String?;
     final pages = token == null ? null : _pageBuffers[token];
@@ -580,15 +669,29 @@ class FeishuIntegration {
     }
     final index = int.tryParse('${action.value['p'] ?? ''}') ?? 0;
     final clamped = index.clamp(0, pages.length - 1);
-    await api.sendText(action.chatId, pages[clamped]).catchError((_) {});
-    return cardToast('Page ${clamped + 1} / ${pages.length}');
+    return cardResponse(
+      card: pagerCard(
+        token: token!,
+        page: clamped,
+        pages: pages.length,
+        content: pages[clamped],
+      ),
+    );
   }
 
-  /// Bind [chatId] to a workspace.
+  /// Bind [chatId] to a workspace (§3.2). The answer re-renders the
+  /// picker with the freshly bound workspace marked and disabled —
+  /// mode A, in place. Rebinding an already-bound chat is the
+  /// binder's decision.
   Future<Map<String, dynamic>?> _attachToWorkspace(
-      String chatId, String? workspaceId) async {
+      String chatId, String? workspaceId, String operatorOpenId) async {
     if (workspaceId == null || workspaceId.isEmpty) {
       return cardToast('No workspace chosen.', type: 'error');
+    }
+    if (!_mayDrive(chatId, operatorOpenId)) {
+      return cardToast(
+          'This chat is already bound by another member.',
+          type: 'error');
     }
     FeishuWorkspace? match;
     for (final workspace in bridge.listWorkspaces()) {
@@ -606,11 +709,18 @@ class FeishuIntegration {
       workspaceId: match.id,
       workspaceName: match.name,
       boundAt: DateTime.now(),
-      boundBy: _credentials?.ownerOpenId ?? '',
+      boundBy: operatorOpenId,
     );
     await _saveBindings();
-    _log.info('feishu: chat $chatId bound to workspace ${match.id}');
-    return cardToast('Now driving: ${match.name}');
+    _log.info('feishu: chat $chatId bound to workspace ${match.id} '
+        'by $operatorOpenId');
+    return cardResponse(
+      card: workspaceSelectorCard(
+        [for (final w in bridge.listWorkspaces()) CardTarget(w.id, w.name)],
+        current: match.id,
+      ),
+      toast: feishuToast('Now driving: ${match.name}'),
+    );
   }
 
   /// Drop the chat's binding — it follows the active workspace
@@ -688,7 +798,9 @@ class FeishuIntegration {
 
   /// `/attach <n>` — bind to the n-th workspace; `/attach <n>.<m>` —
   /// to its m-th pane. The numbers are the ones `/status` prints.
-  Future<void> _attachByNumber(String chatId, String spec) async {
+  /// [boundBy] records who made the binding (§3.2).
+  Future<void> _attachByNumber(String chatId, String spec,
+      {String boundBy = ''}) async {
     final parts = spec.split('.');
     final workspaceNumber = int.tryParse(parts.first.trim());
     if (workspaceNumber == null) {
@@ -729,7 +841,7 @@ class FeishuIntegration {
       paneId: paneId,
       paneNumber: paneNumber,
       boundAt: DateTime.now(),
-      boundBy: _credentials?.ownerOpenId ?? '',
+      boundBy: boundBy,
     );
     await _saveBindings();
     await api
@@ -790,6 +902,7 @@ class FeishuIntegration {
       chatId: chatId,
       command: command,
       workspaceId: workspaceId,
+      pattern: _dangerousPattern(command),
       at: DateTime.now(),
     );
     try {
@@ -804,30 +917,88 @@ class FeishuIntegration {
     }
   }
 
-  /// Run the command the user confirmed.
+  /// Run the command the user confirmed (§4.2). The decision arrives
+  /// with the button's `d` field: 'once' (default) or 'always' —
+  /// 'always' records a workspace + pattern grant, unless the pattern
+  /// is hard-denied. The card's terminal state goes out as a deferred
+  /// update, after the callback answer.
   Future<Map<String, dynamic>?> _confirmPending(FeishuCardActionEvent action) async {
     final token = action.value['t'] as String?;
     final pending = token == null ? null : _pendingCommands[token];
     if (pending == null) {
       return cardToast('That confirmation expired.', type: 'error');
     }
+    if (!_mayDrive(action.chatId, action.operatorOpenId)) {
+      return cardToast('Only the member who bound this chat may confirm.',
+          type: 'error');
+    }
     _pendingCommands.remove(token);
     if (pending.chatId != action.chatId) {
       return cardToast('That confirmation belongs to another chat.',
           type: 'error');
     }
+    final always = '${action.value['d'] ?? 'once'}' == 'always' &&
+        !_kHardDenyPatterns.contains(pending.pattern);
+    if (always && pending.pattern != null && pending.workspaceId != null) {
+      // A grant is keyed to a bound workspace — the active-workspace
+      // target moves under the user's feet, so it never gets one.
+      final workspaceId = pending.workspaceId!;
+      _approvals[FeishuApproval.keyOf(workspaceId, pending.pattern!)] =
+          FeishuApproval(
+        workspaceId: workspaceId,
+        pattern: pending.pattern!,
+        grantedAt: DateTime.now(),
+        grantedBy: action.operatorOpenId,
+      );
+      await _saveApprovals();
+      _log.info('feishu: workspace $workspaceId always approves '
+          '"${pending.pattern}"');
+    }
     // Run it now — the reply follows the normal output path.
     _writeAndCapture(pending.chatId, pending.command, pending.workspaceId);
+    unawaited(_settleApprovalCard(
+        action, pending.command, 'Command dispatched'));
     return cardToast('Running.');
   }
 
-  /// Drop the command the user declined.
+  /// Drop the command the user declined (§4.2 — the card's terminal
+  /// state is a deferred update, after the answer).
   Future<Map<String, dynamic>?> _cancelPending(FeishuCardActionEvent action) async {
     final token = action.value['t'] as String?;
-    if (token == null || _pendingCommands.remove(token) == null) {
+    final pending = token == null ? null : _pendingCommands[token];
+    if (pending == null) {
       return cardToast('Nothing to cancel.', type: 'error');
     }
+    if (!_mayDrive(action.chatId, action.operatorOpenId)) {
+      return cardToast('Only the member who bound this chat may cancel.',
+          type: 'error');
+    }
+    _pendingCommands.remove(token);
+    unawaited(_settleApprovalCard(
+        action, pending.command, 'Cancelled', template: 'grey'));
     return cardToast('Cancelled.');
+  }
+
+  /// Replace a confirmation card with its terminal state (§4.2) —
+  /// the deferred card update, mode B. Runs strictly after the
+  /// callback answer (a parallel or earlier update fails), and spends
+  /// one of the callback token's ≤ 2 uses.
+  Future<void> _settleApprovalCard(
+      FeishuCardActionEvent action, String command, String outcome,
+      {String template = 'green'}) async {
+    final token = action.token;
+    if (token.isEmpty) return;
+    // Let the callback answer reach Feishu first.
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    try {
+      await api.updateCard(
+        token: token,
+        card: approvalDoneCard(
+            command: command, outcome: outcome, template: template),
+      );
+    } catch (e) {
+      _log.warning('feishu: approval card update failed ($e)');
+    }
   }
 
   /// Drop the confirmations nobody acted on.
@@ -882,6 +1053,31 @@ class FeishuIntegration {
     return null;
   }
 
+  /// Patterns that always confirm, even with a standing "always"
+  /// grant (§4.2 — a grant must not bypass the hard rejects). The
+  /// disk- and database-level ones: approving them once is a human
+  /// decision every time. (The strings match [_dangerousPattern]'s
+  /// trimmed return values.)
+  static const Set<String> _kHardDenyPatterns = {
+    'diskpart',
+    'format',
+    'mkfs',
+    'dd if=',
+    'drop database',
+  };
+
+  /// True when [workspaceId] already granted "always approve" for
+  /// [pattern] (§4.2). A grant is keyed to a bound workspace — the
+  /// active-workspace target (null) moves under the user's feet, so
+  /// it never pre-approves — and hard-denied patterns are never
+  /// pre-approved.
+  bool _preApproved(String? workspaceId, String pattern) {
+    if (workspaceId == null) return false;
+    if (_kHardDenyPatterns.contains(pattern)) return false;
+    return _approvals
+        .containsKey(FeishuApproval.keyOf(workspaceId, pattern));
+  }
+
   /// Write [commandLine] into the bound terminal and capture its
   /// output for the reply (the plain-command path — line output,
   /// not a screen mirror). Shared by direct commands and `/ai`.
@@ -915,11 +1111,11 @@ class FeishuIntegration {
 
   /// Send a command's output back.
   ///
-  /// A long output is split into pages: the first page goes out as
-  /// text, a pager card offers "previous / next" (design doc §5 —
-  /// navigating with buttons beats concatenating text). When the
-  /// card cannot be sent, the remaining pages go out as plain
-  /// messages instead — nothing is ever lost.
+  /// A long output goes out as one pager card carrying the first
+  /// page, with "previous / next" buttons that replace the card in
+  /// place (design doc §5 — navigating with buttons beats
+  /// concatenating text). When the card cannot be sent, all pages go
+  /// out as plain messages instead — nothing is ever lost.
   Future<void> _sendReply(String chatId, String text) async {
     final pages = _paginate(text);
     if (pages.length <= 1) {
@@ -929,13 +1125,17 @@ class FeishuIntegration {
     _prunePageBuffers();
     final token = _newToken();
     _pageBuffers[token] = pages;
-    await api.sendText(chatId, pages.first).catchError((_) {});
     try {
       await api.sendCard(
-          chatId, pagerCard(token: token, page: 0, pages: pages.length));
+          chatId,
+          pagerCard(
+              token: token,
+              page: 0,
+              pages: pages.length,
+              content: pages.first));
     } catch (e) {
       _log.warning('feishu: pager card failed ($e)');
-      for (final page in pages.skip(1)) {
+      for (final page in pages) {
         await api.sendText(chatId, page).catchError((_) {});
       }
     }
@@ -1170,17 +1370,21 @@ class FeishuIntegration {
 }
 
 /// A dangerous command waiting for the user's confirmation — the
-/// token in the confirmation card points at it.
+/// token in the confirmation card points at it. [pattern] is the
+/// matched dangerous substring, needed when the user answers
+/// "Always" (§4.2 — the grant is keyed to the pattern).
 class _PendingCommand {
   final String chatId;
   final String command;
   final String? workspaceId;
+  final String? pattern;
   final DateTime at;
 
   const _PendingCommand({
     required this.chatId,
     required this.command,
     required this.workspaceId,
+    required this.pattern,
     required this.at,
   });
 }
