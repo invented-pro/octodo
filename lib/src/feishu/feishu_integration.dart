@@ -452,6 +452,7 @@ class FeishuIntegration {
     //    server-backed TUI owns the terminal, else a rendered PNG
     //    snapshot, else the filtered screen text.
     if (event.text == '/history') {
+      _focusBoundPane(event.chatId, workspaceId);
       _capture?.flush();
       unawaited(_sendHistory(event.chatId, workspaceId));
       return;
@@ -578,6 +579,14 @@ class FeishuIntegration {
           .catchError((_) {}));
       return;
     }
+
+    // 6b. Focus the bound pane/tab BEFORE anything reads the
+    //     workspace's focused terminal — the alt-screen sniff below
+    //     and every write must target what this chat is bound to,
+    //     not whatever the desktop happens to have focused (an
+    //     opencode TUI in one tab otherwise hijacks messages meant
+    //     for a plain shell in another).
+    _focusBoundPane(event.chatId, workspaceId);
 
     // 5c. `/raw <text>` — relay raw text into whatever owns the
     //     terminal (a full-screen TUI included), bypassing the

@@ -92,6 +92,13 @@ class _RecordingBridge implements FeishuHostBridge {
   /// The workspaces `/closetab` was asked to close a tab in.
   final List<String?> closeTabCalls = [];
 
+  /// Tabs that run a full-screen TUI (alt screen).
+  final Set<String> altScreenSurfaces = {};
+
+  /// The surface the bridge last focused — `inAltScreen` resolves
+  /// against it, falling back to the layout's own focused tab.
+  String? focusedSurfaceId;
+
   @override
   List<FeishuWorkspace> listWorkspaces() => workspaces;
 
@@ -108,6 +115,7 @@ class _RecordingBridge implements FeishuHostBridge {
     if (surfaceId != null) {
       if (!matches.first.tabs.any((t) => t.id == surfaceId)) return false;
       focusedSurfaces.add(surfaceId);
+      focusedSurfaceId = surfaceId;
     }
     focusedPanes.add(paneId);
     return true;
@@ -184,7 +192,23 @@ class _RecordingBridge implements FeishuHostBridge {
       hasTerminal ? outputController.stream : null;
 
   @override
-  bool? inAltScreen(String? workspaceId) => hasTerminal ? altScreen : null;
+  bool? inAltScreen(String? workspaceId) {
+    if (!hasTerminal) return null;
+    // With a layout, the alt-screen check is per FOCUSED tab — the
+    // TUI detection must follow the binding's focus, not a flat flag.
+    if (panes.isNotEmpty) {
+      String? focused = focusedSurfaceId;
+      if (focused == null) {
+        for (final p in panes) {
+          for (final t in p.tabs) {
+            if (t.focused) focused = t.id;
+          }
+        }
+      }
+      return altScreenSurfaces.contains(focused);
+    }
+    return altScreen;
+  }
 
   @override
   List<String>? snapshotScreen(String? workspaceId) =>
@@ -948,8 +972,10 @@ void main() {
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     expect(bridge.targets, ['ws_1']);
-    expect(bridge.focusedPanes, ['pane_3']);
-    expect(bridge.focusedSurfaces, ['tab_d']);
+    // Focused twice (route hoist + write path) — both to the same
+    // pane, which is what matters.
+    expect(bridge.focusedPanes.last, 'pane_3');
+    expect(bridge.focusedSurfaces.last, 'tab_d');
   });
 
   test('/status numbers the tabs and flags a stale pane binding',
@@ -1205,8 +1231,8 @@ void main() {
     ));
 
     // Healed by position: pane 1's second tab.
-    expect(bridge.focusedPanes, ['pane_live']);
-    expect(bridge.focusedSurfaces, ['tab_y']);
+    expect(bridge.focusedPanes.last, 'pane_live');
+    expect(bridge.focusedSurfaces.last, 'tab_y');
 
     // The healed ids are persisted — /status marks the live pane.
     integration.handleEvent(FeishuInboundEvent(
@@ -1220,6 +1246,77 @@ void main() {
     final reply = sent.last.$2;
     expect(reply, contains('1. [focused] [bound]'));
     expect(reply, contains('2. two  [bound]'));
+  });
+
+  test('a tab-bound chat does not leak into the desktop-focused TUI',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_op', title: 'opencode', cwd: null, focused: true),
+          FeishuTabStatus(
+              id: 'tab_sh', title: 'shell', cwd: null, focused: false),
+        ]),
+      ]
+      ..altScreenSurfaces.add('tab_op')
+      ..screenLines = const ['opencode tui screen'];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      outputWindow: const Duration(milliseconds: 30),
+    );
+
+    // Bind to tab 2 — the plain shell, while tab 1 runs the TUI and
+    // holds the desktop focus.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 1.1.2',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+
+    expect(bridge.commands, ['echo hi\n'],
+        reason: 'the command runs in the shell tab, not the TUI tab');
+    expect(bridge.focusedSurfaces.last, 'tab_sh');
+
+    // And the reverse: bound to the TUI tab, messages route into it —
+    // never executed as shell commands.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach2',
+      text: '/attach 1.1.1',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_tui',
+      text: 'fix the bug',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    // The TUI keystroke path writes bare text + a separate Enter —
+    // visible in the fake as a write without the CR the shell path
+    // appends — and the reply is the screen mirror.
+    expect(bridge.commands.last, 'fix the bug');
+    expect(sent.last.$2, contains('opencode tui screen'),
+        reason: 'the TUI path answers with the screen mirror');
   });
 
   // ── Phase 2: cards, bindings, confirmations ────────────────────
@@ -1385,7 +1482,7 @@ void main() {
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     expect(bridge.targets, ['ws_2']);
-    expect(bridge.focusedPanes, ['pane_2']);
+    expect(bridge.focusedPanes.last, 'pane_2');
   });
 
   test('/attach sends the workspace picker card', () async {
