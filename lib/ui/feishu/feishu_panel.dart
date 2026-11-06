@@ -11,8 +11,8 @@
 //   connected       → bound-app summary + Unbind
 //   expired/failed  → reason + Retry
 //
-// Remote control is always on once a bot is bound (credentials are
-// the only gate) — shown as a description row, not a switch.
+// Remote control is always on once a bot is bound — credentials are
+// the only gate, so the panel has no switch at all.
 
 import 'dart:async';
 
@@ -117,10 +117,7 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
                     // binding lifecycle lives in this one card;
                     // future apps get their own card beside it.
                     SettingsCard(
-                      children: [
-                        _bindingCard(palette),
-                        _alwaysOnRow(palette),
-                      ],
+                      children: [_bindingCard(palette)],
                     ),
                     const SizedBox(height: 12),
                     Text(
@@ -138,19 +135,6 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
           ],
         ),
       ),
-    );
-  }
-
-  /// Remote control has no switch: the binding is the gate. Stated
-  /// as a description so the card never implies an off state.
-  Widget _alwaysOnRow(ThemePalette palette) {
-    return SettingsCardRow(
-      leadingIcon: Icons.bolt_outlined,
-      title: 'Remote control is always on',
-      subtitle:
-          'Once a bot is bound, whitelisted chats drive this '
-          "app's terminals — there is no switch.",
-      trailing: const SizedBox.shrink(),
     );
   }
 
