@@ -926,6 +926,8 @@ class FeishuIntegration {
         continue;
       }
       final title = bridge.surfaceTitle(result.workspaceId, result.surfaceId);
+      final address =
+          _surfaceAddress(result.workspaceId, result.surfaceId);
       final rc = result.exitCode;
       final mark = rc == null || rc == 0 ? '✅' : '❌';
       final d = result.duration;
@@ -937,12 +939,30 @@ class FeishuIntegration {
           const <String>[];
       final tail = _trimBlank(lines);
       final body = [
-        '$mark ${title == null || title.isEmpty ? 'tab' : title} — '
+        '$mark ${address == null ? '' : '[$address] '}'
+            '${title == null || title.isEmpty ? 'tab' : title} — '
             'task finished (exit ${rc ?? '?'}, took $took)',
         ...tail,
       ].join('\n');
       unawaited(_sendReply(binding.chatId, body).catchError((_) {}));
     }
+  }
+
+  /// The `<ws>.<pane>.<tab>` address of a surface — the same numbers
+  /// `/status` prints and `/attach` takes. Null when it can't be
+  /// resolved (workspace or pane gone since the task started).
+  String? _surfaceAddress(String? workspaceId, String surfaceId) {
+    final workspaces = bridge.listWorkspaces();
+    final wsIndex = workspaces.indexWhere((w) => w.id == workspaceId);
+    if (wsIndex < 0) return null;
+    for (final pane in bridge.layoutOf(workspaceId).panes) {
+      for (var i = 0; i < pane.tabs.length; i++) {
+        if (pane.tabs[i].id == surfaceId) {
+          return '${wsIndex + 1}.${pane.number}.${i + 1}';
+        }
+      }
+    }
+    return null;
   }
 
   /// `/newtab` — open a tab in the target workspace (its focused

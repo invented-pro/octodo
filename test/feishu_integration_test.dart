@@ -1380,7 +1380,10 @@ void main() {
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
     final reply = sent.last.$2;
-    expect(reply, contains('✅ build — task finished (exit 0, took 3m 12s)'));
+    expect(reply, contains('[1.1.1]'),
+        reason: 'non-bound results carry the ws.pane.tab address — '
+            'the same numbers /attach takes');
+    expect(reply, contains('✅ [1.1.1] build — task finished (exit 0, took 3m 12s)'));
     expect(reply, contains('build output line'));
 
     // A failing task is marked ❌.
@@ -1391,7 +1394,7 @@ void main() {
       duration: Duration(seconds: 41),
     ));
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(sent.last.$2, contains('❌ build'));
+    expect(sent.last.$2, contains('❌ [1.1.1] build'));
     expect(sent.last.$2, contains('took 41s'));
 
     // The bound tab's own results are skipped — commands sent from
