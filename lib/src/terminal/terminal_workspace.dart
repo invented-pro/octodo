@@ -1821,6 +1821,20 @@ function prompt {
     return surface.terminalViewState;
   }
 
+  /// The focused container's focused surface — identity (stable
+  /// [Surface.id]) and tracked working directory for the Feishu
+  /// remote-control bridge: the opencode gateway keys per-terminal
+  /// TUI state by id and matches server sessions by cwd.
+  Surface? getFocusedSurface() {
+    final container = _focusedContainer;
+    if (container == null) return null;
+    if (container.focusedIndex < 0 ||
+        container.focusedIndex >= container.surfaces.length) {
+      return null;
+    }
+    return container.focusedSurface;
+  }
+
   // ── Notification-pipeline support ───────────────────────────────
 
   /// Jump to and focus the surface with [surfaceId] — the click-through

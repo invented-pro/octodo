@@ -2,11 +2,13 @@ import 'dart:async';
 import 'dart:collection' show UnmodifiableMapView;
 import 'dart:convert' show utf8;
 import 'dart:io' show Platform;
-import 'dart:typed_data' show BytesBuilder;
+import 'dart:typed_data' show BytesBuilder, Uint8List;
+import 'dart:ui' as ui show ImageByteFormat;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show kPrimaryButton, PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter/services.dart';
 import 'package:flutter_alacritty/flutter_alacritty.dart' as fa;
@@ -554,6 +556,79 @@ class TerminalViewState extends State<TerminalView> {
   /// drag is meaningless there.
   @visibleForTesting
   static const int terminalAltScreenModeFlag = 1 << 12;
+
+  /// Wide-spacer cell flag read from `grid.flagsAt`. Mirrors
+  /// `kFlagWideSpacer = 1 << 5` in flutter_alacritty's package-
+  /// internal `render/cell_flags.dart`: the second cell of a
+  /// double-width (CJK, emoji) glyph, which the painter skips
+  /// because the glyph at col-1 covers it. Pinned as a literal for
+  /// the same regression-guard reason as the flags above.
+  @visibleForTesting
+  static const int terminalWideSpacerFlag = 1 << 5;
+
+  /// Whether the terminal is currently displaying a full-screen
+  /// app (alternate screen buffer — vim, less, the opencode TUI …).
+  /// The Feishu remote-control bridge reads this to mirror the
+  /// rendered screen instead of capturing redraw bytes: they are
+  /// absolute-cursor layout painting, not line output.
+  bool get inAltScreen =>
+      _engine.grid.modeFlags & terminalAltScreenModeFlag != 0;
+
+  /// The terminal's visible screen as text, top row first — the
+  /// full-screen TUI's rendered content when one owns the screen
+  /// (vim, opencode …), or the shell's latest lines otherwise.
+  /// Trailing blanks are trimmed; wide glyphs are joined through
+  /// their leading cell with spacers skipped, mirroring the
+  /// painter (`kFlagWideSpacer`).
+  List<String> visibleScreenLines() {
+    final grid = _engine.grid;
+    final lines = <String>[];
+    for (var row = 0; row < grid.rows; row++) {
+      final buf = StringBuffer();
+      for (var col = 0; col < grid.columns; col++) {
+        if (grid.flagsAt(row, col) & terminalWideSpacerFlag != 0) {
+          continue; // covered by the wide glyph at col-1
+        }
+        buf.write(String.fromCharCode(grid.codepointAt(row, col)));
+      }
+      lines.add(buf.toString().trimRight());
+    }
+    return lines;
+  }
+
+  /// The terminal rendered to PNG — what the Feishu `/screen`
+  /// command sends to the phone. Encodes the nearest enclosing
+  /// repaint boundary (the pane), not a text reconstruction, so
+  /// TUI layout arrives pixel-perfect. Null when the view isn't
+  /// laid out yet.
+  Future<Uint8List?> capturePng({double pixelRatio = 1.5}) async {
+    if (!mounted) return null;
+    final ro = context.findRenderObject();
+    if (ro == null || !ro.attached) return null;
+    // Walk up to the nearest repaint boundary — TerminalView's own
+    // root is the grid painter's box, the pane boundary encloses it.
+    RenderObject? node = ro;
+    RenderRepaintBoundary? boundary;
+    while (node != null) {
+      if (node is RenderRepaintBoundary) {
+        boundary = node;
+        break;
+      }
+      node = node.parent;
+    }
+    if (boundary == null) return null;
+    if (boundary.debugNeedsPaint) {
+      // Let the pending frame land before rasterizing.
+      WidgetsBinding.instance.scheduleFrame();
+      await WidgetsBinding.instance.endOfFrame;
+      if (boundary.debugNeedsPaint) return null;
+    }
+    final image = await boundary.toImage(pixelRatio: pixelRatio);
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    if (data == null) return null;
+    return data.buffer.asUint8List();
+  }
 
   /// Test seam for the file-private [_pasteBytes], so tests can pin the
   /// bracketed-wrap contract and the non-bracketed raw-passthrough contract
