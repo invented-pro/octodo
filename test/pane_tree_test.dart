@@ -10,7 +10,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:octodo/src/terminal/pane_tree.dart';
 import 'package:octodo/src/terminal/shell_profiles.dart';
 import 'package:octodo/src/terminal/terminal_workspace.dart'
-    show applyCloseSurfaceForTest, applyDropToSplitEdgeForTest;
+    show
+        TerminalWorkspaceState,
+        applyCloseSurfaceForTest,
+        applyDropToSplitEdgeForTest;
 
 List<PaneContainer> _allLeaves(PaneNode root) {
   final out = <PaneContainer>[];
@@ -208,6 +211,56 @@ void main() {
       s.currentCwd = 'C:/Users/tester';
       // No home shortcut — falls back to basename of currentCwd.
       expect(s.fallbackTitle, 'pwsh tester');
+    });
+  });
+
+  group('TerminalWorkspaceState.layoutStatusOf — where is the user', () {
+    ShellProfile pwshProfile() => ShellProfile(
+          label: 'pwsh',
+          program: r'C:\Program Files\PowerShell\7\pwsh.exe',
+          args: const ['-NoLogo'],
+          icon: Icons.terminal,
+          color: const Color(0xFF0078D4),
+          shortName: 'pwsh',
+          showCwdInTitle: true,
+        );
+
+    test('one pane, two tabs — the focused tab is marked', () {
+      final pane = PaneContainer()
+        ..surfaces.addAll([
+          Surface(profile: pwshProfile(), initialCwd: r'C:\a')
+            ..currentCwd = r'C:\a',
+          Surface(profile: pwshProfile(), initialCwd: r'C:\b')
+            ..currentCwd = r'C:\b',
+        ])
+        ..focusedIndex = 1;
+
+      final status = TerminalWorkspaceState.layoutStatusOf(pane, pane);
+      expect(status.length, 1);
+      expect(status.single.focused, isTrue);
+      expect(status.single.tabs.length, 2);
+      expect(status.single.tabs.first.focused, isFalse);
+      expect(status.single.tabs.last.focused, isTrue);
+      expect(status.single.tabs.last.cwd, r'C:\b');
+    });
+
+    test('a split tree lists both panes, the focused one marked', () {
+      final left = PaneContainer()
+        ..surfaces.add(Surface(profile: pwshProfile(), initialCwd: r'C:\l'));
+      final right = PaneContainer()
+        ..surfaces.add(Surface(profile: pwshProfile(), initialCwd: r'C:\r'));
+      final split = PaneSplit(
+          direction: Axis.horizontal, first: left, second: right);
+
+      final status = TerminalWorkspaceState.layoutStatusOf(split, right);
+      expect(status.length, 2);
+      expect(status.first.focused, isFalse);
+      expect(status.last.focused, isTrue);
+      expect(status.last.tabs.single.cwd, r'C:\r');
+    });
+
+    test('no tree means no panes', () {
+      expect(TerminalWorkspaceState.layoutStatusOf(null, null), isEmpty);
     });
   });
 

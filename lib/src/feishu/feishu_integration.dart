@@ -35,6 +35,58 @@ class FeishuWorkspace {
   const FeishuWorkspace(this.id, this.name);
 }
 
+/// One terminal tab (a surface) of a pane.
+class FeishuTabStatus {
+  final String id;
+  final String title;
+  final String? cwd;
+
+  /// True for the tab the user is looking at.
+  final bool focused;
+
+  const FeishuTabStatus({
+    required this.id,
+    required this.title,
+    required this.cwd,
+    required this.focused,
+  });
+}
+
+/// One pane of a workspace, with its tabs.
+class FeishuPaneStatus {
+  /// The pane's stable id.
+  final String id;
+
+  /// True for the pane the user is in.
+  final bool focused;
+
+  final List<FeishuTabStatus> tabs;
+
+  const FeishuPaneStatus({
+    required this.id,
+    required this.focused,
+    required this.tabs,
+  });
+}
+
+/// The terminal layout of one workspace: its panes, their tabs, and
+/// which of them is focused — "where is the user right now".
+class FeishuLayoutStatus {
+  final List<FeishuPaneStatus> panes;
+
+  const FeishuLayoutStatus(this.panes);
+
+  /// The tab the user is looking at, or null when there is none.
+  FeishuTabStatus? get focusedTab {
+    for (final pane in panes) {
+      for (final tab in pane.tabs) {
+        if (tab.focused) return tab;
+      }
+    }
+    return null;
+  }
+}
+
 /// What the integration needs from the app shell: where commands go
 /// and where their output comes from. Implemented by `_AppShellState`.
 ///
@@ -43,6 +95,11 @@ class FeishuWorkspace {
 abstract class FeishuHostBridge {
   /// The workspaces the app has open — the `/attach` picker.
   List<FeishuWorkspace> listWorkspaces();
+
+  /// The terminal layout of a workspace: its panes, their tabs and
+  /// which of them is focused — "where is the user right now"
+  /// (the `/status` readout).
+  FeishuLayoutStatus layoutOf(String? workspaceId);
 
   /// Write [command] (already newline-terminated by the router) into
   /// the focused terminal of [workspaceId]. No-op when no terminal
@@ -360,6 +417,13 @@ class FeishuIntegration {
       return;
     }
 
+    // 5a2. `/status` — where are we: the bound workspace, the
+    //      panes, their tabs, and which one is focused.
+    if (event.text == '/status') {
+      unawaited(_sendStatus(event.chatId, workspaceId));
+      return;
+    }
+
     // 5b. `/detach` — drop the binding; the chat follows the active
     //     workspace again.
     if (event.text == '/detach') {
@@ -543,6 +607,44 @@ class FeishuIntegration {
         .sendText(chatId,
             'Unbound — this chat follows the active workspace again.')
         .catchError((_) {});
+  }
+
+  /// `/status` — where the user is right now: the bound workspace,
+  /// its panes, their tabs, and which one has the focus.
+  Future<void> _sendStatus(String chatId, String? workspaceId) async {
+    final workspaces = bridge.listWorkspaces();
+    final binding = _bindings[chatId];
+    final lines = <String>[];
+
+    final name = binding?.workspaceName ??
+        (workspaceId == null
+            ? null
+            : workspaces
+                .where((w) => w.id == workspaceId)
+                .map((w) => w.name)
+                .firstOrNull);
+    lines.add(binding == null
+        ? 'Target: the active workspace'
+        : 'Target: ${name ?? workspaceId} (bound)');
+
+    final layout = bridge.layoutOf(workspaceId);
+    if (layout.panes.isEmpty) {
+      lines.add('No terminal panes yet.');
+    } else {
+      lines.add('Panes: ${layout.panes.length}');
+      for (var i = 0; i < layout.panes.length; i++) {
+        final pane = layout.panes[i];
+        lines.add('  ${pane.focused ? '▸' : ' '} pane ${i + 1}'
+            '${pane.focused ? ' (focused)' : ''}');
+        for (final tab in pane.tabs) {
+          final cwd = tab.cwd;
+          lines.add('    ${tab.focused ? '▸' : ' '} '
+              '${tab.title.isEmpty ? tab.id : tab.title}'
+              '${cwd == null ? '' : '  ($cwd)'}');
+        }
+      }
+    }
+    await api.sendText(chatId, lines.join('\n')).catchError((_) {});
   }
 
   /// Send the workspace picker card — the `/attach` flow (design doc
@@ -1223,6 +1325,10 @@ List<String> _trimBlank(List<String> lines) {
 class _NullHostBridge implements FeishuHostBridge {
   @override
   List<FeishuWorkspace> listWorkspaces() => const [];
+
+  @override
+  FeishuLayoutStatus layoutOf(String? workspaceId) =>
+      const FeishuLayoutStatus([]);
 
   @override
   void runCommand(String? workspaceId, String command) {}

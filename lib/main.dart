@@ -2799,6 +2799,29 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
       ];
 
   @override
+  FeishuLayoutStatus layoutOf(String? workspaceId) {
+    final panes =
+        _entryFor(workspaceId)?.key.currentState?.paneStatus() ??
+            const <PaneStatus>[];
+    return FeishuLayoutStatus([
+      for (final pane in panes)
+        FeishuPaneStatus(
+          id: pane.id,
+          focused: pane.focused,
+          tabs: [
+            for (final tab in pane.tabs)
+              FeishuTabStatus(
+                id: tab.id,
+                title: tab.title,
+                cwd: tab.cwd,
+                focused: tab.focused,
+              ),
+          ],
+        ),
+    ]);
+  }
+
+  @override
   void runCommand(String? workspaceId, String command) {
     final view = _focusedTerminal(workspaceId);
     if (view == null) return;

@@ -76,8 +76,15 @@ class _RecordingBridge implements FeishuHostBridge {
   /// The workspaces the fake reports to the `/attach` picker.
   List<FeishuWorkspace> workspaces = const [];
 
+  /// The pane layout the fake reports to `/status`.
+  List<FeishuPaneStatus> panes = const [];
+
   @override
   List<FeishuWorkspace> listWorkspaces() => workspaces;
+
+  @override
+  FeishuLayoutStatus layoutOf(String? workspaceId) =>
+      FeishuLayoutStatus(panes);
 
   @override
   void runCommand(String? workspaceId, String command) {
@@ -790,6 +797,55 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(sent.length, 2);
     expect(sent.last.$2, isNot(sent.first.$2));
+  });
+
+  test('/status reports the workspace, its panes and the focused tab',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(
+          id: 'pane_1',
+          focused: true,
+          tabs: [
+            FeishuTabStatus(
+              id: 'tab_1',
+              title: 'pwsh',
+              cwd: r'E:\src\octodo',
+              focused: false,
+            ),
+            FeishuTabStatus(
+              id: 'tab_2',
+              title: 'opencode',
+              cwd: r'E:\src\octodo',
+              focused: true,
+            ),
+          ],
+        ),
+        FeishuPaneStatus(id: 'pane_2', focused: false, tabs: []),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_status',
+      text: '/status',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final reply = sent.single.$2;
+    expect(reply, contains('Target: the active workspace'));
+    expect(reply, contains('Panes: 2'));
+    expect(reply, contains('pane 1 (focused)'));
+    expect(reply, contains('opencode'));
+    expect(reply, contains(r'E:\src\octodo'));
   });
 
   test('/attach sends the workspace picker card', () async {

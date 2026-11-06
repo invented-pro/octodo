@@ -96,6 +96,48 @@ final Logger _log = moduleLogger('terminal.terminal_workspace');
 
 // ── Workspace widget ─────────────────────────────────────────────────
 
+/// One pane of a workspace's terminal tree, with its tabs — a
+/// snapshot of [TerminalWorkspaceState.paneStatus].
+class PaneStatus {
+  /// The pane's stable id (survives splits and moves).
+  final String id;
+
+  /// True for the pane the user is in.
+  final bool focused;
+
+  /// The pane's tabs.
+  final List<TabStatus> tabs;
+
+  const PaneStatus({
+    required this.id,
+    required this.focused,
+    required this.tabs,
+  });
+}
+
+/// One tab (a terminal surface) of a pane — a snapshot of
+/// [TerminalWorkspaceState.paneStatus].
+class TabStatus {
+  /// The surface's stable id.
+  final String id;
+
+  /// The tab's chip title (the shell's title, or the cwd).
+  final String title;
+
+  /// The tab's working directory, when known.
+  final String? cwd;
+
+  /// True for the tab the user is looking at.
+  final bool focused;
+
+  const TabStatus({
+    required this.id,
+    required this.title,
+    required this.cwd,
+    required this.focused,
+  });
+}
+
 /// A single workspace — owns its own pane tree, surfaces (tabs), and
 /// shell state.  Multiple instances can be composed in an app shell to
 /// create a multi-workspace terminal app.
@@ -1795,6 +1837,51 @@ function prompt {
   /// The currently-focused container, or null if the workspace has
   /// no root pane yet (early in `initState`).
   PaneContainer? get focusedContainer => _focusedContainer;
+
+  /// The workspace's pane/tab layout: every pane, its tabs, and
+  /// which of them is focused.
+  ///
+  /// A snapshot for callers that need to know *where* the user is —
+  /// the remote-control status readout (Feishu) and, later,
+  /// pane-level bindings. The pane ids are stable across tree
+  /// mutations (see [PaneContainer.id]), the tab ids are the
+  /// surfaces' stable ids.
+  List<PaneStatus> paneStatus() =>
+      layoutStatusOf(_rootPane, _focusedContainer);
+
+  /// The layout snapshot of a pane tree — pure, so it is testable
+  /// without the widget.
+  ///
+  /// [focused] is the pane the user is in (its focused tab is the
+  /// one the commands go to).
+  static List<PaneStatus> layoutStatusOf(
+      PaneNode? root, PaneContainer? focused) {
+    if (root == null) return const [];
+    final leaves = <PaneContainer>[];
+    if (root is PaneContainer) {
+      leaves.add(root);
+    } else if (root is PaneSplit) {
+      root.forEachLeaf(leaves.add);
+    }
+    final focusedTab = focused?.focusedSurface?.id;
+    return [
+      for (final leaf in leaves)
+        PaneStatus(
+          id: leaf.id,
+          focused: identical(leaf, focused),
+          tabs: [
+            for (final surface in leaf.surfaces)
+              TabStatus(
+                id: surface.id,
+                title: surface.chipTitle,
+                cwd: surface.currentCwd ??
+                    (surface.initialCwd == '~' ? null : surface.initialCwd),
+                focused: surface.id == focusedTab,
+              ),
+          ],
+        ),
+    ];
+  }
 
   /// Resolve the [TerminalViewState] currently receiving keyboard
   /// input — the focused surface in the focused container. Returns
