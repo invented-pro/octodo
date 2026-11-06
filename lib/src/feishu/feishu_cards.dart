@@ -286,14 +286,6 @@ Map<String, dynamic> helpCard() => feishuCard(
             '**/raw <keys>** — raw keystrokes into the terminal, TUIs '
             'included (/raw /quit)\n'
             '**/history** — the terminal\'s last screen'),
-        const {'tag': 'hr'},
-        _mdSection('**Safety & feeds**\n'
-            'Dangerous commands ask first — Run once / Always / Cancel\n'
-            '**/run <token>** / **/cancel** — the text fallbacks\n'
-            'Long tasks finishing in any tab of the bound workspace send '
-            'their result here (✅/❌, tagged [ws.pane.tab])\n'
-            'A bound chat is read-only for everyone except the member who '
-            'bound it'),
       ],
     );
 

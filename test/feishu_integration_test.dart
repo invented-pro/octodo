@@ -1449,12 +1449,14 @@ void main() {
       '/closetab',
       '/raw',
       '/history',
-      '/run <token>',
     ]) {
       expect(reply, contains(command), reason: 'help mentions $command');
     }
-    expect(reply, contains('read-only'),
-        reason: 'help states the binding permission model');
+    // The approval flow and task feeds are deliberately absent —
+    // the confirmation / result cards explain themselves in the
+    // moment, so /help stays a pure command listing.
+    expect(reply, isNot(contains('/run <token>')));
+    expect(reply, isNot(contains('ask first')));
   });
 
   test('a restored binding heals to the live panes by position',
