@@ -116,7 +116,7 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
     return Dialog(
       child: SizedBox(
         width: 560,
-        height: 420,
+        height: 545,
         child: Column(
           children: [
             _Header(onClose: () => Navigator.of(context).pop()),
@@ -133,7 +133,9 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
                     SettingsCard(
                       children: [_bindingCard(palette)],
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 16),
+                    _usageSection(palette),
+                    const SizedBox(height: 16),
                     Text(
                       'More mobile apps are coming soon.',
                       textAlign: TextAlign.center,
@@ -148,6 +150,285 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// What a bound bot understands — the same listing `/help` sends,
+  /// with a hand-drawn (theme-aware, no assets) illustration of the
+  /// round trip: a chat command on the phone, the command landing
+  /// in this app's terminal, the result coming back.
+  Widget _usageSection(ThemePalette palette) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'USAGE',
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.2,
+            color: palette.textMuted,
+          ),
+        ),
+        const SizedBox(height: 8),
+        SettingsCard(
+          children: [
+            _usageIllustration(palette),
+            _usageRow(palette, '/status',
+                'Workspaces, panes, tabs — what this chat drives.'),
+            _usageRow(palette, '/attach 1.2.3',
+                'Bind to a terminal by its numbers; /detach follows '
+                'the desktop.'),
+            _usageRow(palette, '/newtab · /closetab',
+                'Manage tabs in the bound pane.'),
+            _usageRow(palette, '/raw <keys>',
+                'Raw keystrokes into the terminal — TUIs included '
+                '(/raw /quit).'),
+            _usageRow(palette, '/history',
+                "Replay the target terminal's last screen."),
+            _usageRow(palette, 'plain text',
+                'Runs in the bound terminal and answers with its '
+                'output.'),
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 14, vertical: 8),
+              child: Text(
+                'Dangerous commands ask first · long tasks report '
+                'back here ✅/❌',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  color: palette.textMuted,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _usageRow(ThemePalette palette, String command,
+      String description) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      child: Row(
+        children: [
+          Container(
+            width: 126,
+            padding:
+                const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+            decoration: BoxDecoration(
+              color: palette.accentBlue.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              command,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: palette.accentBlue,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              description,
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.3,
+                color: palette.textSecondary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Phone → chevrons → terminal window, all palette chrome.
+  Widget _usageIllustration(ThemePalette palette) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          _illustrationPhone(palette),
+          const SizedBox(width: 8),
+          _illustrationSignal(palette),
+          const SizedBox(width: 8),
+          _illustrationTerminal(palette),
+        ],
+      ),
+    );
+  }
+
+  /// The phone with a chat bubble carrying a command.
+  Widget _illustrationPhone(ThemePalette palette) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Container(
+          width: 30,
+          height: 56,
+          decoration: BoxDecoration(
+            color: palette.surface2,
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(
+              color: palette.accentBlue.withValues(alpha: 0.7),
+              width: 1.5,
+            ),
+          ),
+          padding: const EdgeInsets.all(3.5),
+          child: Container(
+            decoration: BoxDecoration(
+              color: palette.surface1,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Container(
+                  width: 10,
+                  height: 2,
+                  margin: const EdgeInsets.only(bottom: 2),
+                  decoration: BoxDecoration(
+                    color: palette.outline,
+                    borderRadius: BorderRadius.circular(1),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        // The command bubble, drifting off the phone's corner.
+        Positioned(
+          right: -26,
+          top: -9,
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+                horizontal: 7, vertical: 3),
+            decoration: BoxDecoration(
+              color: palette.accentBlue.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: palette.accentBlue.withValues(alpha: 0.4),
+              ),
+            ),
+            child: Text(
+              '/status',
+              style: TextStyle(
+                fontSize: 9.5,
+                fontWeight: FontWeight.w600,
+                color: palette.accentBlue,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Fading chevrons — the message on its way.
+  Widget _illustrationSignal(ThemePalette palette) {
+    return Row(
+      children: [
+        for (final alpha in const [0.85, 0.55, 0.3])
+          Icon(
+            Icons.chevron_right,
+            size: 13,
+            color: palette.textMuted.withValues(alpha: alpha),
+          ),
+      ],
+    );
+  }
+
+  /// The desktop terminal window: title-bar dots, a prompt, a
+  /// finished task, a waiting cursor.
+  Widget _illustrationTerminal(ThemePalette palette) {
+    return Container(
+      width: 172,
+      decoration: BoxDecoration(
+        color: palette.surface2,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: palette.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: 15,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            decoration: BoxDecoration(
+              color: palette.surface1,
+              borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(7)),
+              border: Border(
+                bottom: BorderSide(color: palette.outline),
+              ),
+            ),
+            child: Row(
+              children: [
+                for (final color in [
+                  palette.accentPink,
+                  palette.accentYellow,
+                  palette.accentGreen,
+                ])
+                  Container(
+                    width: 5,
+                    height: 5,
+                    margin: const EdgeInsets.only(right: 4),
+                    decoration:
+                        BoxDecoration(color: color, shape: BoxShape.circle),
+                  ),
+              ],
+            ),
+          ),
+          Padding(
+            padding:
+                const EdgeInsets.fromLTRB(9, 7, 9, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text.rich(
+                  TextSpan(style: TextStyle(fontSize: 10, height: 1.35), children: [
+                    TextSpan(
+                      text: '\$ ',
+                      style: TextStyle(
+                          color: palette.accentGreen,
+                          fontWeight: FontWeight.w600),
+                    ),
+                    TextSpan(
+                        text: 'cargo test',
+                        style: TextStyle(color: palette.textBody)),
+                  ]),
+                ),
+                Text(
+                  '  ✓ done · 4m12s',
+                  style: TextStyle(
+                    fontSize: 10,
+                    height: 1.35,
+                    color: palette.accentGreen,
+                  ),
+                ),
+                Text.rich(
+                  TextSpan(style: TextStyle(fontSize: 10, height: 1.35), children: [
+                    TextSpan(
+                      text: '\$ ',
+                      style: TextStyle(
+                          color: palette.accentGreen,
+                          fontWeight: FontWeight.w600),
+                    ),
+                    TextSpan(
+                        text: '_',
+                        style: TextStyle(color: palette.textMuted)),
+                  ]),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
