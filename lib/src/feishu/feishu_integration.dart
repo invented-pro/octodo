@@ -1554,13 +1554,17 @@ class _OutputCapture {
     _buffer.clear();
     var lines = _cleanLines(bytes);
     // The shell's echo of the command itself is noise on the phone.
-    if (lines.length > 1 && lines.first == command) lines.removeAt(0);
+    _stripEcho(lines, command);
     // So is the fresh prompt that told us the command finished
     // (kept when it is all there is — it is the reply to `cd ..`).
     if (lines.length > 1 && promptLike.hasMatch(lines.last)) {
       lines.removeLast();
     }
     if (lines.isEmpty) return; // command produced no visible output
+    if (lines.length == 1 && promptLike.hasMatch(lines.single)) {
+      _reply(lines.single);
+      return;
+    }
     // The full output — a long one is paged, not truncated (the
     // design's §5: navigate with card buttons instead of dropping
     // the middle).
@@ -1589,22 +1593,71 @@ class _OutputCapture {
 
   /// UTF-8 (malformed tolerated) minus ANSI CSI/OSC sequences and
   /// carriage noise — what a reader on the phone cares about.
+  ///
+  /// Cursor-positioning and erase sequences are line *boundaries*,
+  /// not noise: PSReadLine starts a fresh prompt with a cursor move,
+  /// and treating that as invisible glued the prompt onto the last
+  /// output row (`E:\src\octodoPS E:\src\octodo>` — which then
+  /// matched the prompt pattern and had the row stripped from the
+  /// reply). Colors (SGR) and mode sets are genuinely invisible.
   static List<String> _cleanLines(List<int> bytes) {
     var text = utf8.decode(bytes, allowMalformed: true);
     // OSC (title, hyperlinks, …): ESC ] … BEL / ESC \
     final osc = RegExp('\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)');
-    // CSI (colors, cursor moves, …): ESC [ params final
-    final csi = RegExp('\x1b\\[[0-9;?]*[ -/]*[@-~]');
-    text = text.replaceAll(osc, '').replaceAll(csi, '');
+    // CSI: ESC [ params intermediate final
+    final csi = RegExp('\x1b\\[([0-9;?]*)([ -/]*)([@-~])');
+    text = text.replaceAll(osc, '').replaceAllMapped(csi, (m) {
+      // Invisible: colors (m), mode set/reset (h/l), save/restore
+      // cursor (s/u), status report (n). Everything else — cursor
+      // moves, erases — starts a new line for extraction purposes.
+      return switch (m.group(3)) {
+        'm' || 'h' || 'l' || 's' || 'u' || 'n' => '',
+        _ => '\n',
+      };
+    });
     // Remaining lone ESCs.
     text = text.replaceAll('\x1b', '');
     // Drop BEL, vertical tab; normalize newlines.
-    text = text.replaceAll('\x07', '').replaceAll('\r', '');
+    text = text.replaceAll('\x07', '');
+    // A lone CR (no LF) redraws from column 0 — what follows
+    // replaces, not continues. CR before LF stays one line break.
+    text = text.replaceAll(RegExp('\r(?!\n)'), '\n');
+    text = text.replaceAll('\r', '');
     return text
         .split('\n')
         .map((l) => l.trimRight())
         .where((l) => l.isNotEmpty)
         .toList();
+  }
+
+  /// Strip the shell's echo of [command] from the head of [lines].
+  ///
+  /// Line-mode shells echo the typed line after the prompt — glued
+  /// to it (`PS E:\x> pwd`) or on its own line right after a bare
+  /// prompt (PSReadLine redraw) — so an exact match alone misses
+  /// almost every PowerShell reply.
+  static void _stripEcho(List<String> lines, String command) {
+    if (lines.isEmpty || command.isEmpty) return;
+    // Own line, possibly after a bare prompt line.
+    var drop = 0;
+    if (lines.first != command && promptLike.hasMatch(lines.first)) {
+      drop = 1;
+    }
+    if (drop < lines.length && lines[drop] == command) {
+      lines.removeRange(0, drop + 1);
+      return;
+    }
+    // Glued to the prompt: the line ends exactly at the command and
+    // everything before it looks like a prompt.
+    final first = lines.first;
+    if (first.length > command.length && first.endsWith(command)) {
+      final prefix = first
+          .substring(0, first.length - command.length)
+          .trimRight();
+      if (prefix.isEmpty || promptLike.hasMatch(prefix)) {
+        lines.removeAt(0);
+      }
+    }
   }
 }
 

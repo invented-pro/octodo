@@ -757,6 +757,75 @@ void main() {
     expect(bridge.commands, isEmpty);
   });
 
+  test('PowerShell: prompt-glued echo is stripped, pwd keeps its row',
+      () async {
+    final bridge = _RecordingBridge();
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      outputWindow: const Duration(milliseconds: 30),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_pwd',
+      text: 'pwd',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    // What pwsh actually streams: prompt + echo, then Get-Location's
+    // table, then the fresh prompt.
+    bridge.outputController.add(utf8.encode(
+        'PS E:\\src\\octodo> pwd\r\n\r\nPath\r\n---\r\nE:\\src\\octodo\r\n'
+        'PS E:\\src\\octodo> '));
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+
+    expect(sent.length, 1);
+    final reply = sent.single.$2;
+    expect(reply, contains('E:\\src\\octodo'),
+        reason: 'the output row survives');
+    expect(reply, isNot(contains('pwd')),
+        reason: 'the prompt-glued echo is stripped');
+    expect(reply.split('\n'), ['Path', '---', 'E:\\src\\octodo']);
+  });
+
+  test('a cursor-positioned prompt does not swallow the last output row',
+      () async {
+    final bridge = _RecordingBridge();
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      outputWindow: const Duration(milliseconds: 30),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_pwd',
+      text: 'pwd',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    // PSReadLine starts its prompt with a cursor move — treated as
+    // invisible it glued the prompt onto the row, and the cleaner
+    // then ate the row as "the fresh prompt".
+    bridge.outputController.add(utf8.encode(
+        'PS E:\\src\\octodo> pwd\r\nPath\r\n---\r\nE:\\src\\octodo'
+        '\x1b[1000G\x1b[2KPS E:\\src\\octodo> '));
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+
+    expect(sent.length, 1);
+    final reply = sent.single.$2;
+    expect(reply, contains('E:\\src\\octodo'),
+        reason: 'the row is not glued to the prompt, not eaten');
+    expect(reply, isNot(contains('octodoPS')),
+        reason: 'no glue between the row and the prompt');
+    expect(reply, isNot(contains('pwd')));
+  });
+
   // ── Phase 2: cards, bindings, confirmations ────────────────────
 
   test('a long output is one pager card, pages replace it in place',
