@@ -9,6 +9,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -139,11 +140,51 @@ class FeishuApiClient {
     chunks.add(rest);
     for (var i = 0; i < chunks.length; i++) {
       final suffix = chunks.length > 1 ? ' (${i + 1}/${chunks.length})' : '';
-      await _sendMessageRaw(chatId, chunks[i] + suffix);
+      await _sendMessage(chatId, 'text', jsonEncode({'text': chunks[i] + suffix}));
     }
   }
 
-  Future<void> _sendMessageRaw(String chatId, String text) async {
+  /// Send [png] (a rendered terminal snapshot) to chat [chatId] as
+  /// an image message: upload → image_id → message. Rare and
+  /// user-triggered (/screen), so it skips the text queue.
+  Future<void> sendImage(String chatId, Uint8List png) async {
+    var token = await _tenantAccessToken();
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final upload = http.MultipartRequest(
+        'POST',
+        Uri.parse('$_domain/open-apis/im/v1/images'),
+      )
+        ..headers['authorization'] = 'Bearer $token'
+        ..fields['image_type'] = 'message'
+        ..files.add(http.MultipartFile.fromBytes('image', png,
+            filename: 'screen.png'));
+      final response = await upload.send().timeout(const Duration(seconds: 30));
+      final body = _decode(await http.Response.fromStream(response));
+      final code = (body['code'] as num?)?.toInt() ?? -1;
+      final data = body['data'];
+      final imageId =
+          data is Map<String, dynamic> ? (data['image_id'] as String?) : null;
+      if (code == 0 && imageId != null) {
+        await _sendMessage(chatId, 'image', jsonEncode({'image_id': imageId}));
+        return;
+      }
+      if (attempt == 0 &&
+          (code == 99991663 ||
+              code == 99991661 ||
+              code == 99991668 ||
+              // Scope granted after our token was minted — a fresh
+              // token picks it up.
+              code == 99991672)) {
+        _token = null;
+        token = await _tenantAccessToken();
+        continue;
+      }
+      _log.warning('feishu: image upload failed: $code ${body['msg']}');
+      throw FeishuApiException(code, '${body['msg']}');
+    }
+  }
+
+  Future<void> _sendMessage(String chatId, String msgType, String content) async {
     var token = await _tenantAccessToken();
     for (var attempt = 0; attempt < 2; attempt++) {
       final response = await _http
@@ -156,8 +197,8 @@ class FeishuApiClient {
             },
             body: jsonEncode({
               'receive_id': chatId,
-              'msg_type': 'text',
-              'content': jsonEncode({'text': text}),
+              'msg_type': msgType,
+              'content': content,
             }),
           )
           .timeout(const Duration(seconds: 30));

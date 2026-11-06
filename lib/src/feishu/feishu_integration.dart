@@ -22,6 +22,7 @@ import 'feishu_api_client.dart';
 import 'feishu_credentials.dart';
 import 'feishu_event_channel.dart';
 import 'feishu_ws_channel.dart';
+import 'opencode_client.dart';
 
 /// What the integration needs from the app shell: where commands go
 /// and where their output comes from. Implemented by `_AppShellState`.
@@ -36,6 +37,35 @@ abstract class FeishuHostBridge {
   /// from just before a command is written until that command's
   /// output has gone quiet.
   Stream<List<int>>? subscribeActiveOutput();
+
+  /// Whether the active terminal is currently displaying a
+  /// full-screen TUI (alternate screen buffer) — vim, less, the
+  /// opencode TUI, … Null when there is no active terminal. The
+  /// router mirrors the rendered screen then: TUI redraws are
+  /// screen layout, not line output.
+  bool? activeTerminalInAltScreen();
+
+  /// The active terminal's visible screen as text lines, top row
+  /// first — what a full-screen TUI currently shows, or the
+  /// shell's latest lines. Null when there is no active terminal.
+  List<String>? snapshotActiveScreen();
+
+  /// Stable identity of the focused terminal surface, so the
+  /// router can keep per-terminal state across commands (e.g.
+  /// which TUI app owns it). Null when there is no active
+  /// terminal.
+  String? activeTerminalId();
+
+  /// The focused terminal's working directory (OSC 7 tracked,
+  /// falling back to the spawn directory) — the key the opencode
+  /// gateway matches server sessions by. Null when unknown.
+  String? activeTerminalCwd();
+
+  /// The focused terminal rendered to PNG (its enclosing repaint
+  /// boundary rasterized) — `/screen` sends this to the phone.
+  /// Null when there is no active terminal (or it can't be
+  /// rasterized yet).
+  Future<Uint8List?> snapshotActiveTerminalPng();
 }
 
 /// Dedup window (§4.3): remember this many message ids…
@@ -52,11 +82,32 @@ const Duration _kOutputWindowDefault = Duration(milliseconds: 2500);
 
 /// Hard ceiling on one command's capture: commands that never
 /// finish (or shells whose prompt we don't recognize) still get a
-/// partial reply after this long.
-const Duration _kOutputMaxWindowDefault = Duration(seconds: 60);
+/// partial reply after this long. Generous because agent-style
+/// commands (`opencode run "…"`) legitimately think for minutes.
+const Duration _kOutputMaxWindowDefault = Duration(minutes: 5);
 
 /// …or until this many bytes arrive, whichever first.
 const int _kOutputMaxBytes = 15 * 1024;
+
+/// What the router answers when a full-screen TUI without a
+/// server adapter owns the terminal: the text is relayed and the
+/// rendered screen mirrored back — layout noise is unavoidable
+/// for unknown apps, hence the pointer to /screen.
+const String _kTuiHint = 'A full-screen app is running in the desktop '
+    'terminal — your message was relayed into it and the reply below is '
+    'its rendered screen.\n'
+    '/screen shows the screen (image or text); /type <keys> sends raw '
+    'keys (e.g. /type /q).';
+
+/// What the router answers when the TUI that just launched is
+/// opencode: the router itself routes through the opencode server
+/// from now on, so replies are pure text.
+const String _kOpencodeTuiHint = 'opencode is running in the desktop '
+    'terminal — messages sent here go through the opencode server (the '
+    'same one the TUI uses, so both stay in sync) and replies come back '
+    'as plain text.\n'
+    '/screen returns the conversation; /type <keys> sends raw keys '
+    '(e.g. /type /q).';
 
 class FeishuIntegration {
   final FeishuEventChannel channel;
@@ -87,6 +138,16 @@ class FeishuIntegration {
   /// Hard ceiling on one command's output capture (injectable).
   final Duration maxOutputWindow;
 
+  /// The opencode client-server gateway (path 1): `/ai` and
+  /// opencode-TUI terminals chat through it with pure text
+  /// replies. Injectable for tests.
+  final OpencodeGateway opencode;
+
+  /// Per-terminal TUI identity, learned by sniffing the echoed
+  /// launch command right before a TUI takes the screen —
+  /// terminal id → app name ('opencode', …).
+  final _tuiApps = <String, String>{};
+
   FeishuIntegration({
     required this.bridge,
     FeishuEventChannel? channel,
@@ -94,7 +155,9 @@ class FeishuIntegration {
     FeishuCredentialStore? credentialStore,
     this.outputWindow = _kOutputWindowDefault,
     this.maxOutputWindow = _kOutputMaxWindowDefault,
-  })  : channel = channel ?? FeishuWsChannel(),
+    OpencodeGateway? opencode,
+  })  : opencode = opencode ?? OpencodeLocalGateway(),
+        channel = channel ?? FeishuWsChannel(),
         api = api ?? FeishuApiClient(),
         credentialStore =
             credentialStore ?? FeishuCredentialStore.resolve();
@@ -202,29 +265,206 @@ class FeishuIntegration {
     // 4. Text only; empty text (stickers etc.) is ignored.
     if (event.text.isEmpty) return;
 
-    // 5. A new command flushes any pending output capture first.
-    _capture?.flush();
+    // 5. `/screen` replies with what the terminal currently shows
+    //    — a rendered PNG snapshot (pixel-perfect for TUIs), the
+    //    text reconstruction only as fallback.
+    if (event.text == '/screen') {
+      _capture?.flush();
+      unawaited(_sendScreen(event.chatId));
+      return;
+    }
 
-    // 6. Execute: write into the active terminal and watch its
+    // 5b. `/type <text>` — relay raw text into whatever owns the
+    //     terminal (a full-screen TUI included), bypassing the
+    //     server routing: the escape hatch for TUI control (q,
+    //     /, dd, …).
+    if (event.text == '/type' || event.text.startsWith('/type ')) {
+      final keys = event.text.substring(5).trim();
+      if (keys.isEmpty) {
+        unawaited(api
+            .sendText(event.chatId, 'Usage: /type <text>')
+            .catchError((_) {}));
+        return;
+      }
+      if (bridge.activeTerminalInAltScreen() == true) {
+        _mirrorIntoTui(event, text: keys);
+      } else {
+        _writeAndCapture(event.chatId, keys);
+      }
+      _log.info('feishu: /type ${event.messageId} relayed');
+      return;
+    }
+
+    // 7. A full-screen TUI owns the terminal. TUIs with a
+    //    registered server adapter (see [_gatewayFor]) are routed
+    //    through their server — same session the desktop TUI
+    //    shows, pure text replies. Any other TUI gets the text
+    //    relayed and its screen mirrored back.
+    if (bridge.activeTerminalInAltScreen() == true) {
+      final termId = bridge.activeTerminalId();
+      final app =
+          _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotActiveScreen());
+      final gateway = _gatewayFor(app);
+      if (gateway != null) {
+        unawaited(_tuiServerChat(event, gateway));
+        return;
+      }
+      _mirrorIntoTui(event);
+      return;
+    }
+
+    // 8. Execute: write into the active terminal and watch its
     //    output for the aggregation window.
+    _writeAndCapture(event.chatId, event.text);
+    _log.info('feishu: command ${event.messageId} '
+        'from ${event.senderOpenId} executed');
+  }
+
+  /// Write [commandLine] into the active terminal and capture its
+  /// output for the reply (the plain-command path — line output,
+  /// not a screen mirror). Shared by direct commands and `/ai`.
+  void _writeAndCapture(String chatId, String commandLine) {
+    // A new command flushes any pending output capture first.
+    _capture?.flush();
     final output = bridge.subscribeActiveOutput();
     if (output == null) {
       unawaited(api
-          .sendText(event.chatId, 'No active terminal in Octodo.'));
+          .sendText(chatId, 'No active terminal in Octodo.')
+          .catchError((_) {}));
+      return;
+    }
+    _capture = _OutputCapture(
+      stream: output,
+      chatId: chatId,
+      api: api,
+      command: commandLine,
+      idleWindow: outputWindow,
+      maxWindow: maxOutputWindow,
+      onDone: () => _capture = null,
+      terminalId: bridge.activeTerminalId(),
+      onTuiApp: _rememberTuiApp,
+    );
+    bridge.runCommand('$commandLine\n');
+  }
+
+  /// Record which server-backed TUI owns a terminal (sniffed at
+  /// launch), so later messages into that terminal auto-route
+  /// through its server instead of the screen mirror.
+  void _rememberTuiApp(String terminalId, String app) {
+    _tuiApps[terminalId] = app;
+    _log.info('feishu: $app TUI detected in terminal $terminalId');
+  }
+
+  /// Recognize a server-backed TUI from its rendered screen — the
+  /// fallback for TUIs started locally at the desktop (no router
+  /// capture saw the launch). The opencode TUI carries its brand
+  /// in the header lines.
+  static String? _sniffScreenApp(List<String>? screen) {
+    if (screen == null) return null;
+    for (final line in screen.take(6)) {
+      if (line.toLowerCase().contains('opencode')) return 'opencode';
+    }
+    return null;
+  }
+
+  /// Server-backed TUI adapters, keyed by the app names the
+  /// sniffers produce. This is the registry point for other
+  /// headless-capable TUIs (claude-code, gemini, …) — the routing
+  /// itself is app-agnostic.
+  OpencodeGateway? _gatewayFor(String? app) =>
+      app == 'opencode' ? opencode : null;
+
+  /// `/screen` — what the terminal shows, best source first:
+  ///
+  ///  1. A server-backed TUI's conversation tail (pure clean text
+  ///     — better than any picture of it),
+  ///  2. the rendered PNG (needs the bot's image-upload scope;
+  ///     skipped silently when the platform denies it),
+  ///  3. the screen grid as text, decoration lines dropped.
+  Future<void> _sendScreen(String chatId) async {
+    final termId = bridge.activeTerminalId();
+    final app =
+        _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotActiveScreen());
+    final gateway = _gatewayFor(app);
+    if (gateway != null) {
+      final cwd = bridge.activeTerminalCwd();
+      if (cwd != null) {
+        try {
+          final tail = await gateway.conversationTail(cwd);
+          if (tail != null && tail.isNotEmpty) {
+            await api.sendText(chatId, tail);
+            return;
+          }
+        } catch (_) {}
+      }
+    }
+    try {
+      final png = await bridge.snapshotActiveTerminalPng();
+      if (png != null && png.isNotEmpty) {
+        await api.sendImage(chatId, png);
+        return;
+      }
+    } catch (e) {
+      _log.warning('feishu: screen image failed ($e)');
+    }
+    final screen = _trimBlank(bridge.snapshotActiveScreen() ?? const [])
+        .where((l) => !_decorationLine.hasMatch(l))
+        .toList();
+    final text =
+        screen.isEmpty ? '(blank screen)' : _formatReplyLines(screen);
+    await api.sendText(chatId, text).catchError((_) {});
+  }
+
+  /// Pure-decoration rows of a TUI frame — borders, rules,
+  /// spinner padding — that carry no content. (`-` last so it
+  /// can't open a range.)
+  static final RegExp _decorationLine =
+      RegExp(r'^[\s─━═│┃║╔╗╚╝╠╣╦╩╬┌┐└┘├┤┬┴┼╌╎┄┅·•◦=+-]*$');
+
+  /// A message typed into a terminal owned by a TUI with a server
+  /// adapter: through the server (same session the desktop TUI
+  /// shows, pure text reply); the generic screen mirror when the
+  /// server is unreachable.
+  Future<void> _tuiServerChat(
+      FeishuInboundEvent event, OpencodeGateway gateway) async {
+    final cwd = bridge.activeTerminalCwd();
+    if (cwd != null && await gateway.ensure()) {
+      final reply = await gateway.chat(cwd, event.text);
+      if (reply != null && reply.isNotEmpty) {
+        _log.info('feishu: tui-chat ${event.messageId} via server');
+        await api.sendText(event.chatId, reply).catchError((_) {});
+        return;
+      }
+    }
+    _log.info('feishu: tui-chat ${event.messageId} fell back to mirror');
+    _mirrorIntoTui(event);
+  }
+
+  /// Relay the text into the TUI and mirror its rendered screen
+  /// back once quiet (the generic TUI path). [text] overrides
+  /// [FeishuInboundEvent.text] for `/type`.
+  void _mirrorIntoTui(FeishuInboundEvent event, {String? text}) {
+    final line = text ?? event.text;
+    _capture?.flush();
+    final output = bridge.subscribeActiveOutput();
+    if (output == null) {
+      bridge.runCommand('$line\n');
+      unawaited(api
+          .sendText(event.chatId, _kTuiHint)
+          .catchError((_) {}));
       return;
     }
     _capture = _OutputCapture(
       stream: output,
       chatId: event.chatId,
       api: api,
-      command: event.text,
+      command: line,
       idleWindow: outputWindow,
       maxWindow: maxOutputWindow,
       onDone: () => _capture = null,
+      screenOf: bridge.snapshotActiveScreen,
     );
-    bridge.runCommand('${event.text}\n');
-    _log.info('feishu: command ${event.messageId} '
-        'from ${event.senderOpenId} executed');
+    bridge.runCommand('$line\n');
   }
 
   void _onEvent(FeishuInboundEvent event) => handleEvent(event);
@@ -268,6 +508,19 @@ class _OutputCapture {
   /// Absolute ceiling on the whole capture.
   final Duration maxWindow;
 
+  /// Screen-mirror mode (terminal owned by a full-screen TUI):
+  /// when set, the reply is a snapshot of the rendered screen
+  /// taken at flush time instead of the cleaned byte stream.
+  /// Returns null when the terminal vanished meanwhile.
+  final List<String>? Function()? screenOf;
+
+  /// Identity of the terminal this capture runs in, and the
+  /// callback fired when a known TUI app (see [_sniffTuiApp]) is
+  /// detected taking the screen — the router records it so later
+  /// messages into this terminal route through that app's server.
+  final String? terminalId;
+  final void Function(String terminalId, String app)? onTuiApp;
+
   final List<int> _buffer = [];
   StreamSubscription<List<int>>? _sub;
   Timer? _idleTimer;
@@ -282,6 +535,9 @@ class _OutputCapture {
     required this.idleWindow,
     required this.maxWindow,
     required this.onDone,
+    this.screenOf,
+    this.terminalId,
+    this.onTuiApp,
   }) {
     _sub = stream.listen(_onBytes, onError: (_) {}, onDone: flush);
     _idleTimer = Timer(idleWindow, _onIdle);
@@ -291,6 +547,23 @@ class _OutputCapture {
   void _onBytes(List<int> data) {
     if (_finished) return;
     _buffer.addAll(data);
+    // A TUI taking over the screen (DECSET 1049/1047/47) makes the
+    // rest of the stream layout painting — end with the hint
+    // instead of relaying its cleaning leftovers as garbage. (Not
+    // in mirror mode: we are already IN a TUI and mirroring it.)
+    if (screenOf == null &&
+        _altScreenEnter
+            .hasMatch(utf8.decode(data, allowMalformed: true))) {
+      final app = _sniffTuiApp(_cleanLines(_buffer));
+      final tid = terminalId;
+      if (app != null && tid != null) onTuiApp?.call(tid, app);
+      _finish();
+      unawaited(api
+          .sendText(
+              chatId, app == 'opencode' ? _kOpencodeTuiHint : _kTuiHint)
+          .catchError((_) {}));
+      return;
+    }
     if (_buffer.length >= _kOutputMaxBytes) {
       flush();
       return;
@@ -301,8 +574,31 @@ class _OutputCapture {
     _idleTimer = Timer(idleWindow, _onIdle);
   }
 
+  /// `ESC [ ? 1049/1047/47 h` — enter the alternate screen buffer.
+  static final RegExp _altScreenEnter =
+      RegExp('\x1b\\[\\?(?:1049|1047|47)h');
+
+  /// Guess which server-backed TUI just launched from the echoed
+  /// command line right before the alt-screen switch (the shell
+  /// echoes what the user typed). The app must be the command's
+  /// first word — `vim opencode.md` is vim, not opencode. Null
+  /// when unrecognized: the generic mirror path handles it.
+  static String? _sniffTuiApp(List<String> lines) {
+    for (final line in lines.reversed.take(4)) {
+      if (RegExp('(?:^|>\\s*)opencode\\b').hasMatch(line)) {
+        return 'opencode';
+      }
+    }
+    return null;
+  }
+
   void _onIdle() {
     if (_finished) return;
+    // Mirror mode: quiet is the only "done" signal a TUI gives.
+    if (screenOf != null) {
+      flush();
+      return;
+    }
     // Quiet for one idle window. Only reply when the shell shows a
     // fresh prompt (it finished and is waiting for input); without
     // one the command may still be running silently, so keep
@@ -319,15 +615,18 @@ class _OutputCapture {
   /// Stop capturing and send what we have (if anything readable).
   void flush() {
     if (_finished) return;
-    _finished = true;
-    _idleTimer?.cancel();
-    _idleTimer = null;
-    _capTimer?.cancel();
-    _capTimer = null;
-    _sub?.cancel();
+    _finish();
+    if (screenOf != null) {
+      // Mirror mode: reply with the rendered screen, not bytes.
+      final screen = _trimBlank(screenOf!() ?? const []);
+      if (screen.isEmpty) return; // blank screen, nothing to say
+      unawaited(api
+          .sendText(chatId, _formatReplyLines(screen))
+          .catchError((_) {}));
+      return;
+    }
     final bytes = _buffer.toList();
     _buffer.clear();
-    onDone();
     var lines = _cleanLines(bytes);
     // The shell's echo of the command itself is noise on the phone.
     if (lines.length > 1 && lines.first == command) lines.removeAt(0);
@@ -337,7 +636,20 @@ class _OutputCapture {
       lines.removeLast();
     }
     if (lines.isEmpty) return; // command produced no visible output
-    unawaited(api.sendText(chatId, _formatLines(lines)).catchError((_) {}));
+    unawaited(
+        api.sendText(chatId, _formatReplyLines(lines)).catchError((_) {}));
+  }
+
+  /// Tear the capture down (timers, subscription, router state).
+  void _finish() {
+    if (_finished) return;
+    _finished = true;
+    _idleTimer?.cancel();
+    _idleTimer = null;
+    _capTimer?.cancel();
+    _capTimer = null;
+    _sub?.cancel();
+    onDone();
   }
 
   /// What the common shells print while waiting for input:
@@ -367,16 +679,31 @@ class _OutputCapture {
         .where((l) => l.isNotEmpty)
         .toList();
   }
+}
 
-  /// Very verbose output: keep head and tail with an ellipsis.
-  static String _formatLines(List<String> lines) {
-    const maxLines = 40;
-    if (lines.length <= maxLines) return lines.join('\n');
-    const keep = 15;
-    final head = lines.take(keep).join('\n');
-    final tail = lines.sublist(lines.length - keep).join('\n');
-    return '$head\n… (${lines.length - keep * 2} lines)…\n$tail';
+/// Join captured/screen lines into one reply — very verbose
+/// output keeps head and tail with an ellipsis.
+String _formatReplyLines(List<String> lines) {
+  const maxLines = 40;
+  if (lines.length <= maxLines) return lines.join('\n');
+  const keep = 15;
+  final head = lines.take(keep).join('\n');
+  final tail = lines.sublist(lines.length - keep).join('\n');
+  return '$head\n… (${lines.length - keep * 2} lines)…\n$tail';
+}
+
+/// Drop the blank padding lines at the top/bottom of a screen
+/// snapshot (TUI chrome is rarely edge-to-edge text).
+List<String> _trimBlank(List<String> lines) {
+  var start = 0;
+  var end = lines.length;
+  while (start < end && lines[start].isEmpty) {
+    start++;
   }
+  while (end > start && lines[end - 1].isEmpty) {
+    end--;
+  }
+  return lines.sublist(start, end);
 }
 
 class _NullHostBridge implements FeishuHostBridge {
@@ -385,4 +712,19 @@ class _NullHostBridge implements FeishuHostBridge {
 
   @override
   Stream<List<int>>? subscribeActiveOutput() => null;
+
+  @override
+  bool? activeTerminalInAltScreen() => null;
+
+  @override
+  List<String>? snapshotActiveScreen() => null;
+
+  @override
+  String? activeTerminalId() => null;
+
+  @override
+  String? activeTerminalCwd() => null;
+
+  @override
+  Future<Uint8List?> snapshotActiveTerminalPng() async => null;
 }

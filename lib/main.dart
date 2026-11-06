@@ -2792,4 +2792,30 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
   @override
   Stream<List<int>>? subscribeActiveOutput() =>
       _focusedTerminal()?.outputTap;
+
+  @override
+  bool? activeTerminalInAltScreen() => _focusedTerminal()?.inAltScreen;
+
+  @override
+  List<String>? snapshotActiveScreen() =>
+      _focusedTerminal()?.visibleScreenLines();
+
+  @override
+  String? activeTerminalId() =>
+      shell._activeWorkspace?.key.currentState?.getFocusedSurface()?.id;
+
+  @override
+  String? activeTerminalCwd() {
+    final surface =
+        shell._activeWorkspace?.key.currentState?.getFocusedSurface();
+    if (surface == null) return null;
+    // OSC 7-tracked cwd, else the spawn directory. '~' is a
+    // marker for "WSL home unknown" — not a usable path.
+    final initial = surface.initialCwd;
+    return surface.currentCwd ?? (initial == '~' ? null : initial);
+  }
+
+  @override
+  Future<Uint8List?> snapshotActiveTerminalPng() async =>
+      await _focusedTerminal()?.capturePng();
 }
