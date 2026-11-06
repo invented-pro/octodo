@@ -603,7 +603,9 @@ class _AppShellState extends State<AppShell>
   /// when either changes (a QR bind/unbind flips the credentials on
   /// disk; the toggle flips the master switch).
   void _initFeishuIntegration() {
-    final integration = FeishuIntegration(bridge: _AppShellFeishuBridge(this));
+    final bridge = _AppShellFeishuBridge(this);
+    _feishuBridge = bridge;
+    final integration = FeishuIntegration(bridge: bridge);
     _feishu = integration;
     unawaited(integration.sync(
       enabled: SettingsRuntime.instance.store
@@ -916,6 +918,10 @@ class _AppShellState extends State<AppShell>
   /// Feishu remote-control runtime (WS channel + router). Created
   /// once in initState; null only before that.
   FeishuIntegration? _feishu;
+
+  /// The bridge created in [_initFeishuIntegration] — the task-result
+  /// sink lives on it (see the workspace `onAttention` callback).
+  _AppShellFeishuBridge? _feishuBridge;
   StreamSubscription<bool>? _feishuEnabledSub;
 
   /// Install in [initState]; uninstall in [dispose].
@@ -1652,8 +1658,34 @@ class _AppShellState extends State<AppShell>
                             // attached; viewed/closed hooks flow back down
                             // to clear / purge unread state at the right
                             // moments.
-                            onAttention: (surfaceId, attention) =>
-                                _hub.handle(entry.id, surfaceId, attention),
+                            onAttention: (surfaceId, attention) {
+                              _hub.handle(entry.id, surfaceId, attention);
+                              // Task results (OSC 133 `D`, gated by the
+                              // user's "tasks longer than" setting) go
+                              // to Feishu chats bound to this workspace.
+                              if (attention.kind ==
+                                  AttentionKind.commandFinished) {
+                                final d = attention.duration;
+                                final minSeconds = SettingsRuntime.instance
+                                    .store
+                                    .get<int>(SettingsRuntime
+                                        .instance
+                                        .catalog
+                                        .general
+                                        .notificationMinTaskSeconds);
+                                if (d != null &&
+                                    d.inSeconds >= minSeconds) {
+                                  _feishuBridge?.taskResultSink?.call(
+                                    FeishuTaskResult(
+                                      workspaceId: entry.id,
+                                      surfaceId: surfaceId,
+                                      exitCode: attention.exitCode,
+                                      duration: d,
+                                    ),
+                                  );
+                                }
+                              }
+                            },
                             onSurfaceViewed: (surfaceId) =>
                                 _onSurfaceViewed(entry, surfaceId),
                             onSurfaceClosed: (surfaceId) =>
@@ -2771,7 +2803,11 @@ class _CollapsedWorkspaceTileState extends State<_CollapsedWorkspaceTile> {
 /// bound to.
 class _AppShellFeishuBridge implements FeishuHostBridge {
   final _AppShellState shell;
-  const _AppShellFeishuBridge(this.shell);
+  _AppShellFeishuBridge(this.shell);
+
+  /// The task-completion sink the Feishu router registered — called
+  /// from the workspace attention callback (OSC 133 `D` marks).
+  void Function(FeishuTaskResult result)? taskResultSink;
 
   /// The workspace entry for [workspaceId] — null means the active
   /// workspace.
@@ -2846,6 +2882,25 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
     state.closeTabPublic();
     return true;
   }
+
+  @override
+  void watchTaskResults(void Function(FeishuTaskResult result) sink) {
+    taskResultSink = sink;
+  }
+
+  @override
+  List<String>? snapshotSurfaceScreen(String? workspaceId, String surfaceId) =>
+      _entryFor(workspaceId)
+          ?.key
+          .currentState
+          ?.surfaceScreenLinesById(surfaceId);
+
+  @override
+  String? surfaceTitle(String? workspaceId, String surfaceId) =>
+      _entryFor(workspaceId)
+          ?.key
+          .currentState
+          ?.surfaceChipTitleById(surfaceId);
 
   @override
   void runCommand(String? workspaceId, String command) {

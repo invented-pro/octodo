@@ -99,6 +99,12 @@ class _RecordingBridge implements FeishuHostBridge {
   /// against it, falling back to the layout's own focused tab.
   String? focusedSurfaceId;
 
+  /// The task-completion sink the router registered in `_start`.
+  void Function(FeishuTaskResult)? taskResultSink;
+
+  /// Per-surface visible screens for the task-result snapshots.
+  final Map<String, List<String>> screenBySurface = {};
+
   @override
   List<FeishuWorkspace> listWorkspaces() => workspaces;
 
@@ -179,6 +185,25 @@ class _RecordingBridge implements FeishuHostBridge {
           p,
     ];
     return true;
+  }
+
+  @override
+  void watchTaskResults(void Function(FeishuTaskResult result) sink) {
+    taskResultSink = sink;
+  }
+
+  @override
+  List<String>? snapshotSurfaceScreen(String? workspaceId, String surfaceId) =>
+      screenBySurface[surfaceId];
+
+  @override
+  String? surfaceTitle(String? workspaceId, String surfaceId) {
+    for (final p in panes) {
+      for (final t in p.tabs) {
+        if (t.id == surfaceId) return t.title;
+      }
+    }
+    return null;
   }
 
   @override
@@ -1317,6 +1342,79 @@ void main() {
     expect(bridge.commands.last, 'fix the bug');
     expect(sent.last.$2, contains('opencode tui screen'),
         reason: 'the TUI path answers with the screen mirror');
+  });
+
+  test('task results from other tabs reach the bound chat', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_build', title: 'build', cwd: null, focused: true),
+          FeishuTabStatus(
+              id: 'tab_sh', title: 'shell', cwd: null, focused: false),
+        ]),
+      ]
+      ..screenBySurface['tab_build'] = const ['build output line'];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+    // Bound to the shell tab; the build runs in the OTHER tab.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 1.1.2',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    bridge.taskResultSink?.call(const FeishuTaskResult(
+      workspaceId: 'ws_1',
+      surfaceId: 'tab_build',
+      exitCode: 0,
+      duration: Duration(minutes: 3, seconds: 12),
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    final reply = sent.last.$2;
+    expect(reply, contains('✅ build — task finished (exit 0, took 3m 12s)'));
+    expect(reply, contains('build output line'));
+
+    // A failing task is marked ❌.
+    bridge.taskResultSink?.call(const FeishuTaskResult(
+      workspaceId: 'ws_1',
+      surfaceId: 'tab_build',
+      exitCode: 1,
+      duration: Duration(seconds: 41),
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(sent.last.$2, contains('❌ build'));
+    expect(sent.last.$2, contains('took 41s'));
+
+    // The bound tab's own results are skipped — commands sent from
+    // Feishu already answer through the output capture.
+    final before = sent.length;
+    bridge.taskResultSink?.call(const FeishuTaskResult(
+      workspaceId: 'ws_1',
+      surfaceId: 'tab_sh',
+      exitCode: 0,
+      duration: Duration(minutes: 1),
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(sent.length, before, reason: 'no double-send for the bound tab');
+
+    // Another workspace's results go nowhere — nothing is bound.
+    bridge.taskResultSink?.call(const FeishuTaskResult(
+      workspaceId: 'ws_other',
+      surfaceId: 'tab_build',
+      exitCode: 0,
+      duration: Duration(minutes: 5),
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(sent.length, before);
   });
 
   // ── Phase 2: cards, bindings, confirmations ────────────────────

@@ -40,6 +40,24 @@ class FeishuWorkspace {
   const FeishuWorkspace(this.id, this.name, {this.active = false});
 }
 
+/// A task completion reported by shell integration (OSC 133 `D` mark)
+/// in some tab — the multi-tab result feed. [duration] is
+/// threshold-gated upstream by the user's "only notify for tasks
+/// longer than" setting.
+class FeishuTaskResult {
+  final String workspaceId;
+  final String surfaceId;
+  final int? exitCode;
+  final Duration duration;
+
+  const FeishuTaskResult({
+    required this.workspaceId,
+    required this.surfaceId,
+    required this.exitCode,
+    required this.duration,
+  });
+}
+
 /// One terminal tab (a surface) of a pane.
 class FeishuTabStatus {
   final String id;
@@ -124,6 +142,20 @@ abstract class FeishuHostBridge {
 
   /// Close [workspaceId]'s focused tab. False when there is none.
   bool closeTab(String? workspaceId);
+
+  /// Subscribe to task completions (OSC 133 `D` marks, gated by the
+  /// user's "only notify for tasks longer than" setting) in every
+  /// tab of every workspace — the feed behind multi-tab result
+  /// forwarding.
+  void watchTaskResults(void Function(FeishuTaskResult result) sink);
+
+  /// The visible screen lines of the surface with [surfaceId] — the
+  /// result snapshot for a tab that is not the focused one. Null when
+  /// the surface is gone.
+  List<String>? snapshotSurfaceScreen(String? workspaceId, String surfaceId);
+
+  /// The tab title (chip) of the surface with [surfaceId], or null.
+  String? surfaceTitle(String? workspaceId, String surfaceId);
 
   /// Write [command] (already newline-terminated by the router) into
   /// the focused terminal of [workspaceId]. No-op when no terminal
@@ -344,6 +376,7 @@ class FeishuIntegration {
     // The card press handler: the answer must reach Feishu within
     // 3 s, so the channel asks us and writes our reply back.
     channel.cardActionHandler = _handleCardAction;
+    bridge.watchTaskResults(_onTaskResult);
     await _loadBindings();
     await _loadApprovals();
     await channel.start(creds);
@@ -723,6 +756,8 @@ class FeishuIntegration {
       'output.\n'
       'Dangerous commands ask first — Run once / Always / Cancel on a '
       'card (or /run <token> / /cancel as text).\n'
+      'Long tasks finishing in any tab of the bound workspace send '
+      'their result here (✅/❌).\n'
       'A bound chat is read-only for everyone except the member who '
       'bound it.';
 
@@ -876,6 +911,38 @@ class FeishuIntegration {
       if (workspace.id == id) return workspace.name;
     }
     return null;
+  }
+
+  /// A long task finished in some tab of a bound workspace — deliver
+  /// the result the desktop screen shows to the chat. The bound tab
+  /// itself is skipped: commands sent from here already answer
+  /// through the output capture, and this must not double-send.
+  void _onTaskResult(FeishuTaskResult result) {
+    if (!_running) return;
+    for (final binding in _bindings.values) {
+      if (binding.workspaceId != result.workspaceId) continue;
+      if (binding.surfaceId != null &&
+          binding.surfaceId == result.surfaceId) {
+        continue;
+      }
+      final title = bridge.surfaceTitle(result.workspaceId, result.surfaceId);
+      final rc = result.exitCode;
+      final mark = rc == null || rc == 0 ? '✅' : '❌';
+      final d = result.duration;
+      final mins = d.inMinutes;
+      final secs = d.inSeconds % 60;
+      final took = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
+      final lines = bridge.snapshotSurfaceScreen(
+              result.workspaceId, result.surfaceId) ??
+          const <String>[];
+      final tail = _trimBlank(lines);
+      final body = [
+        '$mark ${title == null || title.isEmpty ? 'tab' : title} — '
+            'task finished (exit ${rc ?? '?'}, took $took)',
+        ...tail,
+      ].join('\n');
+      unawaited(_sendReply(binding.chatId, body).catchError((_) {}));
+    }
   }
 
   /// `/newtab` — open a tab in the target workspace (its focused
@@ -2005,6 +2072,16 @@ class _NullHostBridge implements FeishuHostBridge {
 
   @override
   bool closeTab(String? workspaceId) => false;
+
+  @override
+  void watchTaskResults(void Function(FeishuTaskResult result) sink) {}
+
+  @override
+  List<String>? snapshotSurfaceScreen(String? workspaceId, String surfaceId) =>
+      null;
+
+  @override
+  String? surfaceTitle(String? workspaceId, String surfaceId) => null;
 
   @override
   void runCommand(String? workspaceId, String command) {}

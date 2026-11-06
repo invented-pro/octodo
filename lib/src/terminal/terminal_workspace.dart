@@ -1979,6 +1979,29 @@ function prompt {
     return container.focusedSurface;
   }
 
+  /// The visible screen lines of the surface with [surfaceId] — the
+  /// Feishu bridge's task-result snapshot for tabs other than the
+  /// focused one. Null when the surface is gone (closed since the
+  /// task started).
+  List<String>? surfaceScreenLinesById(String surfaceId) {
+    final root = _rootPane;
+    if (root == null) return null;
+    final leaves = <PaneContainer>[];
+    if (root is PaneContainer) {
+      leaves.add(root);
+    } else if (root is PaneSplit) {
+      root.forEachLeaf(leaves.add);
+    }
+    for (final leaf in leaves) {
+      for (final surface in leaf.surfaces) {
+        if (surface.id == surfaceId) {
+          return surface.terminalViewState?.visibleScreenLines();
+        }
+      }
+    }
+    return null;
+  }
+
   // ── Notification-pipeline support ───────────────────────────────
 
   /// Jump to and focus the surface with [surfaceId] — the click-through
