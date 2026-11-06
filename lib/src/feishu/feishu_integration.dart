@@ -1101,15 +1101,54 @@ class FeishuIntegration {
   /// Make the pane — and the tab — a binding points at the target of
   /// the commands (a pane- or tab-level binding addresses one place,
   /// not "whatever is focused right now").
+  ///
+  /// Pane and tab ids are fresh UUIDs every launch, so a restored
+  /// binding's ids are stale after a restart. When the ids miss, the
+  /// binding heals by its stored position numbers (pane n, tab k) and
+  /// the ids are rewritten — the binding survives restarts.
   void _focusBoundPane(String chatId, String? workspaceId) {
     final binding = _bindings[chatId];
     if (binding == null) return;
     if (binding.paneId == null && binding.surfaceId == null) return;
-    final ok = bridge.focusPane(workspaceId, binding.paneId ?? '',
-        surfaceId: binding.surfaceId);
-    if (!ok) {
-      _log.info('feishu: the bound pane of chat $chatId is gone');
+    if (bridge.focusPane(workspaceId, binding.paneId ?? '',
+        surfaceId: binding.surfaceId)) {
+      return;
     }
+    // The ids are stale — restore by position and heal.
+    if (binding.paneNumber == null) {
+      _log.info('feishu: the bound pane of chat $chatId is gone');
+      return;
+    }
+    final panes = bridge.layoutOf(workspaceId).panes;
+    if (binding.paneNumber! > panes.length) {
+      _log.info('feishu: the bound pane of chat $chatId is gone');
+      return;
+    }
+    final pane = panes[binding.paneNumber! - 1];
+    String? surfaceId;
+    if (binding.surfaceNumber != null &&
+        binding.surfaceNumber! <= pane.tabs.length) {
+      surfaceId = pane.tabs[binding.surfaceNumber! - 1].id;
+    }
+    if (!bridge.focusPane(workspaceId, pane.id, surfaceId: surfaceId)) {
+      _log.info('feishu: the bound pane of chat $chatId is gone');
+      return;
+    }
+    _bindings[chatId] = FeishuChatBinding(
+      chatId: binding.chatId,
+      chatType: binding.chatType,
+      workspaceId: binding.workspaceId,
+      workspaceName: binding.workspaceName,
+      paneId: pane.id,
+      paneNumber: binding.paneNumber,
+      surfaceId: surfaceId,
+      surfaceNumber: binding.surfaceNumber,
+      boundAt: binding.boundAt,
+      boundBy: binding.boundBy,
+    );
+    unawaited(_saveBindings());
+    _log.info('feishu: chat $chatId binding healed to pane '
+        '${binding.paneNumber} by position');
   }
 
   /// Send the workspace picker card — the `/attach` flow (design doc

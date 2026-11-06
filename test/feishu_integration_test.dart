@@ -101,8 +101,15 @@ class _RecordingBridge implements FeishuHostBridge {
 
   @override
   bool focusPane(String? workspaceId, String paneId, {String? surfaceId}) {
+    // Mirror the real bridge: unknown pane/tab ids fail — that is
+    // what drives the router's heal-by-position path.
+    final matches = panes.where((p) => p.id == paneId).toList();
+    if (matches.isEmpty) return false;
+    if (surfaceId != null) {
+      if (!matches.first.tabs.any((t) => t.id == surfaceId)) return false;
+      focusedSurfaces.add(surfaceId);
+    }
     focusedPanes.add(paneId);
-    if (surfaceId != null) focusedSurfaces.add(surfaceId);
     return true;
   }
 
@@ -1149,6 +1156,66 @@ void main() {
     }
     expect(reply, contains('read-only'),
         reason: 'help states the binding permission model');
+  });
+
+  test('a restored binding heals to the live panes by position',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_live', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_x', title: 'one', cwd: null, focused: true),
+          FeishuTabStatus(
+              id: 'tab_y', title: 'two', cwd: null, focused: false),
+        ]),
+      ];
+    final sent = <(String, String)>[];
+    // The binding's ids are from the previous launch — both stale.
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      seedBindings: {
+        'oc_chat': FeishuChatBinding(
+          chatId: 'oc_chat',
+          chatType: 'p2p',
+          workspaceId: 'ws_1',
+          workspaceName: 'octodo',
+          paneId: 'pane_dead',
+          paneNumber: 1,
+          surfaceId: 'tab_dead',
+          surfaceNumber: 2,
+          boundAt: DateTime.now(),
+          boundBy: 'ou_owner',
+        ),
+      },
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+
+    // Healed by position: pane 1's second tab.
+    expect(bridge.focusedPanes, ['pane_live']);
+    expect(bridge.focusedSurfaces, ['tab_y']);
+
+    // The healed ids are persisted — /status marks the live pane.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_status',
+      text: '/status',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    final reply = sent.last.$2;
+    expect(reply, contains('1. [focused] [bound]'));
+    expect(reply, contains('2. two  [bound]'));
   });
 
   // ── Phase 2: cards, bindings, confirmations ────────────────────
