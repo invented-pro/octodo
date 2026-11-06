@@ -338,12 +338,14 @@ void main() {
     expect(channel.startCalls, 1);
     expect(channel.startedWith!.appId, 'cli_x');
     expect(integration.standby.value, isNull);
+    expect(integration.link.value, FeishuLinkState.active);
 
     // Unbind (credentials deleted) → the channel stops, and the
     // lease goes with it.
     await store.delete();
     await integration.sync();
     expect(channel.stopCalls, 1);
+    expect(integration.link.value, FeishuLinkState.none);
     expect(lock.existsSync(), isFalse,
         reason: 'a clean stop releases the lease');
     integration.dispose();
@@ -373,6 +375,7 @@ void main() {
         reason: 'the connection belongs to pid 4242');
     expect(integration.isRunning, isFalse);
     expect(integration.standby.value?.ownerPid, 4242);
+    expect(integration.link.value, FeishuLinkState.standby);
   });
 
   test('the standby instance takes over when the holder exits',
@@ -404,6 +407,7 @@ void main() {
 
     expect(integration.isRunning, isTrue);
     expect(integration.standby.value, isNull);
+    expect(integration.link.value, FeishuLinkState.active);
     expect(channel.startCalls, 1);
   });
 
@@ -437,7 +441,55 @@ void main() {
 
     expect(integration.isRunning, isFalse, reason: 'demoted');
     expect(integration.standby.value?.ownerPid, 9999);
+    expect(integration.link.value, FeishuLinkState.standby);
     expect(channel.stopCalls, 1);
+  });
+
+  test('claim force-takes the lease and fences the old holder',
+      () async {
+    final root = Directory.systemTemp.createTempSync('feishu_multi');
+    addTearDown(() => root.deleteSync(recursive: true));
+    final lock = Directory(
+        '${root.path}${Platform.pathSeparator}lease.lock');
+
+    // Another instance leads, beating fast so its fencing shows
+    // within the test.
+    final holder = FeishuConnectionLease(lock, pid: 4242,
+        heartbeatEvery: const Duration(milliseconds: 20),
+        staleAfter: const Duration(hours: 1));
+    holder.tryAcquire();
+    var holderLost = false;
+    holder.onLost = () => holderLost = true;
+
+    final channel = _FakeChannel();
+    final integration = FeishuIntegration(
+      bridge: _RecordingBridge(),
+      channel: channel,
+      credentialStore: await _storeIn(root, _ownerCreds()),
+      lease: FeishuConnectionLease(lock, pid: 5353),
+    );
+    addTearDown(integration.dispose);
+    await integration.sync();
+    expect(integration.isRunning, isFalse);
+
+    // The user presses Claim in the Mobile App panel.
+    await integration.claim();
+
+    expect(integration.isRunning, isTrue);
+    expect(integration.standby.value, isNull);
+    expect(integration.link.value, FeishuLinkState.active);
+    expect(channel.startCalls, 1);
+    expect(
+      File('${lock.path}${Platform.pathSeparator}owner.json')
+          .readAsStringSync(),
+      contains('5353'),
+    );
+
+    // The previous holder notices on its next heartbeat.
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    expect(holderLost, isTrue,
+        reason: 'the old holder fenced itself out');
+    expect(holder.heartbeatRunning, isFalse);
   });
 
   test('a chat is greeted with the /help card on its first message '

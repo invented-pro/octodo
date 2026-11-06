@@ -248,6 +248,11 @@ const String _kTuiNotSubmitted = 'The message was typed into the app, '
     '(close it and send again), or the app talks to another opencode '
     'server.';
 
+/// This instance's Feishu connection state, for the drawer badge:
+/// green while it holds the connection, amber while another octodo
+/// instance does, none when no bot is bound.
+enum FeishuLinkState { none, active, standby }
+
 class FeishuIntegration {
   final FeishuEventChannel channel;
   final FeishuApiClient api;
@@ -335,6 +340,10 @@ class FeishuIntegration {
       ValueNotifier<FeishuStandby?>(null);
   Timer? _takeoverPoll;
 
+  /// The drawer badge state (green = connected, amber = standby).
+  final ValueNotifier<FeishuLinkState> link =
+      ValueNotifier<FeishuLinkState>(FeishuLinkState.none);
+
   FeishuIntegration({
     required this.bridge,
     FeishuEventChannel? channel,
@@ -404,6 +413,7 @@ class FeishuIntegration {
       _log.info('feishu: connection held by another instance '
           '${holder == null ? '' : '(pid $holder) '}— standby');
       standby.value = FeishuStandby(acquired.holderPid);
+      link.value = FeishuLinkState.standby;
       _startTakeoverPoll();
       return;
     }
@@ -431,6 +441,7 @@ class FeishuIntegration {
     await _loadApprovals();
     await _loadGreetings();
     await channel.start(creds);
+    link.value = FeishuLinkState.active;
     _log.info('feishu: integration started for ${creds.appIdPreview}');
   }
 
@@ -449,6 +460,7 @@ class FeishuIntegration {
     _capture?.flush();
     unawaited(channel.stop());
     standby.value = FeishuStandby(lease.inspectHolder());
+    link.value = FeishuLinkState.standby;
     _startTakeoverPoll();
   }
 
@@ -462,9 +474,23 @@ class FeishuIntegration {
     final acquired = lease.tryAcquire();
     if (!acquired.acquired) {
       standby.value = FeishuStandby(acquired.holderPid);
+      link.value = FeishuLinkState.standby;
       return;
     }
     _log.info('feishu: took over the Feishu connection');
+    await _connectTransport(_credentials!);
+  }
+
+  /// Force-claim the connection (the panel's Claim button): take
+  /// the lease even while another instance holds it, then connect.
+  /// The previous holder fences itself out on its next heartbeat
+  /// renew — for at most one heartbeat period both are connected,
+  /// which is inherent to a forced takeover.
+  Future<void> claim() async {
+    if (_credentials == null) return;
+    lease.forceClaim();
+    _log.info('feishu: connection claimed');
+    if (_running) return;
     await _connectTransport(_credentials!);
   }
 
@@ -538,6 +564,7 @@ class FeishuIntegration {
     _takeoverPoll?.cancel();
     _takeoverPoll = null;
     standby.value = null;
+    link.value = FeishuLinkState.none;
     lease.release();
     if (!_running) return;
     _running = false;

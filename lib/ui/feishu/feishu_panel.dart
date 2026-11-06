@@ -56,11 +56,14 @@ class FeishuBrandIcon extends StatelessWidget {
 
 class MobileAppsPanel extends StatefulWidget {
   /// Non-null while another octodo instance holds the Feishu
-  /// connection — the Feishu card then shows who holds it instead
-  /// of the binding lifecycle. Comes from the app shell.
+  /// connection — the Feishu card then shows who holds it (with a
+  /// Claim button) instead of the binding lifecycle.
   final ValueListenable<FeishuStandby?>? standby;
 
-  const MobileAppsPanel({super.key, this.standby});
+  /// Force-takes the connection lease (the standby card's Claim).
+  final VoidCallback? onClaim;
+
+  const MobileAppsPanel({super.key, this.standby, this.onClaim});
 
   @override
   State<MobileAppsPanel> createState() => _MobileAppsPanelState();
@@ -177,9 +180,10 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
     );
   }
 
-  /// This instance lost the lease — one factual line, no connect or
-  /// unbind buttons (the holder ignores disk changes until it
-  /// re-syncs, so binding from here would silently do nothing).
+  /// This instance lost the lease — one factual line plus Claim,
+  /// which force-takes the lease (the previous holder demotes on
+  /// its next heartbeat). No bind/unbind buttons: the holder
+  /// ignores disk changes until it re-syncs.
   Widget _standbyRow(ThemePalette palette, FeishuStandby standby) {
     final holder = standby.ownerPid == null
         ? 'another octodo instance'
@@ -188,7 +192,10 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
       leading: _brandLeading(palette),
       title: 'Feishu',
       subtitle: 'Held by $holder.',
-      trailing: const SizedBox.shrink(),
+      trailing: FilledButton(
+        onPressed: widget.onClaim,
+        child: const Text('Claim'),
+      ),
     );
   }
 
@@ -473,10 +480,11 @@ class _FeishuQrDialogState extends State<_FeishuQrDialog> {
 Future<void> showMobileAppsPanel(
   BuildContext context, {
   ValueListenable<FeishuStandby?>? standby,
+  VoidCallback? onClaim,
 }) {
   return showDialog<void>(
     context: context,
     barrierColor: Colors.black.withValues(alpha: 0.5),
-    builder: (_) => MobileAppsPanel(standby: standby),
+    builder: (_) => MobileAppsPanel(standby: standby, onClaim: onClaim),
   );
 }

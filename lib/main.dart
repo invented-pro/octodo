@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert' show utf8;
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flex_color_picker/flex_color_picker.dart';
@@ -1610,9 +1611,11 @@ class _AppShellState extends State<AppShell>
               onAcceptReorder: _reorderWorkspaceById,
               updateModel: _updateModel,
               updateController: _updateController,
+              feishuLink: _feishu?.link,
               onOpenMobileApp: () => showMobileAppsPanel(
                 context,
                 standby: _feishu?.standby,
+                onClaim: () => unawaited(_feishu?.claim()),
               ),
             ),
             // ── Active workspace content ──────────────────────
@@ -1753,6 +1756,11 @@ class _WorkspaceDrawer extends StatelessWidget {
   /// being the first.
   final VoidCallback onOpenMobileApp;
 
+  /// Feishu connection state for the drawer dot — green while this
+  /// instance holds the connection, amber while another does, no
+  /// dot when no bot is bound.
+  final ValueListenable<FeishuLinkState>? feishuLink;
+
   const _WorkspaceDrawer({
     required this.workspaces,
     required this.currentIndex,
@@ -1767,10 +1775,64 @@ class _WorkspaceDrawer extends StatelessWidget {
     required this.updateModel,
     required this.updateController,
     required this.onOpenMobileApp,
+    this.feishuLink,
   });
 
   static const double _expandedWidth = 200;
   static const double _collapsedWidth = 44;
+
+  /// The phonelink glyph with the Feishu connection dot pinned to
+  /// its top-right corner: light green while this instance holds
+  /// the connection, amber while another does, bare when no bot is
+  /// bound. Follows [feishuLink] live.
+  Widget _phoneGlyph(ThemePalette palette) {
+    final listenable = feishuLink;
+    if (listenable == null) return _phoneGlyphWithDot(palette, null);
+    return ValueListenableBuilder<FeishuLinkState>(
+      valueListenable: listenable,
+      builder: (context, link, _) => _phoneGlyphWithDot(
+        palette,
+        switch (link) {
+          FeishuLinkState.active => palette.accentGreen,
+          FeishuLinkState.standby => palette.accentYellow,
+          FeishuLinkState.none => null,
+        },
+      ),
+    );
+  }
+
+  Widget _phoneGlyphWithDot(ThemePalette palette, Color? dot) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Icon(
+          Icons.phonelink,
+          size: 14,
+          color: palette.brightness == Brightness.dark
+              ? palette.textMuted
+              : palette.textBody,
+        ),
+        if (dot != null)
+          Positioned(
+            right: -2.5,
+            top: -2.5,
+            child: Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                color: dot,
+                shape: BoxShape.circle,
+                // The drawer surface lifts the dot off the glyph.
+                border: Border.all(
+                  color: palette.drawerSurface,
+                  width: 1,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1910,13 +1972,7 @@ class _WorkspaceDrawer extends StatelessWidget {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(
-                        Icons.phonelink,
-                        size: 14,
-                        color: palette.brightness == Brightness.dark
-                            ? palette.textMuted
-                            : palette.textBody,
-                      ),
+                      _phoneGlyph(palette),
                       if (!collapsed) ...[
                         const SizedBox(width: 6),
                         Text(

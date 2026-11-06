@@ -153,6 +153,16 @@ class FeishuConnectionLease {
     return true;
   }
 
+  /// Take the lease no matter who holds it (the panel's Claim
+  /// button). The old holder fences itself out on its next heartbeat
+  /// renew — for at most one heartbeat period both instances are
+  /// connected, which is inherent to a forced takeover.
+  void forceClaim() {
+    _stopHeartbeat();
+    _writeOwner();
+    startHeartbeat();
+  }
+
   /// Begin the heartbeat (holder side). [tryAcquire] starts this
   /// on a win; exposed so the integration can re-arm after syncs.
   void startHeartbeat() {
@@ -161,6 +171,9 @@ class FeishuConnectionLease {
   }
 
   void stopHeartbeat() => _stopHeartbeat();
+
+  /// Whether the heartbeat timer is currently running.
+  bool get heartbeatRunning => _heartbeat != null;
 
   void _stopHeartbeat() {
     _heartbeat?.cancel();
