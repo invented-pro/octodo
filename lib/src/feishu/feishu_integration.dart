@@ -910,10 +910,6 @@ class FeishuIntegration {
       'can render it)\n'
       'Plain text runs in the target terminal and answers with its '
       'output.\n'
-      'Dangerous commands ask first — Run once / Always / Cancel on a '
-      'card (or /run <token> / /cancel as text).\n'
-      'Long tasks finishing in any tab of the bound workspace send '
-      'their result here (✅/❌).\n'
       'A bound chat is read-only for everyone except the member who '
       'bound it.';
 

@@ -116,7 +116,7 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
     return Dialog(
       child: SizedBox(
         width: 560,
-        height: 545,
+        height: 520,
         child: Column(
           children: [
             _Header(onClose: () => Navigator.of(context).pop()),
@@ -190,18 +190,6 @@ class _MobileAppsPanelState extends State<MobileAppsPanel> {
             _usageRow(palette, 'plain text',
                 'Runs in the bound terminal and answers with its '
                 'output.'),
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 14, vertical: 8),
-              child: Text(
-                'Dangerous commands ask first · long tasks report '
-                'back here ✅/❌',
-                style: TextStyle(
-                  fontSize: 10.5,
-                  color: palette.textMuted,
-                ),
-              ),
-            ),
           ],
         ),
       ],
