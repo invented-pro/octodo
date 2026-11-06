@@ -1813,11 +1813,11 @@ class _WorkspaceDrawer extends StatelessWidget {
         ),
         if (badge)
           Positioned(
-            right: -4,
-            top: -4,
+            right: link == FeishuLinkState.standby ? -3.5 : -4,
+            top: link == FeishuLinkState.standby ? -3.5 : -4,
             child: Container(
-              width: 10,
-              height: 10,
+              width: link == FeishuLinkState.standby ? 8 : 10,
+              height: link == FeishuLinkState.standby ? 8 : 10,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 // Active: solid light green. Standby: hollow amber —
@@ -1829,7 +1829,7 @@ class _WorkspaceDrawer extends StatelessWidget {
                   color: link == FeishuLinkState.active
                       ? palette.drawerSurface
                       : palette.accentYellow,
-                  width: link == FeishuLinkState.active ? 1.5 : 2,
+                  width: 1.5,
                 ),
               ),
             ),
