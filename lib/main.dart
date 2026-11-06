@@ -1781,27 +1781,26 @@ class _WorkspaceDrawer extends StatelessWidget {
   static const double _expandedWidth = 200;
   static const double _collapsedWidth = 44;
 
-  /// The phonelink glyph with the Feishu connection dot pinned to
-  /// its top-right corner: light green while this instance holds
-  /// the connection, amber while another does, bare when no bot is
-  /// bound. Follows [feishuLink] live.
+  /// The phonelink glyph with the Feishu connection badge pinned to
+  /// its top-right corner: a solid light-green dot while this
+  /// instance holds the connection, a hollow amber ring while
+  /// another does, bare when no bot is bound. Follows [feishuLink]
+  /// live.
   Widget _phoneGlyph(ThemePalette palette) {
     final listenable = feishuLink;
-    if (listenable == null) return _phoneGlyphWithDot(palette, null);
+    if (listenable == null) {
+      return _phoneGlyphWithDot(palette, null);
+    }
     return ValueListenableBuilder<FeishuLinkState>(
       valueListenable: listenable,
-      builder: (context, link, _) => _phoneGlyphWithDot(
-        palette,
-        switch (link) {
-          FeishuLinkState.active => palette.accentGreen,
-          FeishuLinkState.standby => palette.accentYellow,
-          FeishuLinkState.none => null,
-        },
-      ),
+      builder: (context, link, _) =>
+          _phoneGlyphWithDot(palette, link),
     );
   }
 
-  Widget _phoneGlyphWithDot(ThemePalette palette, Color? dot) {
+  Widget _phoneGlyphWithDot(ThemePalette palette, FeishuLinkState? link) {
+    final badge = link == FeishuLinkState.active ||
+        link == FeishuLinkState.standby;
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -1812,20 +1811,25 @@ class _WorkspaceDrawer extends StatelessWidget {
               ? palette.textMuted
               : palette.textBody,
         ),
-        if (dot != null)
+        if (badge)
           Positioned(
-            right: -3,
-            top: -3,
+            right: -4,
+            top: -4,
             child: Container(
-              width: 8,
-              height: 8,
+              width: 10,
+              height: 10,
               decoration: BoxDecoration(
-                color: dot,
                 shape: BoxShape.circle,
-                // The drawer surface lifts the dot off the glyph.
+                // Active: solid light green. Standby: hollow amber —
+                // fill vs outline reads at a glance.
+                color: link == FeishuLinkState.active
+                    ? palette.accentGreen
+                    : Colors.transparent,
                 border: Border.all(
-                  color: palette.drawerSurface,
-                  width: 1.5,
+                  color: link == FeishuLinkState.active
+                      ? palette.drawerSurface
+                      : palette.accentYellow,
+                  width: link == FeishuLinkState.active ? 1.5 : 2,
                 ),
               ),
             ),
