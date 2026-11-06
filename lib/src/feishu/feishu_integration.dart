@@ -117,6 +117,13 @@ abstract class FeishuHostBridge {
   /// tab-level binding. False when the pane (or the tab) is gone.
   bool focusPane(String? workspaceId, String paneId, {String? surfaceId});
 
+  /// Open a tab in [workspaceId]'s focused pane (null = the active
+  /// workspace). False when there is no terminal yet.
+  bool newTab(String? workspaceId);
+
+  /// Close [workspaceId]'s focused tab. False when there is none.
+  bool closeTab(String? workspaceId);
+
   /// Write [command] (already newline-terminated by the router) into
   /// the focused terminal of [workspaceId]. No-op when no terminal
   /// exists.
@@ -484,6 +491,30 @@ class FeishuIntegration {
       return;
     }
 
+    // 5a3. `/newtab` / `/closetab` — tab management in the target
+    //      workspace. The binder's decision (§3.2): closing a tab
+    //      kills its shell.
+    if (event.text == '/newtab') {
+      if (!_mayDrive(event.chatId, event.senderOpenId)) {
+        unawaited(api
+            .sendText(event.chatId, _binderHint(event.chatId))
+            .catchError((_) {}));
+        return;
+      }
+      unawaited(_newTab(event.chatId, workspaceId));
+      return;
+    }
+    if (event.text == '/closetab') {
+      if (!_mayDrive(event.chatId, event.senderOpenId)) {
+        unawaited(api
+            .sendText(event.chatId, _binderHint(event.chatId))
+            .catchError((_) {}));
+        return;
+      }
+      unawaited(_closeTab(event.chatId, workspaceId));
+      return;
+    }
+
     // 5b. `/detach` — drop the binding; the chat follows the active
     //     workspace again. The binder's decision (§3.2).
     if (event.text == '/detach') {
@@ -807,6 +838,117 @@ class FeishuIntegration {
       if (workspace.id == id) return workspace.name;
     }
     return null;
+  }
+
+  /// `/newtab` — open a tab in the target workspace (its focused
+  /// pane; for a bound chat that is the bound pane, focused just
+  /// above). A bound chat re-binds to the new tab right away — the
+  /// next command goes there, not to the old one.
+  Future<void> _newTab(String chatId, String? workspaceId) async {
+    final binding = _bindings[chatId];
+    _focusBoundPane(chatId, workspaceId);
+    final target = binding?.workspaceId ?? workspaceId;
+    if (!bridge.newTab(target)) {
+      await api
+          .sendText(chatId, 'No terminal to add a tab to.')
+          .catchError((_) {});
+      return;
+    }
+    // Where did it land? The fresh tab is the focused one.
+    final layout = bridge.layoutOf(target);
+    FeishuPaneStatus? pane;
+    for (final p in layout.panes) {
+      if (p.focused) {
+        pane = p;
+        break;
+      }
+    }
+    FeishuTabStatus? tab;
+    var tabNumber = 0;
+    if (pane != null) {
+      for (var i = 0; i < pane.tabs.length; i++) {
+        if (pane.tabs[i].focused) {
+          tab = pane.tabs[i];
+          tabNumber = i + 1;
+          break;
+        }
+      }
+    }
+    if (pane == null || tab == null) {
+      await api.sendText(chatId, 'New tab opened.').catchError((_) {});
+      return;
+    }
+    final rebinds = binding != null && binding.workspaceId == target;
+    if (rebinds) {
+      _bindings[chatId] = FeishuChatBinding(
+        chatId: binding.chatId,
+        chatType: binding.chatType,
+        workspaceId: binding.workspaceId,
+        workspaceName: binding.workspaceName,
+        paneId: pane.id,
+        paneNumber: pane.number,
+        surfaceId: tab.id,
+        surfaceNumber: tabNumber,
+        boundAt: binding.boundAt,
+        boundBy: binding.boundBy,
+      );
+      await _saveBindings();
+    }
+    await api
+        .sendText(chatId,
+            'New tab: pane ${pane.number} · tab $tabNumber'
+            '${rebinds ? ' — now driving it' : ''}.')
+        .catchError((_) {});
+  }
+
+  /// `/closetab` — close the target's focused tab (for a bound chat,
+  /// the bound pane's bound tab). Refuses the only tab of the only
+  /// pane — losing a workspace's last terminal from a phone is a
+  /// click too far.
+  Future<void> _closeTab(String chatId, String? workspaceId) async {
+    final binding = _bindings[chatId];
+    _focusBoundPane(chatId, workspaceId);
+    final target = binding?.workspaceId ?? workspaceId;
+    final layout = bridge.layoutOf(target);
+    FeishuPaneStatus? pane;
+    FeishuTabStatus? tab;
+    var tabNumber = 0;
+    for (final p in layout.panes) {
+      if (!p.focused) continue;
+      pane = p;
+      for (var i = 0; i < p.tabs.length; i++) {
+        if (p.tabs[i].focused) {
+          tab = p.tabs[i];
+          tabNumber = i + 1;
+          break;
+        }
+      }
+      break;
+    }
+    if (pane == null || tab == null) {
+      await api.sendText(chatId, 'No tab to close.').catchError((_) {});
+      return;
+    }
+    if (layout.panes.length == 1 && pane.tabs.length == 1) {
+      await api
+          .sendText(chatId,
+              'That is the only tab — close it on the desktop if you '
+              'mean it.')
+          .catchError((_) {});
+      return;
+    }
+    if (!bridge.closeTab(target)) {
+      await api
+          .sendText(chatId, 'No terminal to close a tab in.')
+          .catchError((_) {});
+      return;
+    }
+    final title = tab.title.isEmpty ? 'untitled' : tab.title;
+    await api
+        .sendText(chatId,
+            'Closed "$title" (pane ${pane.number} · tab $tabNumber). '
+            'Numbers may have shifted — /status to re-check.')
+        .catchError((_) {});
   }
 
   /// `/attach <n>` — bind to the n-th workspace; `/attach <n>.<m>` —
@@ -1735,6 +1877,12 @@ class _NullHostBridge implements FeishuHostBridge {
   bool focusPane(String? workspaceId, String paneId,
           {String? surfaceId}) =>
       false;
+
+  @override
+  bool newTab(String? workspaceId) => false;
+
+  @override
+  bool closeTab(String? workspaceId) => false;
 
   @override
   void runCommand(String? workspaceId, String command) {}

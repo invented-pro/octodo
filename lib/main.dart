@@ -2833,6 +2833,22 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
       false;
 
   @override
+  bool newTab(String? workspaceId) {
+    final state = _entryFor(workspaceId)?.key.currentState;
+    if (state == null) return false;
+    state.newTabPublic();
+    return true;
+  }
+
+  @override
+  bool closeTab(String? workspaceId) {
+    final state = _entryFor(workspaceId)?.key.currentState;
+    if (state == null || state.focusedContainer == null) return false;
+    state.closeTabPublic();
+    return true;
+  }
+
+  @override
   void runCommand(String? workspaceId, String command) {
     final view = _focusedTerminal(workspaceId);
     if (view == null) return;

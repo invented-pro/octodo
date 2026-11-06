@@ -86,6 +86,12 @@ class _RecordingBridge implements FeishuHostBridge {
   /// The tabs the fake was asked to focus within their pane.
   final List<String> focusedSurfaces = [];
 
+  /// The workspaces `/newtab` was asked to open a tab in.
+  final List<String?> newTabCalls = [];
+
+  /// The workspaces `/closetab` was asked to close a tab in.
+  final List<String?> closeTabCalls = [];
+
   @override
   List<FeishuWorkspace> listWorkspaces() => workspaces;
 
@@ -97,6 +103,41 @@ class _RecordingBridge implements FeishuHostBridge {
   bool focusPane(String? workspaceId, String paneId, {String? surfaceId}) {
     focusedPanes.add(paneId);
     if (surfaceId != null) focusedSurfaces.add(surfaceId);
+    return true;
+  }
+
+  @override
+  bool newTab(String? workspaceId) {
+    newTabCalls.add(workspaceId);
+    // Simulate the app: a fresh focused tab appears in the focused
+    // pane.
+    panes = [
+      for (final p in panes)
+        if (p.focused)
+          FeishuPaneStatus(
+            id: p.id,
+            number: p.number,
+            focused: true,
+            tabs: [
+              for (final t in p.tabs)
+                FeishuTabStatus(
+                    id: t.id, title: t.title, cwd: t.cwd, focused: false),
+              FeishuTabStatus(
+                  id: 'tab_new_${newTabCalls.length}',
+                  title: 'new',
+                  cwd: null,
+                  focused: true),
+            ],
+          )
+        else
+          p,
+    ];
+    return true;
+  }
+
+  @override
+  bool closeTab(String? workspaceId) {
+    closeTabCalls.add(workspaceId);
     return true;
   }
 
@@ -924,6 +965,124 @@ void main() {
     expect(reply, contains('1. one  [focused]'));
     expect(reply, contains('2. two'));
     expect(reply, contains('The bound pane is gone'));
+  });
+
+  test('/newtab opens a tab in the bound pane and re-binds to it',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+        ]),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+    // Bind to pane 1, tab 1.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 1.1.1',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_newtab',
+      text: '/newtab',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(bridge.newTabCalls, ['ws_1']);
+    expect(sent.last.$2, contains('pane 1 · tab 2'));
+    expect(sent.last.$2, contains('now driving it'));
+
+    // The next command lands in the fresh tab.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_cmd',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    expect(bridge.focusedSurfaces.last, 'tab_new_1');
+  });
+
+  test('/closetab closes the bound tab, but not the only one', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+          FeishuTabStatus(
+              id: 'tab_b', title: 'two', cwd: null, focused: false),
+        ]),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_attach',
+      text: '/attach 1.1',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_close',
+      text: '/closetab',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(bridge.closeTabCalls, ['ws_1']);
+    expect(sent.last.$2, contains('Closed "one"'));
+  });
+
+  test('/closetab refuses the only tab of the only pane', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces = const [FeishuWorkspace('ws_1', 'octodo')]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+        ]),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_close',
+      text: '/closetab',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(bridge.closeTabCalls, isEmpty,
+        reason: 'the last tab is not closed from a phone');
+    expect(sent.last.$2, contains('only tab'));
   });
 
   // ── Phase 2: cards, bindings, confirmations ────────────────────
