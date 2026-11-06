@@ -2833,11 +2833,10 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
       false;
 
   @override
-  bool newTab(String? workspaceId) {
+  Future<bool> newTab(String? workspaceId) async {
     final state = _entryFor(workspaceId)?.key.currentState;
     if (state == null) return false;
-    state.newTabPublic();
-    return true;
+    return state.newTabAwaitPublic();
   }
 
   @override

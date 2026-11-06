@@ -1829,7 +1829,20 @@ function prompt {
   // a hardware-level handler instead. See
   // `lib/src/shortcuts/app_shortcuts.dart` for the full reasoning.
 
+  /// Open a tab in the focused pane. The creation is async (the
+  /// shell's profile may need a `$HOME` query); callers that need the
+  /// tab to exist before they read the layout await
+  /// [newTabAwaitPublic] instead.
   void newTabPublic() => _newSurfaceInFocusedContainer();
+
+  /// Awaitable variant of [newTabPublic] — resolves after the new
+  /// tab is in the pane and focused. False when there is no pane yet.
+  Future<bool> newTabAwaitPublic() async {
+    final container = _focusedContainer;
+    if (container == null) return false;
+    await _newSurfaceInFocusedContainerAsync(container);
+    return true;
+  }
   void closeTabPublic() => _closeFocusedSurface();
   void nextTabPublic() => _nextSurface();
   void previousTabPublic() => _previousSurface();

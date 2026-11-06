@@ -114,8 +114,12 @@ class _RecordingBridge implements FeishuHostBridge {
   }
 
   @override
-  bool newTab(String? workspaceId) {
+  Future<bool> newTab(String? workspaceId) async {
     newTabCalls.add(workspaceId);
+    // The real creation is async (a $HOME query may precede the new
+    // surface) — defer the same way, so a router that does not await
+    // reads the OLD layout and re-binds to the old tab.
+    await Future<void>.delayed(const Duration(milliseconds: 10));
     // Simulate the app: a fresh focused tab appears in the focused
     // pane.
     panes = [

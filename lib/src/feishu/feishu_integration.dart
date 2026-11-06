@@ -118,8 +118,9 @@ abstract class FeishuHostBridge {
   bool focusPane(String? workspaceId, String paneId, {String? surfaceId});
 
   /// Open a tab in [workspaceId]'s focused pane (null = the active
-  /// workspace). False when there is no terminal yet.
-  bool newTab(String? workspaceId);
+  /// workspace). Resolves after the tab exists (the creation is
+  /// async). False when there is no terminal yet.
+  Future<bool> newTab(String? workspaceId);
 
   /// Close [workspaceId]'s focused tab. False when there is none.
   bool closeTab(String? workspaceId);
@@ -876,7 +877,9 @@ class FeishuIntegration {
     final binding = _bindings[chatId];
     _focusBoundPane(chatId, workspaceId);
     final target = binding?.workspaceId ?? workspaceId;
-    if (!bridge.newTab(target)) {
+    // Awaited: the surface creation is async — reading the layout
+    // before it exists re-binds to the OLD focused tab.
+    if (!await bridge.newTab(target)) {
       await api
           .sendText(chatId, 'No terminal to add a tab to.')
           .catchError((_) {});
@@ -1989,7 +1992,7 @@ class _NullHostBridge implements FeishuHostBridge {
       false;
 
   @override
-  bool newTab(String? workspaceId) => false;
+  Future<bool> newTab(String? workspaceId) async => false;
 
   @override
   bool closeTab(String? workspaceId) => false;
