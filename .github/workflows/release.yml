@@ -11,12 +11,20 @@ name: release
 #   - manifest.json                      (R2 mirror only — built by the
 #     publish-manifest job AFTER both platform jobs finish, so a single
 #     multi-platform manifest describes the release; no per-job races)
+#
+# Release lifecycle: create-release publishes a DRAFT release with a
+# generated notes body (commit subjects grouped by type + compare
+# link) — the only job that ever writes the body. The platform jobs
+# add assets via `gh release upload` (asset-only, body untouched).
+# publish-manifest validates the complete asset set, flips the draft
+# public, and mirrors manifest.json + the signature to R2 — so the
+# release description can never depend on which build finishes first.
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write   # softprops/action-gh-release creates the release
+  contents: write   # create-release publishes the release; gh uploads assets
 
 jobs:
   # ---------------------------------------------------------------
@@ -52,8 +60,67 @@ jobs:
           print(f'flutter_version={ver}')
           PY
 
-  build-windows:
+  # ---------------------------------------------------------------
+  # Create the GitHub release ONCE, up front, as a draft whose body
+  # is generated from the commits between the previous tag and this
+  # one (.github/scripts/generate_release_notes.py — grouped
+  # Features/Fixes/Other + Full Changelog compare link; a
+  # release-notes/vX.Y.Z.md override file wins when present).
+  #
+  # This is the only job that ever writes the release body. The
+  # platform jobs upload assets via `gh release upload` (asset-only,
+  # cannot touch the body) and publish-manifest flips the draft
+  # public after every asset is validated. The old design let three
+  # racing softprops/action-gh-release invocations read-modify-write
+  # the whole body with last-writer-wins semantics, so the
+  # description depended on which build finished first — and with no
+  # PRs in this repo, GitHub's generated notes reduced to a bare
+  # "Full Changelog" line.
+  # ---------------------------------------------------------------
+  create-release:
     needs: resolve-config
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}   # gh targets this repo without --repo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + all tags: the notes generator walks
+          # git log between this tag and the previous one.
+          fetch-depth: 0
+
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/generate_release_notes.py \
+            --tag "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --out notes.md
+          cat notes.md
+
+      - name: Create draft release
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          extra=()
+          # Same prerelease rule the platform jobs used to pass to
+          # softprops: a "-rc.1"/"-beta" suffix marks it pre-release,
+          # which keeps GitHub's /releases/latest (and the in-app
+          # feed's stable users) away from it.
+          if [[ "$tag" == *-* ]]; then extra+=(--prerelease); fi
+          if gh release view "$tag" --json id > /dev/null 2>&1; then
+            # Re-run of this job: refresh title/notes/draft instead
+            # of failing on an "already_exists" create.
+            gh release edit "$tag" --draft --title "$tag" \
+              --notes-file notes.md "${extra[@]}"
+          else
+            gh release create "$tag" --verify-tag --draft \
+              --title "$tag" --notes-file notes.md "${extra[@]}"
+          fi
+
+  build-windows:
+    needs: [resolve-config, create-release]
     runs-on: windows-latest
     env:
       # Non-secret: the public URL the in-app R2UpdateFeed will GET.
@@ -244,21 +311,22 @@ jobs:
           }
           Write-Host "R2 mirror complete: s3://$bucket/octodo/{$zip,$sha}"
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          # Mark as pre-release whenever the tag carries a "-prerelease"
-          # suffix. GitHub's /releases/latest endpoint already filters out
-          # pre-releases, so this is enough to keep stable users from
-          # being prompted to "update" to a v1.2.0-rc.1 build.
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip
-            octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip.sha256
+      # Assets only. The release body was written once by the
+      # create-release job; publish-manifest flips the draft public
+      # when every asset is validated. `gh release upload` cannot
+      # touch the description, so build timing can never affect it.
+      - name: Upload release assets (GitHub)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release upload '${{ github.ref_name }}' --repo '${{ github.repository }}' --clobber `
+            "octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip" `
+            "octodo-v${{ steps.build.outputs.ver }}-windows-x64.zip.sha256"
 
   build-macos:
-    needs: resolve-config
+    needs: [resolve-config, create-release]
     # arm64 (Apple Silicon) runner. Newer image than macos-14 so the
     # launch smoke test enforces code-signing rules like modern user
     # macOS does (a macos-14 runner happily launched a build that
@@ -597,21 +665,20 @@ jobs:
               --no-progress --only-show-errors
           done
 
-      # Attach the macOS assets. build-windows also calls
-      # softprops/action-gh-release, so we keep it here too — without
-      # it, whichever job finishes second would fail to upload (gh's
-      # release-upload requires the release to already exist). To avoid
-      # the duplicated auto-generated notes that motivated this change,
-      # we pass `generate_release_notes: false`: the first invocation
-      # creates the release with notes, this one only updates the
-      # asset list without touching the body.
-      - uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: false
-          files: |
-            octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip
-            octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip.sha256
-            Octodo-v${{ steps.build.outputs.ver }}-macos-arm64.dmg
+      # Same asset-only upload as the Windows job: the release body
+      # belongs to the create-release job alone, and publish-manifest
+      # publishes once everything (including the manifest.sig) is up.
+      - name: Upload release assets (GitHub)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" --clobber \
+            "octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip" \
+            "octodo-v${{ steps.build.outputs.ver }}-macos-arm64.zip.sha256" \
+            "Octodo-v${{ steps.build.outputs.ver }}-macos-arm64.dmg"
 
       # Must be the LAST step of the job: `if: always()` on a normal
       # step runs it as soon as its turn arrives, so placing it right
@@ -647,7 +714,7 @@ jobs:
   # `flutter test` bootstrap natively once the git checkout exists.
   # -----------------------------------------------------------------
   build-linux:
-    needs: resolve-config
+    needs: [resolve-config, create-release]
     strategy:
       fail-fast: false
       matrix:
@@ -1117,15 +1184,19 @@ jobs:
               --no-progress --only-show-errors
           done
 
-      # Attach per-matrix-leg (same second-uploader pattern as the
-      # macOS job: whichever job creates the release generates the
-      # notes; later ones only add assets).
-      - uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: false
-          files: |
-            ${{ steps.build.outputs.ai }}
-            ${{ steps.build.outputs.sha }}
+      # Same asset-only upload as the other platform jobs (two matrix
+      # legs each upload their own AppImage + sidecar; --clobber makes
+      # job re-runs idempotent).
+      - name: Upload release assets (GitHub)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" --clobber \
+            "${{ steps.build.outputs.ai }}" \
+            "${{ steps.build.outputs.sha }}"
 
   # ---------------------------------------------------------------
   # Fan-in: build ONE multi-platform manifest.json for R2 after all
@@ -1299,7 +1370,17 @@ jobs:
           ver="${tag#v}"
           base="$R2_PUBLIC_BASE"
 
-          # Pull the release's published assets (name + size) as JSON.
+          # 1) Complete the GitHub asset set with the manifest
+          #    signature (payloads + sidecars are already up from the
+          #    platform jobs), 2) flip the draft public, 3) THEN read
+          #    the release so the manifest records a real publishedAt.
+          #    This draft→publish edit is the only publish point: the
+          #    release never goes public before every GitHub asset —
+          #    including this sig — exists, and its body was written
+          #    exactly once by the create-release job.
+          sig="octodo-v$ver-manifest.sig"
+          gh release upload "$tag" "$sig" --repo "${{ github.repository }}" --clobber
+          gh release edit "$tag" --draft=false --repo "${{ github.repository }}"
           gh release view "$tag" --repo "${{ github.repository }}" \
             --json assets,tagName,url,publishedAt,isPrerelease \
             > release.json
@@ -1387,18 +1468,20 @@ jobs:
           PY
 
           endpoint="https://$R2_ACCOUNT.r2.cloudflarestorage.com"
-          aws s3 cp manifest.json "s3://$R2_BUCKET/octodo/manifest.json" \
-            --endpoint-url "$endpoint" \
-            --content-type "application/json; charset=utf-8" \
-            --no-progress --only-show-errors
 
-          # The signature asset itself ships on both channels —
-          # GitHub release (for GitHub-feed builds) and R2 (for
-          # fallback-feed builds).
-          sig="octodo-v$ver-manifest.sig"
+          # R2 order matters: the sig lands BEFORE manifest.json,
+          # because manifest.json is the R2 feed's entry point and
+          # lists the sig's URL — feed clients may fetch it right
+          # after seeing the new manifest. (The manifest build's
+          # completeness guard above aborts before either upload,
+          # so the public feed can never advance to a half-baked
+          # release even in a naming-contract failure.)
           aws s3 cp "$sig" "s3://$R2_BUCKET/octodo/$sig" \
             --endpoint-url "$endpoint" \
             --content-type "text/plain; charset=utf-8" \
             --no-progress --only-show-errors
-          gh release upload "$tag" "$sig" --repo "${{ github.repository }}" --clobber
-          echo "manifest.json published."
+          aws s3 cp manifest.json "s3://$R2_BUCKET/octodo/manifest.json" \
+            --endpoint-url "$endpoint" \
+            --content-type "application/json; charset=utf-8" \
+            --no-progress --only-show-errors
+          echo "manifest.json published (release $tag is public)."
