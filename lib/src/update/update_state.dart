@@ -91,13 +91,16 @@ class DownloadedPayload {
 
   /// URL of the `octodo-v<ver>-manifest.sig` asset that was
   /// fetched and verified at download time. Captured here so the
-  /// apply step can re-fetch the same body if its in-memory cache
-  /// was lost (process restart between download and apply) — and
-  /// so a fork with a custom `update.repositoryOverride` uses
-  /// its OWN release URL, not the hardcoded GitHub/R2 fallback
-  /// the rest of the apply code would otherwise build. Null only
-  /// for legacy / test-seeded payloads predating the helper
-  /// verification gate.
+  /// apply step can locate the RUNNING version's manifest (same
+  /// fork-aware host, tag directory and filename re-pointed at
+  /// this build's version) and verify the on-disk helper against
+  /// the hash the running release itself signed — never a
+  /// hardcoded `github.com/invented-pro/...` mirror, and never the
+  /// TARGET release's manifest (the target's helper only lands on
+  /// disk after this apply extracts the zip, so its hash is not a
+  /// valid baseline for the file already there). Null only for
+  /// legacy / test-seeded payloads predating the helper
+  /// verification gate (apply then skips the check).
   final Uri? signatureUrl;
 
   const DownloadedPayload({

@@ -68,17 +68,6 @@ const int _kMaxAttemptsPerSource = 3;
 /// the macOS apply runs through /bin/sh instead.
 String get _kHelperExeName => 'octodo_helper.exe';
 
-/// Cached signed-manifest body + the digest CI signed for the
-/// helper exe on the current platform. Populated by the download
-/// step (after the same body has been verified for the zip), so
-/// the apply step can reuse the body without a second HTTPS round
-/// trip or a second Ed25519 verify.
-class _CachedHelperSig {
-  final String body;
-  final String helperDigestHex;
-  const _CachedHelperSig({required this.body, required this.helperDigestHex});
-}
-
 class UpdateController {
   final UpdateStateModel model;
   final UpdateSettingsSection settings;
@@ -126,16 +115,6 @@ class UpdateController {
   /// GitHub → GitHub). Updated whenever `_fetchWithFallback`
   /// returns successfully; reset on `model.reset()`.
   UpdateFeedSource? _currentReleaseSource;
-
-  /// In-memory cache of verified helper-signature (body + digest),
-  /// keyed by the version whose helper hash they describe.
-  /// Populated by [_downloadAndVerify] at the end of a successful
-  /// download so the apply step can verify the on-disk helper
-  /// without a fresh HTTPS fetch (and without re-running the
-  /// Ed25519 verify). Never persisted: a fresh launch re-fetches
-  /// from the URL stored on [DownloadedPayload.signatureUrl], so a
-  /// tampered in-memory copy can't outlive the process.
-  final Map<String, _CachedHelperSig> _verifiedHelperSigCache = {};
 
   Timer? _probeTimer;
   Timer? _notFoundTimer;
@@ -969,22 +948,6 @@ class UpdateController {
         e,
       );
     }
-    // Also pre-verify the helper entry so the apply step doesn't
-    // pay a second Ed25519 verify. If the manifest predates the
-    // helper gate (no helper line), skip — the apply step will
-    // re-fetch + re-verify and surface the same error then.
-    try {
-      final helperDigestHex = await verifyAssetSignature(
-        body: sigBody,
-        version: release.version,
-        assetName: helperAssetNameForCurrentPlatform(),
-        publicKeysBase64: signaturePublicKeys,
-      );
-      _verifiedHelperSigCache[release.version] =
-          _CachedHelperSig(body: sigBody, helperDigestHex: helperDigestHex);
-    } on UpdateSignatureException {
-      // No helper entry, or wrong sig — handled at apply time.
-    }
     final actualHex = await verifySha256Hex(
       file: zipPath,
       expectedHex: expectedHex,
@@ -1087,6 +1050,7 @@ class UpdateController {
       version: d.version,
       pid: pid,
       expectedDigestHex: d.expectedDigestHex,
+      signatureUrl: d.signatureUrl,
     );
     if (!spawned) return;
 
@@ -1217,34 +1181,57 @@ class UpdateController {
 
   /// Resolve the standalone helper binary path next to the running
   /// executable and verify its hash against the signed release
-  /// manifest before returning it (Windows only — the macOS apply
-  /// runs through /bin/sh and needs no helper binary).
+  /// manifest of the RUNNING version before returning it (Windows
+  /// only — the macOS apply runs through /bin/sh and needs no
+  /// helper binary).
   ///
   /// Returns null if the file is absent (the caller surfaces the
   /// reinstall error). Throws [UpdateIntegrityException] if the
   /// helper on disk does not match the hash the release workflow
-  /// signed for the CURRENT version — i.e. the file at this path
-  /// has been tampered with since the last update installed it.
+  /// signed for the RUNNING version — i.e. the file at this path
+  /// has been modified since the last update installed it.
   /// `applyDownloaded` catches that exception and surfaces the
   /// same Reinstall flow as the missing-helper case.
   ///
   /// Trust chain:
-  ///   * helper asset name is platform-specific
-  ///     ([kHelperAssetNameWindows] / [kHelperAssetNameMacOS]);
-  ///   * the line in `octodo-v<ver>-manifest.sig` is signed by the
-  ///     same Ed25519 key as the zip digest (Phase B);
-  ///   * the signed message includes the version, so an old
-  ///     version's sig body can't be replayed against a newer
-  ///     install;
-  ///   * the helper at this path is the one the running app's own
-  ///     apply step extracted from a Phase-B-verified zip, so the
-  ///     initial-install trust anchor is the embedded public key.
+  ///   * the on-disk helper is the file the previous apply step
+  ///     extracted from the RUNNING version's Phase-B-verified
+  ///     zip, so its expected hash lives in the RUNNING version's
+  ///     own `octodo-v<ver>-manifest.sig` (signed by the same
+  ///     Ed25519 key as the zip digest). The TARGET version's
+  ///     manifest is irrelevant here — the target's helper only
+  ///     lands on disk AFTER this apply extracts the (already
+  ///     digest-verified) zip, and comparing against it produced
+  ///     false tamper refusals on every release that rebuilt the
+  ///     helper binary (v3.0.6 → v3.1.0 did exactly that);
+  ///   * the running manifest is located by re-pointing the
+  ///     captured [DownloadedPayload.signatureUrl] at this
+  ///     version's tag (fork-aware: a custom
+  ///     `update.repositoryOverride` rewrites to the fork's own
+  ///     release assets, never a hardcoded mirror);
+  ///   * the signed message includes the version, so another
+  ///     release's manifest body can't be replayed against this
+  ///     lookup;
+  ///   * the initial-install trust anchor is the embedded public
+  ///     key.
+  ///
+  /// When no verified baseline can be established — the running
+  /// release predates the manifest asset entirely (≤ v1.6.0), its
+  /// manifest has no helper line yet, or the fetch/verify fails
+  /// (offline apply) — the check is SKIPPED with a warning rather
+  /// than refused: there is no legitimate baseline to compare
+  /// against, and refusing would permanently brick self-update for
+  /// every pre-gate install. (The gate is defense-in-depth, not a
+  /// trust boundary: anyone able to rewrite the helper could
+  /// rewrite `octodo.exe` too, and the app binary itself is never
+  /// verified.)
   ///
   /// The macOS apply goes through /bin/sh (Apple-signed) and
   /// never invokes this helper, but the manifest still pins the
   /// helper hash for parity / future-proofing.
   Future<File?> _resolveAndVerifyHelperExe({
-    required String version,
+    required String targetVersion,
+    required Uri? targetSignatureUrl,
   }) async {
     if (!Platform.isWindows) {
       // macOS production apply runs through /bin/sh; the helper
@@ -1258,71 +1245,105 @@ class UpdateController {
     final f = helperExeFactory?.call() ?? File(helperPath);
     if (!f.existsSync()) return null;
 
-final helperAssetName = helperAssetNameForCurrentPlatform();
-    final cached = await _fetchVerifiedHelperSigBody(
-      version: version,
-      helperAssetName: helperAssetName,
-      signatureUrl: model.downloaded?.signatureUrl,
+    final expectedHex = await _runningHelperBaselineDigest(
+      targetVersion: targetVersion,
+      targetSignatureUrl: targetSignatureUrl,
     );
-    final expectedHex = cached.helperDigestHex;
+    if (expectedHex == null) {
+      _log.warning('no verified helper baseline for the running '
+          'version ($userAgentVersion); skipping on-disk helper '
+          'verification');
+      return f;
+    }
 
     final actualHex = await sha256HexOfFile(f);
     if (actualHex.toLowerCase() != expectedHex.toLowerCase()) {
       throw UpdateIntegrityException(
         'Update helper at $helperPath has been modified since this '
         'build of Octodo was installed (on-disk=$actualHex, '
-        'signed=$expectedHex). The apply step cannot safely spawn '
-        'it. Reinstall Octodo from the download page to apply '
-        'future updates.',
+        'signed=$expectedHex for version $userAgentVersion). The '
+        'apply step cannot safely spawn it. Reinstall Octodo from '
+        'the download page to apply future updates.',
       );
     }
     return f;
   }
 
-  /// Fetch (and Ed25519-verify) the signed manifest body containing
-  /// the helper hash line for [version].
+  /// Ed25519-verify the helper hash line in the RUNNING version's
+  /// `octodo-v<ver>-manifest.sig`, or return null when no verified
+  /// baseline exists (see [_resolveAndVerifyHelperExe] for why null
+  /// means "skip", not "refuse").
   ///
-  /// Lookup order:
-  ///   1. In-memory [_verifiedHelperSigCache] (populated at download
-  ///      time — no HTTPS round-trip, no second Ed25519 verify).
-  ///   2. The [signatureUrl] captured on [DownloadedPayload] at
-  ///      download time (fork-aware: a custom `update.repositoryOverride`
-  ///      produces a non-default URL that the apply step must reuse,
-  ///      not a hardcoded `github.com/invented-pro/...` mirror).
-  ///
-  /// The cache is in-memory only — a fresh launch re-fetches from
-  /// the stored URL. A tampered local copy therefore can't outlive
-  /// the process.
-  Future<_CachedHelperSig> _fetchVerifiedHelperSigBody({
-    required String version,
-    required String helperAssetName,
-    required Uri? signatureUrl,
+  /// There is no download-time cache for this: the download step
+  /// only ever fetches the TARGET release's manifest, whose helper
+  /// hash describes a binary that isn't on disk yet. The running
+  /// manifest is fetched fresh at apply time — a failed fetch
+  /// degrades to the skip path, so applying a staged update works
+  /// offline too.
+  Future<String?> _runningHelperBaselineDigest({
+    required String targetVersion,
+    required Uri? targetSignatureUrl,
   }) async {
-    final hit = _verifiedHelperSigCache[version];
-    if (hit != null) return hit;
-
-    if (signatureUrl == null) {
-      // Legacy payload (test/older build) without a captured URL,
-      // and no in-memory cache. Refuse to spawn rather than fall
-      // back to a hardcoded mirror — that would silently break
-      // forks and re-introduce the cross-repo-attacker surface.
-      throw UpdateIntegrityException(
-        'Cannot verify the on-disk helper: the signed manifest URL '
-        'for this build is no longer in memory and the in-memory '
-        'cache is empty. Re-trigger the update to rebuild it.',
-      );
-    }
-
-    final body = await _fetchSigBodyFromUrl(signatureUrl);
-    final helperDigestHex = await verifyAssetSignature(
-      body: body,
-      version: version,
-      assetName: helperAssetName,
-      publicKeysBase64: signaturePublicKeys,
+    final url = _runningManifestUrl(
+      targetVersion: targetVersion,
+      targetSignatureUrl: targetSignatureUrl,
     );
-    final entry = _CachedHelperSig(body: body, helperDigestHex: helperDigestHex);
-    _verifiedHelperSigCache[version] = entry;
-    return entry;
+    if (url == null) return null;
+
+    final String body;
+    try {
+      body = await _fetchSigBodyFromUrl(url);
+    } on UpdateFeedException catch (e) {
+      // Legacy release without a manifest asset (404), offline
+      // apply, timeout — all "no baseline available", never
+      // "tampered on-disk file".
+      _log.warning('helper baseline fetch failed (${e.message}); '
+          'skipping on-disk helper verification');
+      return null;
+    }
+    try {
+      return await verifyAssetSignature(
+        body: body,
+        version: userAgentVersion,
+        assetName: helperAssetNameForCurrentPlatform(),
+        publicKeysBase64: signaturePublicKeys,
+      );
+    } on UpdateSignatureException catch (e) {
+      // Manifest predates the helper gate (no helper line), or the
+      // signature doesn't verify under this build's keys — still
+      // "no baseline available", not a local tamper signal.
+      _log.warning('helper baseline unusable (${e.reason}); '
+          'skipping on-disk helper verification');
+      return null;
+    }
+  }
+
+  /// Rewrite the target release's manifest URL to point at the
+  /// RUNNING version's manifest. Returns null when there is no
+  /// captured URL (legacy payload) or the tail doesn't have the
+  /// expected `.../octodo-v<ver>-manifest.sig` shape.
+  ///
+  /// GitHub scopes release assets under a `v<ver>` tag directory,
+  /// so BOTH the directory segment and the filename must be
+  /// re-pointed; R2 keeps sibling objects in one prefix, where
+  /// only the filename matches and the directory rewrite is a
+  /// no-op.
+  Uri? _runningManifestUrl({
+    required String targetVersion,
+    required Uri? targetSignatureUrl,
+  }) {
+    if (targetSignatureUrl == null) return null;
+    const suffix = '-manifest.sig';
+    final targetSegment = 'octodo-v$targetVersion$suffix';
+    final segments = targetSignatureUrl.pathSegments;
+    if (segments.isEmpty || segments.last != targetSegment) return null;
+    final rewritten = List<String>.of(segments);
+    rewritten[rewritten.length - 1] = 'octodo-v$userAgentVersion$suffix';
+    if (rewritten.length >= 2 &&
+        rewritten[rewritten.length - 2] == 'v$targetVersion') {
+      rewritten[rewritten.length - 2] = 'v$userAgentVersion';
+    }
+    return targetSignatureUrl.replace(pathSegments: rewritten);
   }
 
   Future<String> _fetchSigBodyFromUrl(Uri url) async {
@@ -1376,6 +1397,7 @@ final helperAssetName = helperAssetNameForCurrentPlatform();
     required String version,
     required int pid,
     required String? expectedDigestHex,
+    required Uri? signatureUrl,
   }) async {
     if (Platform.isLinux) {
       return _spawnLinuxApply(pid: pid);
@@ -1385,7 +1407,10 @@ final helperAssetName = helperAssetNameForCurrentPlatform();
     }
     final File helper;
     try {
-      final resolved = await _resolveAndVerifyHelperExe(version: version);
+      final resolved = await _resolveAndVerifyHelperExe(
+        targetVersion: version,
+        targetSignatureUrl: signatureUrl,
+      );
       if (resolved == null) {
         // Without the standalone helper exe we cannot safely apply
         // the update: the legacy in-process path (spawn octodo.exe
@@ -1405,32 +1430,20 @@ final helperAssetName = helperAssetNameForCurrentPlatform();
       }
       helper = resolved;
     } on UpdateIntegrityException catch (e) {
-      // The helper at the canonical path doesn't match the hash
-      // CI signed for this version. Most likely the on-disk file
-      // was tampered with (per-user install, attacker with write
-      // access to the install dir) — refuse to spawn it.
+      // The helper at the canonical path doesn't match the hash CI
+      // signed for the RUNNING version — the version whose apply
+      // step extracted this very file. Most likely the on-disk
+      // file was tampered with (per-user install, attacker with
+      // write access to the install dir) — refuse to spawn it.
+      // (A baseline-unavailable outcome never reaches here: the
+      // resolver degrades to a logged skip, so pre-manifest
+      // installs and offline applies stay functional.)
       _log.severe('helper integrity check failed: ${e.message}');
       model.setError(UpdateErrorPayload(
         message: 'Update refused: the on-disk helper did not pass '
             'integrity verification. Reinstall Octodo to apply '
             'future updates.',
         technicalDetails: '${e.message}\n'
-            'Manual download: $kAppRepositoryReleases',
-        onDismiss: () => model.reset(),
-      ));
-      return false;
-    } on UpdateSignatureException catch (e) {
-      // Same UX as the integrity-mismatch case: the helper can't be
-      // trusted. Surface as a Reinstall — same shape as the
-      // missing-helper path. The dedicated "integrity verification"
-      // headline keeps the user from misdirecting to a network
-      // check.
-      _log.severe('helper signature verification failed: ${e.reason}');
-      model.setError(UpdateErrorPayload(
-        message: 'Update refused: the helper signature did not pass '
-            'integrity verification. Reinstall Octodo to apply '
-            'future updates.',
-        technicalDetails: '${e.reason}\n'
             'Manual download: $kAppRepositoryReleases',
         onDismiss: () => model.reset(),
       ));

@@ -1951,37 +1951,49 @@ void main() {
       controller.dispose();
     });
 
-    test('applyDownloaded verifies the helper hash against the signed '
-        'manifest before spawning (Windows only)', () async {
+    test('applyDownloaded verifies the helper hash against the RUNNING '
+        'version\'s signed manifest before spawning (Windows only)',
+        () async {
       // The macOS production apply goes through /bin/sh and never
       // spawns octodo_helper; this gate is a Windows-only concern.
       if (!Platform.isWindows) {
         return;
       }
 
-      // Build a fake helper exe in temp — its sha256 is what we'll
-      // sign into the manifest.sig body.
+      // Helper on disk — byte-for-byte what the RUNNING version
+      // (1.0.0) signed. The TARGET release (9.9.9) rebuilt the
+      // helper binary, so its manifest pins a DIFFERENT hash.
+      // This is exactly the v3.0.6 → v3.1.0 shape that produced
+      // false "tampered helper" refusals back when the apply
+      // compared against the target's manifest: the on-disk helper
+      // was installed by the running version's apply, so only the
+      // running version's manifest is a valid baseline.
       final helperBytes = utf8.encode('FAKE-OCTODO-HELPER');
       final helperFile = File(p.join(tmp.path, 'octodo_helper.exe'))
         ..writeAsBytesSync(helperBytes);
       final helperHex = _sha256HexOfBytes(helperBytes);
+      final rebuiltTargetHelperHex =
+          _sha256HexOfBytes(utf8.encode('REBUILT-HELPER'));
 
       final realZip = _buildStubZip();
       final zipHex = _sha256HexOfBytes(realZip);
 
-      final sigBody = await _testSigBodyWithHelper(
+      final targetSigBody = await _testSigBodyWithHelper(
         tagName: 'v9.9.9',
+        zipDigestHex: zipHex,
+        helperDigestHex: rebuiltTargetHelperHex,
+        helperAssetName: kHelperAssetNameWindows,
+      );
+      final runningSigBody = await _testSigBodyWithHelper(
+        tagName: 'v1.0.0',
         zipDigestHex: zipHex,
         helperDigestHex: helperHex,
         helperAssetName: kHelperAssetNameWindows,
       );
 
+      var targetManifestFetches = 0;
+      var runningManifestFetches = 0;
       var processStarted = false;
-      // The apply path no longer fetches the sig body itself —
-      // the download step populates the in-memory cache and apply
-      // reuses it. Track the GitHub fetch count to confirm we
-      // don't re-fetch on apply.
-      var applyTimeGithubSigFetches = 0;
       final mock = MockClient((req) async {
         if (req.url.host == 'api.github.com' &&
             req.url.path.contains('releases/latest')) {
@@ -1998,16 +2010,19 @@ void main() {
           return http.Response(zipHex, 200);
         }
         if (req.url.host == 'example.com' &&
-            req.url.path.endsWith('manifest.sig')) {
-          return http.Response(sigBody, 200);
+            req.url.path.endsWith('octodo-v9.9.9-manifest.sig')) {
+          targetManifestFetches += 1;
+          return http.Response(targetSigBody, 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('octodo-v1.0.0-manifest.sig')) {
+          // The apply step re-pointed the captured target URL at
+          // the running version (tag directory + filename).
+          runningManifestFetches += 1;
+          return http.Response(runningSigBody, 200);
         }
         if (req.url.host == 'example.com') {
           return http.Response.bytes(realZip, 200);
-        }
-        if (req.url.host == 'github.com' &&
-            req.url.path.endsWith('manifest.sig')) {
-          applyTimeGithubSigFetches += 1;
-          return http.Response(sigBody, 200);
         }
         return http.Response('UNEXPECTED ${req.url}', 500);
       });
@@ -2045,7 +2060,8 @@ void main() {
       await _waitFor(() => model.state == UpdateState.downloaded);
 
       // Sanity: the download path captures the fork-aware URL on
-      // the payload so a fresh-launch apply can re-fetch from it.
+      // the payload so the apply can re-point it at the running
+      // version's manifest.
       expect(model.downloaded?.signatureUrl, isNotNull);
       expect(
           model.downloaded?.signatureUrl?.host, 'example.com',
@@ -2062,28 +2078,28 @@ void main() {
           processStarted || model.state == UpdateState.error);
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      // The apply step used the in-memory cache populated at
-      // download time — no second fetch of the sig body, no second
-      // Ed25519 verify, and Process.start was invoked for the
-      // helper because the on-disk hash matched.
-      expect(applyTimeGithubSigFetches, 0,
-          reason:
-              'apply must reuse the download-time cache, not re-fetch');
+      expect(targetManifestFetches, 1,
+          reason: 'download fetches the target manifest exactly once');
+      expect(runningManifestFetches, 1,
+          reason: 'apply must fetch the RUNNING version manifest by '
+              're-pointing the captured signatureUrl');
       expect(processStarted, isTrue,
-          reason: 'helper with matching hash should be spawned');
+          reason: 'helper matching the RUNNING version baseline must '
+              'spawn even though the target release rebuilt it');
       expect(model.state, UpdateState.installing,
-          reason: 'matching hash → proceed to installing state');
+          reason: 'matching baseline → proceed to installing state');
       controller.dispose();
     });
 
-    test('applyDownloaded re-fetches the sig body from the captured '
-        'signatureUrl when the in-memory cache is empty (process '
-        'restart simulation, Windows only)', () async {
+    test('applyDownloaded re-points the captured fork-aware '
+        'signatureUrl at the RUNNING version when applying after a '
+        'restart (Windows only)', () async {
       // Real-world trigger: the user closes the app between
-      // download and apply. The in-memory cache is empty on next
-      // launch, but the apply step still has to verify the helper
-      // before spawning — and it has to do so from the SAME URL
-      // the release came from (fork-aware), not a hardcoded mirror.
+      // download and apply. On next launch the apply step still
+      // has to verify the helper against the RUNNING version's
+      // manifest — and it must reach that manifest on the SAME
+      // host the release came from (fork-aware), not a hardcoded
+      // mirror.
       if (!Platform.isWindows) return;
 
       final helperBytes = utf8.encode('FAKE-OCTODO-HELPER');
@@ -2093,20 +2109,19 @@ void main() {
       final realZip = _buildStubZip();
       final zipHex = _sha256HexOfBytes(realZip);
 
-      final sigBody = await _testSigBodyWithHelper(
-        tagName: 'v9.9.9',
+      final runningSigBody = await _testSigBodyWithHelper(
+        tagName: 'v1.0.0',
         zipDigestHex: zipHex,
         helperDigestHex: helperHex,
         helperAssetName: kHelperAssetNameWindows,
       );
 
       // Pretend the download just happened: seed the model with a
-      // DownloadedPayload carrying the fork-aware signatureUrl, but
-      // leave the controller's in-memory cache empty (simulating a
-      // fresh launch). The URL intentionally targets a host other
-      // than `github.com` so the test can distinguish a fork-aware
-      // re-fetch (correct) from a re-introduced hardcoded-mirror
-      // fallback (regression).
+      // DownloadedPayload carrying the fork-aware signatureUrl
+      // (a fresh launch keeps nothing else in memory). The URL
+      // intentionally targets a host other than `github.com` so
+      // the test can distinguish a fork-aware re-point (correct)
+      // from a re-introduced hardcoded-mirror fallback (regression).
       final sigUrl = Uri.parse(
           'https://release.myfork.example/octodo/'
           'octodo-v9.9.9-manifest.sig');
@@ -2124,19 +2139,23 @@ void main() {
         signatureUrl: sigUrl,
       ));
 
-      var sigRefetches = 0;
+      var forkSigFetches = 0;
+      var hardcodedMirrorFetches = 0;
+      var forkRequestedPath = '';
       var processStarted = false;
       final mock = MockClient((req) async {
         if (req.url.host == 'release.myfork.example' &&
             req.url.path.endsWith('manifest.sig')) {
-          sigRefetches += 1;
-          return http.Response(sigBody, 200);
+          forkSigFetches += 1;
+          forkRequestedPath = req.url.path;
+          return http.Response(runningSigBody, 200);
         }
         if (req.url.host == 'github.com' &&
             req.url.path.endsWith('manifest.sig')) {
           // The OLD hardcoded fallback — must NOT be used for the
           // fork. A fetch here would mean the fork bug was
           // re-introduced.
+          hardcodedMirrorFetches += 1;
           return http.Response('WRONG SIG BODY', 200);
         }
         return http.Response('UNEXPECTED ${req.url}', 500);
@@ -2169,22 +2188,31 @@ void main() {
           processStarted || model.state == UpdateState.error);
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      expect(sigRefetches, 1,
-          reason: 'cache miss must refetch from the captured URL');
+      expect(forkSigFetches, 1,
+          reason: 'apply must reach the running manifest on the '
+              'captured fork host');
+      expect(forkRequestedPath, endsWith('octodo-v1.0.0-manifest.sig'),
+          reason: 'the captured URL must be re-pointed at the RUNNING '
+              'version, not re-fetched for the target');
+      expect(hardcodedMirrorFetches, 0,
+          reason: 'the hardcoded github mirror must stay unused');
       expect(processStarted, isTrue,
           reason: 'matching helper hash → spawn proceeds');
       expect(model.state, UpdateState.installing);
       controller.dispose();
     });
 
-    test('applyDownloaded refuses to spawn when the captured '
-        'signatureUrl is missing (legacy payload, Windows only)',
-        () async {
-      // No in-memory cache AND no signatureUrl on the payload =
-      // we cannot safely verify the helper. Refuse to spawn rather
-      // than fall back to a hardcoded mirror (which would silently
-      // break forks). The user has to re-trigger the update to
-      // rebuild the cache + payload.
+    test('applyDownloaded skips helper verification and proceeds when '
+        'the payload has no captured signatureUrl (legacy payload, '
+        'Windows only)', () async {
+      // No signatureUrl on the payload = no baseline to verify the
+      // on-disk helper against (installs whose running release
+      // predates the manifest asset entirely — ≤ v1.6.0 — look
+      // exactly like this). Skipping keeps them able to self-update;
+      // refusing would brick the update flow with a false
+      // "reinstall" error. The gate is defense-in-depth, not a
+      // trust boundary: anyone able to rewrite the helper could
+      // rewrite octodo.exe too.
       if (!Platform.isWindows) return;
 
       final helperBytes = utf8.encode('FAKE-OCTODO-HELPER');
@@ -2206,6 +2234,7 @@ void main() {
         // signatureUrl intentionally null — legacy payload.
       ));
 
+      var processStarted = false;
       final mock = MockClient((req) async {
         return http.Response('UNEXPECTED ${req.url}', 500);
       });
@@ -2222,6 +2251,7 @@ void main() {
         helperExeFactory: () => helperFile,
         processStartFactory: (exe, args,
                 {required environment, required mode}) async {
+          processStarted = true;
           return Process.start('cmd', const ['/c', 'exit', '0'],
               mode: ProcessStartMode.detached);
         },
@@ -2229,29 +2259,25 @@ void main() {
       );
 
       await controller.applyDownloaded();
-      await _waitFor(() => model.state == UpdateState.error);
+      await _waitFor(() =>
+          processStarted || model.state == UpdateState.error);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      expect(model.state, UpdateState.error);
-      expect(
-        model.error?.message ?? '',
-        contains('integrity'),
-        reason: 'legacy payload + no cache → integrity refusal',
-      );
-      expect(
-        model.error?.technicalDetails ?? '',
-        contains('no longer in memory'),
-        reason: 'reason must explain the cache-loss scenario',
-      );
+      expect(processStarted, isTrue,
+          reason: 'no baseline available → skip the check, '
+              'never refuse');
+      expect(model.state, UpdateState.installing);
       controller.dispose();
     });
 
-    test('applyDownloaded refuses to spawn a tampered helper exe '
-        '(Windows only)', () async {
+    test('applyDownloaded refuses to spawn a helper exe that does not '
+        'match the RUNNING version\'s signed baseline (Windows only)',
+        () async {
       if (!Platform.isWindows) return;
 
-      // Helper on disk has a DIFFERENT hash than the manifest
-      // signed for — simulates an attacker who replaced the
-      // file after the install.
+      // Helper on disk has a DIFFERENT hash than the RUNNING
+      // version's manifest signed for — simulates an attacker who
+      // replaced the file after the last update installed it.
       final helperBytes = utf8.encode('MALICIOUS-HELPER');
       final helperFile = File(p.join(tmp.path, 'octodo_helper.exe'))
         ..writeAsBytesSync(helperBytes);
@@ -2260,8 +2286,9 @@ void main() {
       final realZip = _buildStubZip();
       final zipHex = _sha256HexOfBytes(realZip);
 
-      final sigBody = await _testSigBodyWithHelper(
-        tagName: 'v9.9.9',
+      final targetSigBody = await _testSigBody('v9.9.9', zipHex);
+      final runningSigBody = await _testSigBodyWithHelper(
+        tagName: 'v1.0.0',
         zipDigestHex: zipHex,
         helperDigestHex: realHelperHex,
         helperAssetName: kHelperAssetNameWindows,
@@ -2284,15 +2311,20 @@ void main() {
           return http.Response(zipHex, 200);
         }
         if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('octodo-v1.0.0-manifest.sig')) {
+          // The apply step re-pointed the captured target URL at
+          // the running version; this body pins TRUSTED-HELPER.
+          return http.Response(runningSigBody, 200);
+        }
+        if (req.url.host == 'example.com' &&
             req.url.path.endsWith('manifest.sig')) {
-          return http.Response(sigBody, 200);
+          // Target manifest (download path): the zip line is what
+          // matters there; the target's helper hash is irrelevant
+          // at apply time.
+          return http.Response(targetSigBody, 200);
         }
         if (req.url.host == 'example.com') {
           return http.Response.bytes(realZip, 200);
-        }
-        if (req.url.host == 'github.com' &&
-            req.url.path.endsWith('manifest.sig')) {
-          return http.Response(sigBody, 200);
         }
         return http.Response('UNEXPECTED ${req.url}', 500);
       });
@@ -2346,8 +2378,8 @@ void main() {
       controller.dispose();
     });
 
-    test('applyDownloaded surfaces an integrity error when the helper '
-        'entry is missing from the signed manifest (Windows only)',
+    test('applyDownloaded tolerates a running manifest without a '
+        'helper line (pre-helper-gate release, Windows only)',
         () async {
       if (!Platform.isWindows) return;
 
@@ -2357,10 +2389,15 @@ void main() {
       final realZip = _buildStubZip();
       final zipHex = _sha256HexOfBytes(realZip);
 
-      // Sign ONLY the zip line — no helper line. Old releases
-      // predating this hardening lack a helper entry.
-      final sigBody = await _testSigBody('v9.9.9', zipHex);
+      // Target manifest (download path) — zip line only.
+      final targetSigBody = await _testSigBody('v9.9.9', zipHex);
+      // RUNNING version's manifest — also zip line only, no helper
+      // entry. The first Phase-B manifests predate the helper line,
+      // so there is no baseline to compare against: skip the check
+      // and proceed rather than refuse.
+      final runningSigBody = await _testSigBody('v1.0.0', zipHex);
 
+      var processStarted = false;
       final mock = MockClient((req) async {
         if (req.url.host == 'api.github.com' &&
             req.url.path.contains('releases/latest')) {
@@ -2377,15 +2414,17 @@ void main() {
           return http.Response(zipHex, 200);
         }
         if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('octodo-v1.0.0-manifest.sig')) {
+          // The apply step re-pointed the captured target URL at
+          // the running version.
+          return http.Response(runningSigBody, 200);
+        }
+        if (req.url.host == 'example.com' &&
             req.url.path.endsWith('manifest.sig')) {
-          return http.Response(sigBody, 200);
+          return http.Response(targetSigBody, 200);
         }
         if (req.url.host == 'example.com') {
           return http.Response.bytes(realZip, 200);
-        }
-        if (req.url.host == 'github.com' &&
-            req.url.path.endsWith('manifest.sig')) {
-          return http.Response(sigBody, 200);
         }
         return http.Response('UNEXPECTED ${req.url}', 500);
       });
@@ -2405,6 +2444,12 @@ void main() {
         minCheckDisplay: Duration.zero,
         downloadClientFactory: () => mock,
         helperExeFactory: () => helperFile,
+        processStartFactory: (exe, args,
+                {required environment, required mode}) async {
+          processStarted = true;
+          return Process.start('cmd', const ['/c', 'exit', '0'],
+              mode: ProcessStartMode.detached);
+        },
         exitFactory: (_) {},
       );
       await controller.start();
@@ -2414,17 +2459,111 @@ void main() {
       await _waitFor(() => model.state == UpdateState.downloaded);
 
       await controller.applyDownloaded();
-      await _waitFor(() => model.state == UpdateState.error);
+      await _waitFor(() =>
+          processStarted || model.state == UpdateState.error);
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      // No helper entry → verification throws → UpdateIntegrity
-      // Exception → error state. The user is told to reinstall.
-      expect(model.state, UpdateState.error);
-      expect(
-        model.error?.message ?? '',
-        contains('integrity'),
-        reason: 'missing helper entry surfaces as integrity refusal',
+      // No helper entry in the running manifest → no baseline →
+      // the check is skipped and the apply proceeds.
+      expect(processStarted, isTrue,
+          reason: 'missing helper line → skip the check, '
+              'never refuse');
+      expect(model.state, UpdateState.installing);
+      controller.dispose();
+    });
+
+    test('applyDownloaded proceeds when the running version has no '
+        'manifest asset at all (pre-manifest install, Windows only)',
+        () async {
+      // Installs whose running release never published an
+      // octodo-v<ver>-manifest.sig (≤ v1.6.0) get a 404 when the
+      // apply re-points the captured URL. No baseline → skip the
+      // helper check and apply anyway.
+      if (!Platform.isWindows) return;
+
+      final helperBytes = utf8.encode('FAKE-HELPER');
+      final helperFile = File(p.join(tmp.path, 'octodo_helper.exe'))
+        ..writeAsBytesSync(helperBytes);
+      final realZip = _buildStubZip();
+      final zipHex = _sha256HexOfBytes(realZip);
+
+      final targetSigBody = await _testSigBodyWithHelper(
+        tagName: 'v9.9.9',
+        zipDigestHex: zipHex,
+        helperDigestHex: _sha256HexOfBytes(helperBytes),
+        helperAssetName: kHelperAssetNameWindows,
       );
+
+      var processStarted = false;
+      final mock = MockClient((req) async {
+        if (req.url.host == 'api.github.com' &&
+            req.url.path.contains('releases/latest')) {
+          return http.Response(
+            _releaseBody(
+                tagName: 'v9.9.9',
+                zipSize: realZip.length,
+                withIntegrityAssets: true),
+            200,
+          );
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('.sha256')) {
+          return http.Response(zipHex, 200);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('octodo-v1.0.0-manifest.sig')) {
+          // No manifest asset for the running version — the
+          // legacy-install case.
+          return http.Response('Not Found', 404);
+        }
+        if (req.url.host == 'example.com' &&
+            req.url.path.endsWith('manifest.sig')) {
+          return http.Response(targetSigBody, 200);
+        }
+        if (req.url.host == 'example.com') {
+          return http.Response.bytes(realZip, 200);
+        }
+        return http.Response('UNEXPECTED ${req.url}', 500);
+      });
+
+      final model = UpdateStateModel(
+        currentVersion: '1.0.0',
+        distribution: InstallDistribution.portable,
+      );
+      final controller = UpdateController(
+        model: model,
+        settings: catalog.update,
+        userAgentVersion: '1.0.0',
+        primaryFeedFactory: (repo, ua) => _feedFrom(mock),
+        signaturePublicKeys: [_devPubB64],
+        skipListFileFactory: () => skipListFile,
+        retryDelayFactor: Duration.zero,
+        minCheckDisplay: Duration.zero,
+        downloadClientFactory: () => mock,
+        helperExeFactory: () => helperFile,
+        processStartFactory: (exe, args,
+                {required environment, required mode}) async {
+          processStarted = true;
+          return Process.start('cmd', const ['/c', 'exit', '0'],
+              mode: ProcessStartMode.detached);
+        },
+        exitFactory: (_) {},
+      );
+      await controller.start();
+      await _waitFor(() => model.state == UpdateState.updateAvailable);
+
+      await controller.downloadLatest();
+      await _waitFor(() => model.state == UpdateState.downloaded);
+
+      await controller.applyDownloaded();
+      await _waitFor(() =>
+          processStarted || model.state == UpdateState.error);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(processStarted, isTrue,
+          reason: '404 on the running manifest → no baseline → '
+              'skip and spawn');
+      expect(model.state, UpdateState.installing);
       controller.dispose();
     });
 
