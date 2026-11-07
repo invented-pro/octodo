@@ -96,12 +96,35 @@ jobs:
           # the dispatch ref.
           ref: ${{ github.event.workflow_run.head_branch || github.ref }}
 
-      # Pin to the same Flutter version as release.yml / mise.toml for
-      # reproducible builds. cache: true preserves ~/.pub-cache across
-      # runs of the same Flutter version.
+      # Flutter version comes from mise.toml — the same single
+      # source of truth release.yml parses, so a toolchain bump
+      # never drifts this workflow onto an SDK that can't satisfy
+      # pubspec.yaml (the hardcoded 3.44.4 pin broke exactly that
+      # way after the 3.47.9 bump: pub get failed version solving).
+      # cache: true preserves ~/.pub-cache across runs of the same
+      # Flutter version.
+      - name: Parse Flutter version from mise.toml
+        id: cfg
+        shell: pwsh
+        run: |
+          $src = Get-Content mise.toml -Raw
+          # The flutter entry is a one-line TOML inline table; match
+          # its version field without needing a TOML parser. Must
+          # stay in lockstep with release.yml's resolve-config step.
+          $found = [regex]::Matches($src, 'flutter\s*=\s*\{[^}]*?version\s*=\s*"([^"]+)"')
+          if ($found.Count -ne 1) {
+            throw "expected exactly 1 flutter version in mise.toml, found $($found.Count)"
+          }
+          $ver = $found[0].Groups[1].Value
+          if ($ver -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') {
+            throw "flutter version '$ver' in mise.toml is not semver-shaped"
+          }
+          "flutter_version=$ver" | Add-Content -Path $env:GITHUB_OUTPUT
+          Write-Host "flutter_version=$ver"
+
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.4'
+          flutter-version: ${{ steps.cfg.outputs.flutter_version }}
           channel: stable
           cache: true
 
