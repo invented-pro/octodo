@@ -1364,4 +1364,103 @@ void main() {
       expect(p.needsPowerShellPromptOverride, isFalse);
     });
   });
+
+  group('resolveDefaultShellIndex', () {
+    // `terminal.defaultShell` persists the profile `shortName`; these
+    // profiles use the same detection order Windows produces, where the
+    // first entry is the factory default and index 0 doubles as the
+    // "no preference" answer.
+    ShellProfile shell(String label, String shortName) => ShellProfile(
+      label: label,
+      program: _pwshPath,
+      args: const [],
+      icon: Icons.terminal,
+      color: Colors.grey,
+      shortName: shortName,
+    );
+
+    // Detection order as it comes out of `detectShellsFrom` on Windows:
+    // the first profile is the factory default, so index 0 doubles as the
+    // "no preference" answer.
+    final profiles = <ShellProfile>[
+      shell('PowerShell 7', 'pwsh'),
+      shell('Command Prompt', 'cmd'),
+      shell('Ubuntu-24.04', 'ubuntu-24.04'),
+      shell('Git Bash', 'bash'),
+    ];
+
+    test('empty preference keeps the detection order', () {
+      expect(resolveDefaultShellIndex(profiles, ''), 0);
+      expect(resolveDefaultShellIndex(profiles, '   '), 0);
+    });
+
+    test('matches a label case-insensitively', () {
+      expect(resolveDefaultShellIndex(profiles, 'ubuntu-24.04'), 2);
+      expect(resolveDefaultShellIndex(profiles, 'GIT BASH'), 3);
+      // Surrounding whitespace (a hand-edited settings.json) is ignored.
+      expect(resolveDefaultShellIndex(profiles, '  Ubuntu-24.04  '), 2);
+    });
+
+    test('matches a shortName', () {
+      expect(resolveDefaultShellIndex(profiles, 'pwsh'), 0);
+      expect(resolveDefaultShellIndex(profiles, 'cmd'), 1);
+      expect(resolveDefaultShellIndex(profiles, 'BASH'), 3);
+    });
+
+    test('shortName wins over a label prefix shadow', () {
+      // Both are real distros; the second label starts with the first
+      // one's label, so a label-prefix pass ordered before the shortName
+      // pass would resolve a persisted `ubuntu-24-04-lts` to the wrong
+      // profile.
+      final shadowed = <ShellProfile>[
+        shell('Ubuntu', 'ubuntu'),
+        shell('Ubuntu 24.04 LTS', 'ubuntu-24-04-lts'),
+      ];
+      expect(resolveDefaultShellIndex(shadowed, 'ubuntu-24-04-lts'), 1);
+      // Hand-edited values still fall back to exact-then-prefix matching.
+      expect(resolveDefaultShellIndex(shadowed, 'ubuntu 24.04'), 1);
+    });
+
+    test('prefix match resolves a bare distro name', () {
+      // `ubuntu` is what a user types; the detected label carries the
+      // version suffix.
+      expect(resolveDefaultShellIndex(profiles, 'ubuntu'), 2);
+      expect(resolveDefaultShellIndex(profiles, 'command'), 1);
+    });
+
+    test('unknown label falls back to 0', () {
+      expect(resolveDefaultShellIndex(profiles, 'Alpine'), 0);
+      expect(resolveDefaultShellIndex(profiles, 'nope'), 0);
+    });
+
+    test('empty profile list does not throw', () {
+      expect(resolveDefaultShellIndex(const <ShellProfile>[], 'ubuntu'), 0);
+      expect(resolveDefaultShellIndex(const <ShellProfile>[], ''), 0);
+    });
+  });
+
+  group('shellProfileMatchesPreference', () {
+    final ubuntu = ShellProfile(
+      label: 'Ubuntu-24.04',
+      program: _wslPath,
+      args: const ['-d', 'Ubuntu-24.04'],
+      icon: Icons.laptop_chromebook,
+      color: Colors.green,
+      shortName: 'ubuntu-24.04',
+    );
+
+    test('accepts label, shortName, and label prefix', () {
+      expect(shellProfileMatchesPreference(ubuntu, 'Ubuntu-24.04'), isTrue);
+      expect(shellProfileMatchesPreference(ubuntu, 'ubuntu-24.04'), isTrue);
+      expect(shellProfileMatchesPreference(ubuntu, 'ubuntu'), isTrue);
+    });
+
+    test('rejects empty and unknown preferences', () {
+      // An empty setting means "detection order", not "profile 0 was
+      // requested" — otherwise every default start would log a warning.
+      expect(shellProfileMatchesPreference(ubuntu, ''), isFalse);
+      expect(shellProfileMatchesPreference(ubuntu, '  '), isFalse);
+      expect(shellProfileMatchesPreference(ubuntu, 'Alpine'), isFalse);
+    });
+  });
 }

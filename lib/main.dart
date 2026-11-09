@@ -1612,6 +1612,7 @@ class _AppShellState extends State<AppShell>
               updateModel: _updateModel,
               updateController: _updateController,
               feishuLink: _feishu?.link,
+              availableShells: _shells ?? const <ShellProfile>[],
               onOpenMobileApp: () => showMobileAppsPanel(
                 context,
                 standby: _feishu?.standby,
@@ -1761,6 +1762,11 @@ class _WorkspaceDrawer extends StatelessWidget {
   /// dot when no bot is bound.
   final ValueListenable<FeishuLinkState>? feishuLink;
 
+  /// Detected shell profiles, handed to the Settings dialog so its
+  /// `terminal.defaultShell` row can list real options instead of a
+  /// free-text field. Empty until detection resolves.
+  final List<ShellProfile> availableShells;
+
   const _WorkspaceDrawer({
     required this.workspaces,
     required this.currentIndex,
@@ -1776,6 +1782,7 @@ class _WorkspaceDrawer extends StatelessWidget {
     required this.updateController,
     required this.onOpenMobileApp,
     this.feishuLink,
+    this.availableShells = const <ShellProfile>[],
   });
 
   static const double _expandedWidth = 200;
@@ -2008,7 +2015,10 @@ class _WorkspaceDrawer extends StatelessWidget {
           MouseRegion(
             cursor: SystemMouseCursors.click,
             child: GestureDetector(
-              onTap: () => showSettingsDialog(context),
+              onTap: () => showSettingsDialog(
+                context,
+                shells: availableShells,
+              ),
               child: Tooltip(
                 message: 'Settings',
                 child: Container(

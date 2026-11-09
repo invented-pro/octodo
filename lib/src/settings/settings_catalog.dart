@@ -51,6 +51,28 @@ class SettingsCatalog {
 }
 
 class TerminalSettingsSection {
+  /// Shell a **new workspace's first pane** starts with, persisted as
+  /// the detected profile's `shortName` (`pwsh`, `ubuntu-24.04`, …) so
+  /// two WSL distros stay distinguishable where `program` and `label`
+  /// cannot. Resolved by `resolveDefaultShellIndex` in
+  /// `shell_profiles.dart`; the Settings row is a dropdown of the
+  /// detected profiles, so the raw string is only ever typed by hand
+  /// when editing settings.json directly.
+  ///
+  /// The default is the empty string, which means "first profile in the
+  /// detection order" (PowerShell on Windows). That keeps the fast path
+  /// the factory default — a cold WSL VM can add seconds to the first
+  /// surface — while users whose whole workflow lives in a distro can
+  /// opt in explicitly.
+  final defaultShell = StringSetting(
+    'terminal.defaultShell',
+    defaultValue: '',
+    title: 'Default shell',
+    subtitle:
+        'Shell a new workspace starts with. Empty = the first detected shell.',
+    icon: Icons.terminal,
+  );
+
   final fontFamily = StringSetting(
     'terminal.fontFamily',
     // The bundled JetBrainsMono NFM subset on every platform — one
@@ -162,6 +184,7 @@ class TerminalSettingsSection {
   );
 
   Iterable<Setting<dynamic>> get all sync* {
+    yield defaultShell;
     yield fontFamily;
     yield fontSize;
     yield cursorStyle;

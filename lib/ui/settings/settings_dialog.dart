@@ -21,13 +21,23 @@ import '../../src/settings/json_settings_store.dart';
 import '../../src/settings/settings_runtime.dart';
 import '../../src/shortcuts/app_shortcuts.dart';
 import '../../src/terminal/font_family_options.dart';
+import '../../src/terminal/shell_profiles.dart';
 import '../../src/theme/palette_context.dart';
 import 'chrome/settings_card.dart';
 import 'chrome/settings_row.dart';
 import 'widgets/trailing_widgets.dart';
 
 class SettingsDialog extends StatefulWidget {
-  const SettingsDialog({super.key});
+  /// Detected shell profiles, threaded down to the `terminal.defaultShell`
+  /// row so it can offer a dropdown of real options instead of a free-text
+  /// field. Passed in (rather than re-detected here) because detection
+  /// spawns `wsl.exe` — the app shell already has the list.
+  final List<ShellProfile> availableShells;
+
+  const SettingsDialog({
+    super.key,
+    this.availableShells = const <ShellProfile>[],
+  });
   @override
   State<SettingsDialog> createState() => _SettingsDialogState();
 }
@@ -110,6 +120,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                         section: _section,
                         catalog: catalog,
                         showJsonPaths: _showJsonPaths,
+                        availableShells: widget.availableShells,
                       ),
                     ),
                   ],
@@ -298,10 +309,12 @@ class _Detail extends StatelessWidget {
   final String section;
   final SettingsCatalog catalog;
   final bool showJsonPaths;
+  final List<ShellProfile> availableShells;
   const _Detail({
     required this.section,
     required this.catalog,
     required this.showJsonPaths,
+    this.availableShells = const <ShellProfile>[],
   });
 
   @override
@@ -332,6 +345,7 @@ class _Detail extends StatelessWidget {
         const SettingsSectionHeader('TERMINAL'),
         SettingsCard(
           children: [
+            _rowFor(catalog.terminal.defaultShell, showJsonPaths, store),
             _rowFor(catalog.terminal.fontFamily, showJsonPaths, store),
             _rowFor(catalog.terminal.fontSize, showJsonPaths, store),
             _rowFor(catalog.terminal.cursorStyle, showJsonPaths, store),
@@ -539,6 +553,16 @@ class _Detail extends StatelessWidget {
       }
       return DoubleInputTrailing(setting: setting, store: store);
     } else if (setting is StringSetting) {
+      // Shell picker: a free-text field would let the user type a
+      // `shortName` that matches nothing and silently falls back to the
+      // first profile at startup. Offer the detected profiles instead.
+      if (setting.key == 'terminal.defaultShell') {
+        return DefaultShellDropdownTrailing(
+          setting: setting,
+          store: store,
+          shells: availableShells,
+        );
+      }
       // Special-case the terminal font: a free-text field lets the
       // user type typos that silently fall back to monospace, which
       // they then can't debug. Show a dropdown of the monospace
@@ -788,11 +812,14 @@ class _Footer extends StatelessWidget {
 
 // ── Show the dialog ────────────────────────────────────────────────
 
-Future<void> showSettingsDialog(BuildContext context) {
+Future<void> showSettingsDialog(
+  BuildContext context, {
+  List<ShellProfile> shells = const <ShellProfile>[],
+}) {
   return showDialog<void>(
     context: context,
     barrierColor: Colors.black.withValues(alpha: 0.5),
-    builder: (_) => const SettingsDialog(),
+    builder: (_) => SettingsDialog(availableShells: shells),
   );
 }
 

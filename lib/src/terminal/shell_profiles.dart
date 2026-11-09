@@ -267,6 +267,55 @@ String resolveWslIconAsset(String distro) {
   return kWslFallbackAsset;
 }
 
+// ── Default-shell resolution ─────────────────────────────────────────
+
+/// Index of the profile named by [preferred] in [profiles], or `0` when
+/// [preferred] is empty or matches nothing.
+///
+/// [preferred] is the `terminal.defaultShell` setting. The Settings
+/// dropdown writes [ShellProfile.shortName] — the stable identifier,
+/// already lower-cased and whitespace-collapsed for WSL distros via
+/// `_sanitizeShortName`, so two `wsl.exe` profiles for different distros
+/// stay distinguishable. Matching is case-insensitive and tries, in
+/// order: exact `shortName`, exact `label`, then a `label` prefix (so a
+/// hand-edited `"ubuntu"` still finds `Ubuntu-24.04`).
+///
+/// Startup must never fail on a stale preference: a distro can be
+/// uninstalled or renamed between runs and the app still has to open a
+/// terminal, so a miss falls back to the first profile — which is the
+/// existing detection order (PowerShell first on Windows). Callers that
+/// want to surface the fallback log it separately; see
+/// [shellProfileMatchesPreference].
+int resolveDefaultShellIndex(List<ShellProfile> profiles, String preferred) {
+  if (profiles.isEmpty) return 0;
+  final want = preferred.trim().toLowerCase();
+  if (want.isEmpty) return 0;
+  // The persisted form — exact, so a distro whose name is a prefix of
+  // another distro's name can't be shadowed by the fuzzy pass below.
+  for (var i = 0; i < profiles.length; i++) {
+    if (profiles[i].shortName.toLowerCase() == want) return i;
+  }
+  for (var i = 0; i < profiles.length; i++) {
+    if (profiles[i].label.toLowerCase() == want) return i;
+  }
+  for (var i = 0; i < profiles.length; i++) {
+    if (profiles[i].label.toLowerCase().startsWith(want)) return i;
+  }
+  return 0;
+}
+
+/// Whether [profile] is the one named by [preferred] — the matching rule
+/// behind [resolveDefaultShellIndex]: case-insensitive equality against
+/// [ShellProfile.shortName], then against [ShellProfile.label], then a
+/// label prefix match. An empty [preferred] matches nothing.
+bool shellProfileMatchesPreference(ShellProfile profile, String preferred) {
+  final want = preferred.trim().toLowerCase();
+  if (want.isEmpty) return false;
+  if (profile.shortName.toLowerCase() == want) return true;
+  if (profile.label.toLowerCase() == want) return true;
+  return profile.label.toLowerCase().startsWith(want);
+}
+
 // ── Detection ────────────────────────────────────────────────────────
 
 // NOTE: We previously tried injecting a PowerShell init snippet
