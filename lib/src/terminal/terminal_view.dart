@@ -20,8 +20,7 @@ import 'package:flutter_alacritty/flutter_alacritty.dart'
         defaultTerminalShortcuts,
         DecreaseFontSizeIntent,
         IncreaseFontSizeIntent,
-        ResetFontSizeIntent,
-        ScrollPageIntent;
+        ResetFontSizeIntent;
 import 'package:signals/signals_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../settings/settings_catalog.dart';
@@ -287,14 +286,18 @@ const Duration _kVisualBellDuration = Duration(milliseconds: 100);
 /// every zoom step).
 final fa.TerminalColors _defaultColors = fa.TerminalConfig.defaults().colors;
 
-/// Intent: scroll the scrollback by 5 pages (Shift+PageUp/Down).
+/// Pages scrolled per Shift+PageUp/PageDown press — see [_ScrollFastIntent].
+const int _kFastScrollPages = 5;
+
+/// Intent: scroll the scrollback by [_kFastScrollPages] pages
+/// (Shift+PageUp/Down) — the only page keys the emulator claims.
 ///
-/// Mirrors the unshifted `ScrollPageIntent` bundled with
-/// `flutter_alacritty`, which has no `multiplier` field. We need a
-/// distinct intent type so we can wire a different action in
-/// [_alacrittyActions] — `defaultTerminalActions` keys actions by
-/// `Type`, so a single `ScrollPageIntent` couldn't carry both the
-/// 1-page and 5-page behaviors.
+/// Bare PageUp/PageDown are PTY input and are intentionally absent from
+/// [_alacrittyShortcutsWithShiftVariants] (GitHub issue #14). The Shift
+/// forms need their own intent type because the bundled
+/// `ScrollPageIntent` has no multiplier field and `defaultTerminalActions`
+/// keys actions by `Type`, so one `ScrollPageIntent` can't carry the
+/// 1-page and 5-page behaviors at once.
 class _ScrollFastIntent extends Intent {
   const _ScrollFastIntent(this.up);
   final bool up;
@@ -2007,10 +2010,32 @@ class TerminalViewState extends State<TerminalView> {
     _engine.scrollLines(rows * direction);
   }
 
-  /// Fast scroll — used by `Shift+PageUp/Down`. Steps 5 pages at a
-  /// time so users can blow through long scrollback without mashing
-  /// the key.
-  void _scrollPageFast(int direction) => _scrollPage(direction * 5);
+  /// Fast scroll — used by `Shift+PageUp/Down`. Steps [_kFastScrollPages]
+  /// pages at a time so users can blow through long scrollback without
+  /// mashing the key.
+  void _scrollPageFast(int direction) =>
+      _scrollPage(direction * _kFastScrollPages);
+
+  /// Signed page count for a Shift+PageUp/PageDown press: `+5` for PageUp,
+  /// `-5` for PageDown, `null` for every other key.
+  ///
+  /// Bare PageUp/PageDown return `null` on purpose — they are PTY input
+  /// (`ESC [ 5 ~` / `ESC [ 6 ~`), not scrollback scrolling, so nothing in
+  /// the emulator may consume them (GitHub issue #14). Only the Shift
+  /// forms are the emulator's. The primary path is the [_ScrollFastIntent]
+  /// binding in [_alacrittyShortcutsWithShiftVariants]; this predicate is
+  /// the same policy expressed for [_handleKeyFallback] and for tests, so
+  /// the two layers can't drift apart.
+  @visibleForTesting
+  static int? shiftPageScrollPages(
+    LogicalKeyboardKey key, {
+    required bool shiftPressed,
+  }) {
+    if (!shiftPressed) return null;
+    if (key == LogicalKeyboardKey.pageUp) return _kFastScrollPages;
+    if (key == LogicalKeyboardKey.pageDown) return -_kFastScrollPages;
+    return null;
+  }
 
   // ── Alacritty shortcut map (zoom extensions) ────────────────────
   //
@@ -2031,23 +2056,18 @@ class TerminalViewState extends State<TerminalView> {
   // binding alacritty ships in `defaultTerminalShortcuts` (Copy,
   // Paste, ToggleSearch, plus the unshifted zoom forms).
   //
-  // PageUp/PageDown are also wired here — without these, FA's
-  // `_onKeyFallback` finds no match, falls through to `encodeKey`,
-  // and writes `ESC [ 5 ~` / `ESC [ 6 ~` to the PTY (the shell
-  // receives them as a PageUp keypress instead of the scrollback
-  // scrolling). Routing through FA's `Shortcuts`/`Actions` lets the
-  // match happen BEFORE the encodeKey path runs. `ScrollPageIntent`
-  // already has a bundled action in `defaultTerminalActions`: on
-  // PageUp it calls `engine.scrollLines(+rows)`, and a positive
-  // delta scrolls up into history (see `terminal_engine.dart`),
-  // which is the correct PageUp semantics. This is a deliberate
-  // direction change from the old app-level binding, which used
-  // `scrollLines(-rows)` for PageUp and so scrolled the wrong way
-  // (masked in practice because the `?.` dispatch chain usually
-  // resolved to a no-op). The Shift variants use a custom intent
-  // (see [_ScrollFastIntent]) because the bundled
-  // `ScrollPageIntent` has no multiplier and Shift+PageUp/Down is
-  // meant to scroll 5 pages at a time.
+  // PageUp/PageDown are deliberately ABSENT from this map (GitHub issue
+  // #14). Bare page keys are ordinary PTY input: xterm, alacritty, kitty,
+  // iTerm2 and Windows Terminal all hand `ESC [ 5 ~` / `ESC [ 6 ~` to the
+  // running program so full-screen apps (less, vim, opencode) page
+  // themselves. Because this map replaces the stock one wholesale,
+  // omitting the keys is exactly what lets `fa.TerminalView._onKeyFallback`
+  // fall through to `encodeKeyWithKitty` and write those bytes. Only the
+  // Shift forms belong to the emulator (local scrollback,
+  // [_kFastScrollPages] pages per press) — and they are deliberately not
+  // gated on screen mode: Shift+PageUp/Down means "scroll my history" in
+  // every mode (Windows Terminal / iTerm2 behavior), and in the alternate
+  // screen there is no history, so `engine.scrollLines` is a silent no-op.
   static final Map<ShortcutActivator, Intent>
   _alacrittyShortcutsWithShiftVariants = <ShortcutActivator, Intent>{
     ...defaultTerminalShortcuts,
@@ -2113,16 +2133,8 @@ class TerminalViewState extends State<TerminalView> {
         const fa.PasteIntent(),
     SingleActivator(LogicalKeyboardKey.insert, shift: true):
         const fa.PasteIntent(),
-    // PageUp/PageDown → 1-page scrollback scroll.
-    SingleActivator(LogicalKeyboardKey.pageUp): const ScrollPageIntent(
-      up: true,
-    ),
-    SingleActivator(LogicalKeyboardKey.pageDown): const ScrollPageIntent(
-      up: false,
-    ),
-    // Shift+PageUp/PageDown → 5-page scrollback scroll. The
-    // bundled ScrollPageIntent has no multiplier, so route via
-    // a custom intent handled in [_alacrittyActions].
+    // Shift+PageUp/PageDown → [_kFastScrollPages]-page scrollback scroll.
+    // The only page-key bindings in this map; see the passthrough note above.
     SingleActivator(LogicalKeyboardKey.pageUp, shift: true):
         const _ScrollFastIntent(true),
     SingleActivator(LogicalKeyboardKey.pageDown, shift: true):
@@ -2210,17 +2222,16 @@ class TerminalViewState extends State<TerminalView> {
       },
       // Safety-net Focus wrapping the terminal tree. Two roles:
       //
-      // 1. Scroll fallback. The PRIMARY path for PageUp/PageDown is
-      //    `fa.TerminalView._onKeyFallback`, which (after the change at
-      //    `_alacrittyShortcutsWithShiftVariants` above) finds our
-      //    `PageUp → ScrollPageIntent` / `PageDown → ScrollPageIntent`
-      //    binding and invokes the bundled action (→ `engine.scrollLines`).
-      //    If that action lookup somehow returns null (e.g. an FA
-      //    Actions-tree quirk), the event propagates up to THIS Focus.
-      //    We catch plain PageUp/PageDown and Shift+PageUp/PageDown
-      //    here and call `_scrollPage` / `_scrollPageFast` directly,
-      //    returning `handled` so the ancestor `CallbackShortcuts`
-      //    doesn't double-fire. Ctrl/Alt/Meta combinations are
+      // 1. Shift+PageUp/PageDown scrollback fallback. The PRIMARY path is
+      //    `fa.TerminalView._onKeyFallback`, which finds our
+      //    `_ScrollFastIntent` binding in
+      //    `_alacrittyShortcutsWithShiftVariants` and calls
+      //    `_scrollPageFast`. If that action lookup ever returns null (an
+      //    FA Actions-tree quirk), the event propagates up to THIS Focus;
+      //    `shiftPageScrollPages` then scrolls the Shift forms and reports
+      //    `handled` so the ancestor `CallbackShortcuts` can't double-fire.
+      //    Bare PageUp/PageDown are never consumed here — they are PTY
+      //    input (GitHub issue #14). Ctrl/Alt/Meta combinations are
       //    intentionally ignored — those belong to other parts of the
       //    shortcut system.
       //
@@ -2444,16 +2455,17 @@ class TerminalViewState extends State<TerminalView> {
   /// want to act on — the event then propagates up the focus tree
   /// and reaches this widget.
   ///
-  /// 1. Scroll fallback (PageUp / PageDown / Shift+PageUp /
-  ///    Shift+PageDown). The PRIMARY path lives inside `fa.TerminalView`
-  ///    (`_onKeyFallback` → our `ScrollPageIntent` shortcut → bundled
-  ///    action → `engine.scrollLines`). This handler is the safety
-  ///    net: if that path returns `ignored` for any reason (e.g. an
-  ///    action-lookup miss), we call `_scrollPage` / `_scrollPageFast`
-  ///    directly and return `handled` so the ancestor
-  ///    `CallbackShortcuts` doesn't double-fire. Ctrl/Alt/Meta
-  ///    combinations are intentionally ignored — those belong to
-  ///    other parts of the shortcut system.
+  /// 1. Shift+PageUp/PageDown scrollback fallback. The PRIMARY path
+  ///    lives inside `fa.TerminalView` (`_onKeyFallback` → our
+  ///    `_ScrollFastIntent` shortcut → `_scrollPageFast`). This handler
+  ///    is the safety net: if that path returns `ignored` for any reason
+  ///    (e.g. an action-lookup miss), `shiftPageScrollPages` decides and
+  ///    we scroll directly, returning `handled` so the ancestor
+  ///    `CallbackShortcuts` doesn't double-fire. Bare PageUp/PageDown are
+  ///    NOT touched here — they must stay PTY input (GitHub issue #14),
+  ///    so they return `ignored` and continue down the encode path.
+  ///    Ctrl/Alt/Meta combinations are intentionally ignored — those
+  ///    belong to other parts of the shortcut system.
   ///
   /// 2. Letter-key auto-repeat on macOS. `fa.TerminalView` defers
   ///    bare printable keys (a-z, 0-9, punctuation, Space) to IME on
@@ -2539,17 +2551,14 @@ class TerminalViewState extends State<TerminalView> {
       _engine.write(Uint8List.fromList(utf8.encode(event.character!)));
       return KeyEventResult.handled;
     }
-    final isPageUp = event.logicalKey == LogicalKeyboardKey.pageUp;
-    final isPageDown = event.logicalKey == LogicalKeyboardKey.pageDown;
-    if (!isPageUp && !isPageDown) {
-      return KeyEventResult.ignored;
-    }
-    final direction = isPageUp ? 1 : -1;
-    if (hw.isShiftPressed) {
-      _scrollPageFast(direction);
-    } else {
-      _scrollPage(direction);
-    }
+    // Shift+PageUp/PageDown is the only page-key chord the emulator owns;
+    // bare page keys return null here and stay PTY input (issue #14).
+    final pages = shiftPageScrollPages(
+      event.logicalKey,
+      shiftPressed: hw.isShiftPressed,
+    );
+    if (pages == null) return KeyEventResult.ignored;
+    _scrollPage(pages);
     return KeyEventResult.handled;
   }
 

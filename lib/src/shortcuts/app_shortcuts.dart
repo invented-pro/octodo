@@ -122,8 +122,12 @@ ShortcutActivator altOnly(LogicalKeyboardKey key, {bool shift = false}) {
   return SingleActivator(key, alt: true, shift: shift);
 }
 
-/// Build a [ShortcutActivator] with no modifier. Used for `PageUp` /
-/// `PageDown` scroll and `Shift+Insert` paste.
+/// Build a [ShortcutActivator] with no modifier.
+///
+/// Kept for bindings that genuinely want a bare key. Nothing in the app uses
+/// it today: `PageUp` / `PageDown` — its last caller — are PTY input rather
+/// than app shortcuts (GitHub issue #14), and `Shift+Insert` paste is bound
+/// as an explicit `SingleActivator(insert, shift: true)`.
 ShortcutActivator plain(LogicalKeyboardKey key) => SingleActivator(key);
 
 /// Human-readable label of the platform's primary modifier, suitable for
@@ -516,21 +520,20 @@ class WorkspaceBindings {
 /// directly through `_engine.write(...)`, bypassing the Shortcuts
 /// activator entirely so the shell always sees the bytes.
 ///
-/// **PageUp / PageDown / Shift+PageUp / Shift+PageDown are deliberately
-/// NOT in this map.** They used to live here so the app-level early-key
-/// handler could dispatch them — but that handler returns `handled`
-/// after the first match, which (a) prevented `flutter_alacritty`'s
-/// `fa.TerminalView._onKeyFallback` from ever seeing the event and (b)
-/// routed the dispatch through a long `?.` chain that occasionally
-/// resolved to a no-op (the focused terminal view wasn't always
-/// resolvable from `_activeWorkspace?.key.currentState`), so PageUp
-/// silently did nothing. Both classes of fix landed in `terminal_view.dart`
-/// instead: the FA shortcut map now binds PageUp → `ScrollPageIntent`
-/// (which calls `engine.scrollLines` directly), and a `Focus` widget
-/// wrapping the Stack provides a second-line safety net for the
-/// unlikely case that the FA path also fails. See
-/// `terminal_view.dart:1064–1125` (shortcuts) and `:1144–1166` (safety
-/// net) for the full reasoning.
+/// **PageUp / PageDown are deliberately NOT bound anywhere in the app.**
+/// Bare page keys are PTY input: the running program must receive
+/// `ESC [ 5 ~` / `ESC [ 6 ~` so full-screen apps (less, vim, opencode) can
+/// page themselves. An earlier revision bound them here for app-level
+/// scrollback dispatch; that both swallowed the keys (GitHub issue #14) and
+/// was structurally wrong, because this handler returns `handled` after the
+/// first match and would keep `flutter_alacritty`'s `_onKeyFallback` from
+/// ever reaching `encodeKey`.
+///
+/// **Shift+PageUp / Shift+PageDown** are owned by the emulator: they scroll
+/// the local scrollback 5 pages per press, bound in
+/// `TerminalView._alacrittyShortcutsWithShiftVariants` with a
+/// `Focus`-level safety net in `_handleKeyFallback`. See
+/// `terminal_view.dart` for the full reasoning.
 ///
 /// Font zoom (`Ctrl+=` / `Ctrl++` / `Ctrl+-` / `Ctrl+0` and the
 /// `Ctrl+Shift+…` variants) is **not** bound here. Alacritty owns
