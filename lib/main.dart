@@ -2943,10 +2943,39 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
       false;
 
   @override
-  Future<bool> newTab(String? workspaceId) async {
+  Future<bool> newTab(String? workspaceId, {String? shell}) async {
     final state = _entryFor(workspaceId)?.key.currentState;
     if (state == null) return false;
-    return state.newTabAwaitPublic();
+    if (shell == null) return state.newTabAwaitPublic();
+    // A named shell arrives as a shortName the router already
+    // resolved against this host's list — map it back to the
+    // profile. Unknown = false (belt-and-suspenders; the router
+    // filters unknowns before calling). (`this.shell` — the param
+    // above shadows the bridge's app-shell field.)
+    final profiles = this.shell._shells;
+    if (profiles == null) return false;
+    for (final profile in profiles) {
+      if (profile.shortName == shell) {
+        return state.newTabAwaitPublic(profile: profile);
+      }
+    }
+    return false;
+  }
+
+  @override
+  List<FeishuShellOption> listShells(String? workspaceId) {
+    final profiles = shell._shells;
+    if (profiles == null || profiles.isEmpty) return const [];
+    final state = _entryFor(workspaceId)?.key.currentState;
+    final defaultIndex = state?.defaultShellIndex ?? 0;
+    return [
+      for (var i = 0; i < profiles.length; i++)
+        FeishuShellOption(
+          label: profiles[i].label,
+          shortName: profiles[i].shortName,
+          isDefault: i == defaultIndex,
+        ),
+    ];
   }
 
   @override

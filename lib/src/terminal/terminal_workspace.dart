@@ -1395,9 +1395,10 @@ function prompt {
   }
 
   Future<void> _newSurfaceInFocusedContainerAsync(
-    PaneContainer container,
-  ) async {
-    final s = await _makeSurface(_defaultShell, userHome);
+    PaneContainer container, {
+    ShellProfile? profile,
+  }) async {
+    final s = await _makeSurface(profile ?? _defaultShell, userHome);
     if (!mounted) return;
     setState(() {
       container.surfaces.add(s);
@@ -1879,11 +1880,26 @@ function prompt {
   void newTabPublic() => _newSurfaceInFocusedContainer();
 
   /// Awaitable variant of [newTabPublic] — resolves after the new
-  /// tab is in the pane and focused. False when there is no pane yet.
-  Future<bool> newTabAwaitPublic() async {
+  /// tab is in the pane and focused. False when there is no pane
+  /// yet.
+  ///
+  /// [profile] names the shell the new tab runs (the default shell
+  /// when omitted) AND, when it is one of [availableShells], becomes
+  /// the workspace default — mirroring `_openShellFromSelector`, so
+  /// a shell named from Feishu (`/newtab ubuntu`) is what later
+  /// bare new-tabs spawn too. In-memory only: the
+  /// `terminal.defaultShell` setting is not written, same as the
+  /// desktop selector.
+  Future<bool> newTabAwaitPublic({ShellProfile? profile}) async {
     final container = _focusedContainer;
     if (container == null) return false;
-    await _newSurfaceInFocusedContainerAsync(container);
+    if (profile != null) {
+      final index = widget.availableShells.indexOf(profile);
+      if (index >= 0) {
+        setState(() => _defaultShellIndex = index);
+      }
+    }
+    await _newSurfaceInFocusedContainerAsync(container, profile: profile);
     return true;
   }
   void closeTabPublic() => _closeFocusedSurface();
@@ -1899,6 +1915,11 @@ function prompt {
   /// The currently-focused container, or null if the workspace has
   /// no root pane yet (early in `initState`).
   PaneContainer? get focusedContainer => _focusedContainer;
+
+  /// The index into [availableShells] of the shell a bare new tab
+  /// spawns (the session-latest-active shell). Surfaces the default
+  /// for the Feishu `/status` shell section via the host bridge.
+  int get defaultShellIndex => _defaultShellIndex;
 
   /// The workspace's pane/tab layout: every pane, its tabs, and
   /// which of them is focused.

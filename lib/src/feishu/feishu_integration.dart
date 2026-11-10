@@ -43,6 +43,81 @@ class FeishuWorkspace {
   const FeishuWorkspace(this.id, this.name, {this.active = false});
 }
 
+/// A shell this host can spawn in a new tab — the list behind
+/// `/status`'s shell section and `/newtab <name>`'s name matching.
+class FeishuShellOption {
+  /// Human-readable name (e.g. "PowerShell 7", "Ubuntu-24.04").
+  final String label;
+
+  /// The stable spawn token (`ShellProfile.shortName`: "pwsh",
+  /// "cmd", a sanitized distro name, …) — what `terminal.defaultShell`
+  /// persists and the tightest `/newtab` match target.
+  final String shortName;
+
+  /// True for the shell a bare `/newtab` would spawn in the
+  /// workspace the list was asked about — marked `▸` in `/status`,
+  /// the same marker language as the driving tab.
+  final bool isDefault;
+
+  const FeishuShellOption({
+    required this.label,
+    required this.shortName,
+    this.isDefault = false,
+  });
+}
+
+/// Match a `/newtab <name>` query against [shells]: every shell the
+/// query hits at the FIRST tier that produces any match. Empty list
+/// — no shell matches; one entry — the shell to spawn; more than one
+/// — ambiguous, the chat gets the candidates and nothing is created.
+///
+/// Tiers, in order (all case-insensitive, on a normalized form — see
+/// [_normalizeShellName] — so `Git Bash` = `gitbash` and
+/// `Ubuntu-24.04` = `ubuntu2404`):
+///
+/// 1. exact — query equals a `shortName` or `label`
+/// 2. prefix — query starts a `shortName` or `label`
+/// 3. substring — query occurs inside a `shortName` or `label`
+///
+/// Mirrors the semantics of `resolveDefaultShellIndex` (the settings
+/// dropdown's matcher) with the tier that helps typo'd phone input.
+@visibleForTesting
+List<FeishuShellOption> resolveShellQuery(
+    List<FeishuShellOption> shells, String query) {
+  final want = _normalizeShellName(query);
+  if (want.isEmpty) return const [];
+
+  bool hits(FeishuShellOption s,
+      bool Function(String name, String query) test) {
+    return test(_normalizeShellName(s.shortName), want) ||
+        test(_normalizeShellName(s.label), want);
+  }
+
+  var matches = [
+    for (final s in shells)
+      if (hits(s, (n, q) => n == q)) s
+  ];
+  if (matches.isEmpty) {
+    matches = [
+      for (final s in shells)
+        if (hits(s, (n, q) => n.startsWith(q))) s
+    ];
+  }
+  if (matches.isEmpty) {
+    matches = [
+      for (final s in shells)
+        if (hits(s, (n, q) => n.contains(q))) s
+    ];
+  }
+  return matches;
+}
+
+/// Case/separator-insensitive form of a shell name for matching:
+/// lowercase, everything that is not a letter or digit stripped
+/// (`Git Bash` → `gitbash`, `Ubuntu-24.04` → `ubuntu2404`).
+String _normalizeShellName(String s) =>
+    s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
 /// A task completion reported by shell integration (OSC 133 `D` mark)
 /// in some tab — the multi-tab result feed. [duration] is
 /// threshold-gated upstream by the user's "only notify for tasks
@@ -139,9 +214,18 @@ abstract class FeishuHostBridge {
   bool focusPane(String? workspaceId, String paneId, {String? surfaceId});
 
   /// Open a tab in [workspaceId]'s focused pane (null = the active
-  /// workspace). Resolves after the tab exists (the creation is
-  /// async). False when there is no terminal yet.
-  Future<bool> newTab(String? workspaceId);
+  /// workspace), optionally with the shell named by [shell] (a
+  /// `ShellProfile.shortName`, resolved back to a profile by the
+  /// host). Resolves after the tab exists (the creation is async).
+  /// False when there is no terminal yet or the shell is unknown.
+  Future<bool> newTab(String? workspaceId, {String? shell});
+
+  /// The shells this host can spawn — the startup detection behind
+  /// the desktop shell selector, with the [workspaceId] workspace's
+  /// current default flagged (null = the active workspace). Empty
+  /// when the host detected none. `/status` lists them and
+  /// `/newtab <name>` matches against them.
+  List<FeishuShellOption> listShells(String? workspaceId);
 
   /// Close [workspaceId]'s focused tab. False when there is none.
   bool closeTab(String? workspaceId);
@@ -760,6 +844,22 @@ class FeishuIntegration {
       unawaited(_newTab(event.chatId, workspaceId));
       return;
     }
+    // `/newtab <shell>` — a named shell for the new tab. The whole
+    // remainder is the query, so names with spaces (`git bash`)
+    // work; it resolves against the host's shells before anything
+    // is created (an unknown or ambiguous name answers with the
+    // list instead of a surprise tab).
+    if (event.text.startsWith('/newtab ')) {
+      if (!_mayDrive(event.chatId, event.senderOpenId)) {
+        unawaited(api
+            .sendText(event.chatId, _binderHint(event.chatId))
+            .catchError((_) {}));
+        return;
+      }
+      unawaited(_newTab(event.chatId, workspaceId,
+          shellQuery: event.text.substring('/newtab '.length).trim()));
+      return;
+    }
     if (event.text == '/closetab') {
       if (!_mayDrive(event.chatId, event.senderOpenId)) {
         unawaited(api
@@ -987,7 +1087,8 @@ class FeishuIntegration {
       '/attach — pick a workspace (a card); /attach <ws>[.<pane>.'
       '[.<tab>]] binds by the numbers /status prints\n'
       '/detach — unbind; follow whatever the desktop has focused\n'
-      '/newtab — open a tab in the bound pane (re-binds to it)\n'
+      '/newtab [shell] — open a tab in the bound pane with the '
+      'default or a named shell (e.g. /newtab ubuntu; re-binds to it)\n'
       '/closetab — close the focused tab and follow what takes its '
       'place (never the last one)\n'
       '/raw <keys> — raw keystrokes into the terminal, TUIs included '
@@ -1132,6 +1233,9 @@ class FeishuIntegration {
     if (tab == null || pane == null) {
       headline = 'Nothing to drive yet'
           '${name == null ? '' : ' — "$name" has no tabs'}';
+      // Still useful with nothing to drive: the shells /newtab can
+      // name is how a chat bootstraps its first tab.
+      _appendShellSection(lines, bridge.listShells(target));
     } else {
       String tabLabel(FeishuTabStatus t) =>
           t.title.isEmpty ? t.id : t.title;
@@ -1168,6 +1272,10 @@ class FeishuIntegration {
           !layout.panes.any((p) => p.id == binding!.paneId)) {
         lines.add('The bound pane is gone — /attach <ws>.<pane>[.<tab>] again.');
       }
+
+      // The shells `/newtab` can name — only when there is a
+      // choice to make (see [_shellSectionLines]).
+      _appendShellSection(lines, bridge.listShells(target));
 
       lines.add('');
       lines.add('Tip: /attach workspace.pane.tab to switch');
@@ -1281,13 +1389,43 @@ class FeishuIntegration {
   /// pane; for a bound chat that is the bound pane, focused just
   /// above). A bound chat re-binds to the new tab right away — the
   /// next command goes there, not to the old one.
-  Future<void> _newTab(String chatId, String? workspaceId) async {
+  ///
+  /// [shellQuery], when given, names the shell the new tab runs —
+  /// resolved (case-insensitively, tolerantly — see
+  /// [resolveShellQuery]) against the host's shells BEFORE anything
+  /// is created: a miss or an ambiguity answers with the list, and
+  /// the default-shell `/newtab` path is untouched.
+  Future<void> _newTab(String chatId, String? workspaceId,
+      {String? shellQuery}) async {
     final binding = _bindings[chatId];
     _focusBoundPane(chatId, workspaceId);
     final target = binding?.workspaceId ?? workspaceId;
+    FeishuShellOption? shell;
+    if (shellQuery != null) {
+      final shells = bridge.listShells(target);
+      final matches = resolveShellQuery(shells, shellQuery);
+      if (matches.isEmpty) {
+        await api
+            .sendText(chatId,
+                'No shell matches "$shellQuery".\n${_shellListBody(shells)}')
+            .catchError((_) {});
+        return;
+      }
+      if (matches.length > 1) {
+        final names = [
+          for (final m in matches) '  ${_shellOptionName(m)}'
+        ].join('\n');
+        await api
+            .sendText(chatId,
+                '"$shellQuery" matches ${matches.length} shells:\n$names')
+            .catchError((_) {});
+        return;
+      }
+      shell = matches.single;
+    }
     // Awaited: the surface creation is async — reading the layout
     // before it exists re-binds to the OLD focused tab.
-    if (!await bridge.newTab(target)) {
+    if (!await bridge.newTab(target, shell: shell?.shortName)) {
       await api
           .sendText(chatId, 'No terminal to add a tab to.')
           .catchError((_) {});
@@ -1335,9 +1473,54 @@ class FeishuIntegration {
     await api
         .sendText(chatId,
             'New tab: pane ${pane.number} · tab $tabNumber'
+            '${shell == null ? '' : ' (${shell.label})'}'
             '${rebinds ? ' — now driving it' : ''}.')
         .catchError((_) {});
   }
+
+  /// One shell as `/newtab` accepts it: `shortName (label)` — the
+  /// label in parens only when it is not just the shortName's
+  /// spelling (`pwsh (PowerShell 7)`, bare `ubuntu-24.04`).
+  static String _shellOptionName(FeishuShellOption s) =>
+      s.label.toLowerCase() == s.shortName.toLowerCase()
+          ? s.shortName
+          : '${s.shortName} (${s.label})';
+
+  /// The `/status` shell section: a header plus one line per shell,
+  /// the default (what a bare /newtab spawns) marked `▸` — the same
+  /// marker language as the driving tab. Empty when there is no
+  /// choice to make (fewer than two shells).
+  static List<String> _shellSectionLines(List<FeishuShellOption> shells) {
+    if (shells.length < 2) return const [];
+    return [
+      'Shells for /newtab:',
+      for (final s in shells)
+        '${s.isDefault ? '▸ ' : '  '}${_shellOptionName(s)}',
+    ];
+  }
+
+  /// Append the shell section to [lines], separated from the
+  /// content already there by a blank line — it is a block of its
+  /// own, not a continuation of the tab list (and never opens the
+  /// card with a leading blank). No-op when there is no choice to
+  /// make.
+  static void _appendShellSection(
+      List<String> lines, List<FeishuShellOption> shells) {
+    final section = _shellSectionLines(shells);
+    if (section.isEmpty) return;
+    if (lines.isNotEmpty) lines.add('');
+    lines.addAll(section);
+  }
+
+  /// The shells a shell-naming error answers with: the accepted
+  /// names, one per line, or a plain "none detected" when the host
+  /// found nothing.
+  static String _shellListBody(List<FeishuShellOption> shells) =>
+      shells.isEmpty
+          ? 'No shells detected on this host.'
+          : 'Shells:\n${[
+              for (final s in shells) '  ${_shellOptionName(s)}'
+            ].join('\n')}';
 
   /// `/closetab` — close the target's focused tab (for a bound chat,
   /// the bound pane's bound tab). Refuses the only tab of the only
@@ -2694,7 +2877,10 @@ class _NullHostBridge implements FeishuHostBridge {
       false;
 
   @override
-  Future<bool> newTab(String? workspaceId) async => false;
+  Future<bool> newTab(String? workspaceId, {String? shell}) async => false;
+
+  @override
+  List<FeishuShellOption> listShells(String? workspaceId) => const [];
 
   @override
   bool closeTab(String? workspaceId) => false;

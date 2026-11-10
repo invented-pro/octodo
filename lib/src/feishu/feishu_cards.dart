@@ -276,7 +276,8 @@ Map<String, dynamic> helpCard() => feishuCard(
             '**/detach** — unbind; follow the desktop focus'),
         const {'tag': 'hr'},
         _mdSection('**Tabs**\n'
-            '**/newtab** — open a tab in the bound pane (re-binds to it)\n'
+            '**/newtab [shell]** — open a tab in the bound pane with the '
+            'default or a named shell (e.g. /newtab ubuntu; re-binds to it)\n'
             '**/closetab** — close the focused tab and follow what takes '
             'its place (never the last one)'),
         const {'tag': 'hr'},

@@ -91,6 +91,13 @@ class _RecordingBridge implements FeishuHostBridge {
   /// The workspaces `/newtab` was asked to open a tab in.
   final List<String?> newTabCalls = [];
 
+  /// The shell each `/newtab` asked for (null = the default).
+  final List<String?> newTabShells = [];
+
+  /// The shells `listShells` reports — `/status` lists them and
+  /// `/newtab <name>` matches against them.
+  List<FeishuShellOption> shells = const [];
+
   /// The workspaces `/closetab` was asked to close a tab in.
   final List<String?> closeTabCalls = [];
 
@@ -115,6 +122,9 @@ class _RecordingBridge implements FeishuHostBridge {
       FeishuLayoutStatus(panes);
 
   @override
+  List<FeishuShellOption> listShells(String? workspaceId) => shells;
+
+  @override
   bool focusPane(String? workspaceId, String paneId, {String? surfaceId}) {
     // Mirror the real bridge: unknown pane/tab ids fail — that is
     // what drives the router's heal-by-position path.
@@ -130,8 +140,9 @@ class _RecordingBridge implements FeishuHostBridge {
   }
 
   @override
-  Future<bool> newTab(String? workspaceId) async {
+  Future<bool> newTab(String? workspaceId, {String? shell}) async {
     newTabCalls.add(workspaceId);
+    newTabShells.add(shell);
     // The real creation is async (a $HOME query may precede the new
     // surface) — defer the same way, so a router that does not await
     // reads the OLD layout and re-binds to the old tab.
@@ -372,6 +383,51 @@ Future<FeishuCredentialStore> _storeIn(
 }
 
 void main() {
+  group('resolveShellQuery', () {
+    const shells = [
+      FeishuShellOption(label: 'PowerShell 7', shortName: 'pwsh'),
+      FeishuShellOption(label: 'PowerShell 5', shortName: 'powershell'),
+      FeishuShellOption(label: 'Command Prompt', shortName: 'cmd'),
+      FeishuShellOption(label: 'Ubuntu-24.04', shortName: 'ubuntu-24.04'),
+      FeishuShellOption(label: 'Git Bash', shortName: 'bash'),
+    ];
+
+    test('exact shortName, case-insensitive', () {
+      expect(resolveShellQuery(shells, 'PWSH').single.shortName, 'pwsh');
+      expect(resolveShellQuery(shells, 'cmd').single.shortName, 'cmd');
+    });
+
+    test('exact label, tolerant of case and separators', () {
+      // `Git Bash` = `gitbash` = `GITBASH` once normalized.
+      expect(resolveShellQuery(shells, 'GIT BASH').single.shortName, 'bash');
+      expect(resolveShellQuery(shells, 'Ubuntu 24.04').single.shortName,
+          'ubuntu-24.04');
+    });
+
+    test('a unique prefix resolves', () {
+      expect(resolveShellQuery(shells, 'ubun').single.shortName,
+          'ubuntu-24.04');
+    });
+
+    test('an ambiguous prefix lists every match at its tier', () {
+      // `power` prefix-hits both PowerShell labels — pwsh's shortName
+      // is not a prefix match, so exactly two candidates.
+      final matches = resolveShellQuery(shells, 'power');
+      expect(matches.map((s) => s.shortName), ['pwsh', 'powershell']);
+    });
+
+    test('a substring resolves when nothing closer matches', () {
+      expect(resolveShellQuery(shells, 'buntu').single.shortName,
+          'ubuntu-24.04');
+    });
+
+    test('a miss at every tier matches nothing', () {
+      expect(resolveShellQuery(shells, 'zsh'), isEmpty);
+      expect(resolveShellQuery(shells, ''), isEmpty);
+      expect(resolveShellQuery(const [], 'pwsh'), isEmpty);
+    });
+  });
+
   test('sync starts the channel when bound, stops when unbound', () async {
     final dir = Directory.systemTemp.createTempSync('feishu_int');
     addTearDown(() => dir.deleteSync(recursive: true));
@@ -1976,6 +2032,8 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     expect(bridge.newTabCalls, ['ws_1']);
+    expect(bridge.newTabShells, [null],
+        reason: 'a bare /newtab spawns the default shell — no name given');
     expect(sent.last.$2, contains('pane 1 · tab 2'));
     expect(sent.last.$2, contains('now driving it'));
 
@@ -1988,6 +2046,239 @@ void main() {
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
     expect(bridge.focusedSurfaces.last, 'tab_new_1');
+  });
+
+  test('/newtab <shell> resolves the name and opens the tab with it',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces =
+          const [FeishuWorkspace('ws_1', 'octodo', active: true)]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+        ]),
+      ]
+      ..shells = const [
+        FeishuShellOption(
+            label: 'PowerShell 7', shortName: 'pwsh', isDefault: true),
+        FeishuShellOption(label: 'PowerShell 5', shortName: 'powershell'),
+        FeishuShellOption(label: 'Ubuntu-24.04', shortName: 'ubuntu-24.04'),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    // Case and separator tolerance, as typed on a phone keyboard.
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_nt_shell',
+      text: '/newtab UBUNTU 24.04',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    // The chat is unbound — the bridge's null workspace means "the
+    // active one", exactly how a plain-text command is addressed.
+    expect(bridge.newTabCalls, [null]);
+    expect(bridge.newTabShells, ['ubuntu-24.04']);
+    expect(sent.last.$2, 'New tab: pane 1 · tab 2 (Ubuntu-24.04).');
+  });
+
+  test('/newtab <shell> with an ambiguous name lists the candidates',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces =
+          const [FeishuWorkspace('ws_1', 'octodo', active: true)]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+        ]),
+      ]
+      ..shells = const [
+        FeishuShellOption(
+            label: 'PowerShell 7', shortName: 'pwsh', isDefault: true),
+        FeishuShellOption(label: 'PowerShell 5', shortName: 'powershell'),
+        FeishuShellOption(label: 'Ubuntu-24.04', shortName: 'ubuntu-24.04'),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_nt_amb',
+      text: '/newtab power',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(bridge.newTabCalls, isEmpty,
+        reason: 'an ambiguous name creates nothing');
+    expect(sent.last.$2, contains('matches 2 shells'));
+    expect(sent.last.$2, contains('pwsh (PowerShell 7)'));
+    expect(sent.last.$2, contains('powershell (PowerShell 5)'));
+  });
+
+  test('/newtab <shell> with an unknown name answers with the list',
+      () async {
+    final bridge = _RecordingBridge()
+      ..workspaces =
+          const [FeishuWorkspace('ws_1', 'octodo', active: true)]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+        ]),
+      ]
+      ..shells = const [
+        FeishuShellOption(
+            label: 'PowerShell 7', shortName: 'pwsh', isDefault: true),
+        FeishuShellOption(label: 'Ubuntu-24.04', shortName: 'ubuntu-24.04'),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_nt_miss',
+      text: '/newtab zzz',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(bridge.newTabCalls, isEmpty);
+    expect(sent.last.$2, contains('No shell matches "zzz"'));
+    expect(sent.last.$2, contains('ubuntu-24.04'),
+        reason: 'the reply teaches the accepted names');
+  });
+
+  test('a non-binder cannot /newtab <shell> into a bound chat', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces =
+          const [FeishuWorkspace('ws_1', 'octodo', active: true)]
+      ..shells = const [
+        FeishuShellOption(label: 'Ubuntu-24.04', shortName: 'ubuntu-24.04'),
+      ];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      seedBindings: {
+        'oc_chat': FeishuChatBinding(
+          chatId: 'oc_chat',
+          chatType: 'group',
+          workspaceId: 'ws_1',
+          workspaceName: 'octodo',
+          boundAt: DateTime.now(),
+          boundBy: 'ou_other',
+        ),
+      },
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_nt_nonbinder',
+      text: '/newtab ubuntu',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(bridge.newTabCalls, isEmpty);
+    expect(sent.last.$2, contains('only they may send commands here'));
+  });
+
+  test('/status lists the host shells with the default marked', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces =
+          const [FeishuWorkspace('ws_1', 'octodo', active: true)]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+        ]),
+      ]
+      ..shells = const [
+        FeishuShellOption(
+            label: 'PowerShell 7', shortName: 'pwsh', isDefault: true),
+        FeishuShellOption(label: 'Ubuntu-24.04', shortName: 'ubuntu-24.04'),
+        FeishuShellOption(label: 'Git Bash', shortName: 'bash'),
+      ];
+    final cards = <Map<String, dynamic>>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onCard: (_, card) => cards.add(card),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_status_shells',
+      text: '/status',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final reply = cardText(cards.single);
+    expect(reply, contains('Shells for /newtab:'));
+    // A blank line separates the section from the tab blocks above.
+    expect(reply, contains('\n\nShells for /newtab:'));
+    // The default (what a bare /newtab spawns) carries the same ▸
+    // marker language as the driving tab; the others stay unmarked.
+    expect(reply, contains('▸ pwsh (PowerShell 7)'));
+    expect(reply, contains('ubuntu-24.04'));
+    expect(reply, contains('bash (Git Bash)'));
+    expect(reply, isNot(contains('▸ ubuntu')));
+  });
+
+  test('/status hides the shell section on a single-shell host', () async {
+    final bridge = _RecordingBridge()
+      ..workspaces =
+          const [FeishuWorkspace('ws_1', 'octodo', active: true)]
+      ..panes = const [
+        FeishuPaneStatus(id: 'pane_1', number: 1, focused: true, tabs: [
+          FeishuTabStatus(
+              id: 'tab_a', title: 'one', cwd: null, focused: true),
+        ]),
+      ]
+      ..shells = const [
+        FeishuShellOption(
+            label: 'PowerShell 7', shortName: 'pwsh', isDefault: true),
+      ];
+    final cards = <Map<String, dynamic>>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onCard: (_, card) => cards.add(card),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_status_1shell',
+      text: '/status',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(cardText(cards.single), isNot(contains('Shells for /newtab')));
   });
 
   test('/closetab closes the bound tab, but not the only one', () async {
