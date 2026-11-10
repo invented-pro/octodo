@@ -29,6 +29,7 @@ import 'feishu_greetings.dart';
 import 'feishu_lease.dart';
 import 'feishu_ws_channel.dart';
 import 'opencode_client.dart';
+import 'tui_reply_extract.dart';
 
 /// A workspace of the desktop app — the unit a Feishu chat binds to
 /// (design doc §3: "一个飞书单聊或群聊绑定到 Octodo 的某个工作区").
@@ -197,6 +198,20 @@ abstract class FeishuHostBridge {
   /// Null when there is no such terminal (or it can't be rasterized
   /// yet).
   Future<Uint8List?> snapshotPng(String? workspaceId);
+
+  /// The focused terminal's grid geometry, or null when there is no
+  /// such terminal. Capture sizing reads it (the width stays; only
+  /// the height grows).
+  ({int rows, int columns})? terminalGeometry(String? workspaceId);
+
+  /// Off-screen full-content capture of the focused terminal's
+  /// full-screen TUI ("resize to read"): the PTY briefly grows under
+  /// a frozen view while a private engine parses the full repaint,
+  /// then everything restores invisibly. Works over SSH at any hop
+  /// count and with any full-screen app that repaints on SIGWINCH.
+  /// Null when there is no such terminal or it is not in the
+  /// alternate screen.
+  Future<List<String>?> captureFullTui(String? workspaceId, {int rows});
 }
 
 /// Dedup window (§4.3): remember this many message ids…
@@ -219,6 +234,30 @@ const Duration _kOutputMaxWindowDefault = Duration(minutes: 5);
 
 /// …or until this many bytes arrive, whichever first.
 const int _kOutputMaxBytes = 15 * 1024;
+
+/// Consecutive silent idle windows (with real output already in the
+/// buffer but no prompt) after which a capture is flushed anyway —
+/// the slow-prompt escape hatch. With the default 2.5s window this
+/// ships a finished command's output ~10s after its last byte even
+/// when the shell takes much longer to draw its next prompt.
+const int _kQuietFlushStreaks = 4;
+
+/// Quiet period that ends the wait for a TUI's reply before the
+/// off-screen capture (injectable via [FeishuIntegration]).
+const Duration _kTuiCaptureIdleDefault = Duration(seconds: 5);
+
+/// Hard ceiling on the same wait (injectable via
+/// [FeishuIntegration]).
+const Duration _kTuiCaptureMaxWaitDefault = Duration(minutes: 2);
+
+/// Rows the capture grows the PTY to — room for the whole
+/// conversation to re-render (width is kept, so wrapping stays).
+const int _kTuiCaptureRows = 400;
+
+/// Hard cap on one serialized TUI chat task (typing + server poll +
+/// reply wait + off-screen capture). A task that exceeds it is
+/// abandoned by the queue so later messages still flow.
+const Duration _kTuiChatTaskCap = Duration(minutes: 4);
 
 /// One page of a long output — the size of one chat message the
 /// pager splits an oversized reply into (design doc §5).
@@ -292,6 +331,16 @@ class FeishuIntegration {
   /// Hard ceiling on one command's output capture (injectable).
   final Duration maxOutputWindow;
 
+  /// Quiet period that ends the wait for a TUI's reply before the
+  /// off-screen capture: a model streams tokens continuously, so
+  /// silence means the turn is done. Injectable for tests.
+  final Duration tuiCaptureIdle;
+
+  /// Hard ceiling on the same wait — a silent turn (a long tool run
+  /// with no TUI output) still gets captured at the cap: a partial
+  /// reply beats none. Injectable for tests.
+  final Duration tuiCaptureMaxWait;
+
   /// The opencode client-server gateway (path 1): `/ai` and
   /// opencode-TUI terminals chat through it with pure text
   /// replies. Injectable for tests.
@@ -356,6 +405,8 @@ class FeishuIntegration {
     this.leasePoll = const Duration(seconds: 5),
     this.outputWindow = _kOutputWindowDefault,
     this.maxOutputWindow = _kOutputMaxWindowDefault,
+    this.tuiCaptureIdle = _kTuiCaptureIdleDefault,
+    this.tuiCaptureMaxWait = _kTuiCaptureMaxWaitDefault,
     OpencodeGateway? opencode,
   })  : opencode = opencode ?? OpencodeLocalGateway(),
         channel = channel ?? FeishuWsChannel(),
@@ -366,6 +417,10 @@ class FeishuIntegration {
         greetingStore = greetingStore ?? FeishuGreetingStore.resolve(),
         lease = lease ?? FeishuConnectionLease.resolve() {
     _bindings.addAll(initialBindings ?? const {});
+    // Build marker: field logs must be attributable to a code state —
+    // this line proves the running app has the off-screen capture
+    // path (resize-to-read) and the queue watchdog.
+    _log.info('feishu: integration ready (capture+watchdog build)');
   }
 
   static FeishuIntegration? _instance;
@@ -792,10 +847,30 @@ class FeishuIntegration {
       final gateway = _gatewayFor(app);
       if (gateway != null) {
         // Serialized: the messages go into the TUI's composer one
-        // after the other.
-        final task = _tuiChatQueue
-            .then((_) => _tuiServerChat(event, gateway, workspaceId))
-            .catchError((_) {});
+        // after the other. The cap keeps one wedged task (a hung
+        // capture, a stuck server) from silencing every later
+        // message forever — the queue advances without it.
+        _log.info('feishu: tui-chat ${event.messageId} queued');
+        final task = _tuiChatQueue.then((_) async {
+          try {
+            await _tuiServerChat(event, gateway, workspaceId);
+          } catch (e, st) {
+            // Never silent: an unexpected throw here used to be
+            // swallowed by the queue's catchError below and the chat
+            // heard nothing at all.
+            _log.warning(
+                'feishu: tui-chat ${event.messageId} errored: $e\n$st');
+            unawaited(api
+                .sendText(event.chatId,
+                    'Octodo hit an error relaying your message into '
+                    'the TUI: $e')
+                .catchError((_) {}));
+          }
+        }).timeout(_kTuiChatTaskCap, onTimeout: () {
+          _log.warning('feishu: tui-chat ${event.messageId} '
+              'exceeded the ${_kTuiChatTaskCap.inMinutes}-minute '
+              'cap — the queue advances without it');
+        }).catchError((_) {});
         _tuiChatQueue = task.then<void>((_) {}, onError: (_) {});
         return;
       }
@@ -1862,6 +1937,19 @@ class FeishuIntegration {
     final sessionId = result.sessionId;
     final reply = result.reply;
     if (sessionId == null) {
+      // The text was typed, but the local server never saw the turn:
+      // a modal had the keyboard — or, the common case over SSH, the
+      // TUI talks to another opencode server (a remote host's, at any
+      // hop count). Read the reply off the TUI itself instead of
+      // guessing: wait for the output to go quiet, then take an
+      // off-screen full-content capture.
+      final captured = await _captureTuiReply(event, workspaceId);
+      if (captured != null) {
+        _log.info('feishu: tui-chat ${event.messageId} via the TUI '
+            'screen capture');
+        await api.sendText(event.chatId, captured).catchError((_) {});
+        return;
+      }
       // The text was typed, but the TUI never submitted it — a
       // modal (session picker, help) had the keyboard.
       _log.info('feishu: tui-chat ${event.messageId} was not submitted');
@@ -1887,6 +1975,119 @@ class FeishuIntegration {
   /// multi-line message must not carry its own line breaks.
   static String _oneLine(String text) =>
       text.replaceAll(RegExp(r'\s*\n+\s*'), ' ').trim();
+
+  /// Wait for the TUI to go quiet, then read its full rendered
+  /// content off-screen and extract the reply to the message we
+  /// typed. Quiet is a checkpoint, not a finish line: agent TUIs
+  /// pause mid-turn (thinking, tool runs) longer than any idle
+  /// window, so a capture without a reply is retried on the next
+  /// quiet period until the cap. Null when the message is provably
+  /// not in the app (a modal held the keyboard) or the capture is
+  /// impossible. At the cap the screen tail is sent instead of
+  /// leaving the chat silent.
+  Future<String?> _captureTuiReply(
+      FeishuInboundEvent event, String? workspaceId) async {
+    final sent = _oneLine(event.text);
+    if (sent.isEmpty) return null;
+    final stream = bridge.subscribeOutput(workspaceId);
+    if (stream == null) {
+      _log.info('feishu: capture ${event.messageId}: no output stream');
+      return null;
+    }
+    final watch = Stopwatch()..start();
+    List<String>? lastLines;
+    var emptyRegions = 0;
+    while (true) {
+      final remaining = tuiCaptureMaxWait - watch.elapsed;
+      if (remaining <= Duration.zero) break;
+      final quiet = await _waitOutputQuiet(stream,
+          idle: tuiCaptureIdle, cap: remaining);
+      _log.info('feishu: capture ${event.messageId}: quiet=$quiet after '
+          '${watch.elapsedMilliseconds}ms');
+      if (!quiet) {
+        _log.info('feishu: tui ${event.messageId} still streaming at '
+            'the cap — capturing anyway');
+      }
+      final lines = await bridge.captureFullTui(
+          workspaceId, rows: _kTuiCaptureRows);
+      if (lines == null) {
+        _log.info('feishu: capture ${event.messageId}: unavailable at '
+            '${watch.elapsedMilliseconds}ms');
+        return null;
+      }
+      lastLines = lines;
+      _log.info('feishu: capture ${event.messageId}: ${lines.length} '
+          'lines at ${watch.elapsedMilliseconds}ms');
+      final reply = extractTuiReply(lines, sent);
+      if (reply != null) return reply;
+      if (!captureHasMessage(lines, sent)) {
+        // The text is nowhere on screen: a modal had the keyboard
+        // and no reply will ever follow — report immediately.
+        _log.info('feishu: capture ${event.messageId}: message not on '
+            'screen (modal?) at ${watch.elapsedMilliseconds}ms');
+        return null;
+      }
+      emptyRegions =
+          replyRegionTail(lines, sent).isEmpty ? emptyRegions + 1 : 0;
+      if (emptyRegions >= 2) {
+        // Two consecutive captures show the message but nothing
+        // readable below it — the text sits in the composer, the
+        // Enter was swallowed. Waiting longer only adds silence.
+        _log.info('feishu: capture ${event.messageId}: message never '
+            'submitted (empty region twice) at '
+            '${watch.elapsedMilliseconds}ms');
+        return null;
+      }
+      if (_log.isLoggable(Level.FINE)) {
+        _log.fine('feishu: capture ${event.messageId}: no reply yet at '
+            '${watch.elapsedMilliseconds}ms — continuing');
+      }
+    }
+    // Cap reached with the message on screen but no extracted reply:
+    // the screen tail tells the user where the turn stands.
+    _log.warning('feishu: capture ${event.messageId}: no reply after '
+        '${watch.elapsedMilliseconds}ms — sending the screen tail');
+    final tail =
+        lastLines == null ? const <String>[] : replyRegionTail(lastLines, sent);
+    if (tail.isEmpty) return null;
+    return '(no reply extracted from the TUI after '
+        '${(watch.elapsedMilliseconds / 1000).round()}s — its last '
+        'screen lines)\n${tail.join('\n')}';
+  }
+
+  /// Resolves once [stream] has been silent for [idle] (every chunk
+  /// restarts the clock), at latest after [cap] — true when genuinely
+  /// quiet, false when the cap cut a still-active stream. Silence
+  /// from the start (the reply finished before we subscribed) also
+  /// resolves as quiet after one [idle] period.
+  static Future<bool> _waitOutputQuiet(
+    Stream<List<int>> stream, {
+    required Duration idle,
+    required Duration cap,
+  }) {
+    final done = Completer<bool>();
+    void complete(bool quiet) {
+      if (!done.isCompleted) done.complete(quiet);
+    }
+
+    Timer? idleTimer = Timer(idle, () => complete(true));
+    final capTimer = Timer(cap, () => complete(false));
+    late final StreamSubscription<List<int>> sub;
+    sub = stream.listen(
+      (_) {
+        idleTimer?.cancel();
+        idleTimer = Timer(idle, () => complete(true));
+      },
+      onError: (_) {},
+      onDone: () => complete(true),
+    );
+    return done.future.whenComplete(() {
+      idleTimer?.cancel();
+      idleTimer = null;
+      capTimer.cancel();
+      sub.cancel();
+    });
+  }
 
   /// Relay the text into the TUI and mirror its rendered screen
   /// back once quiet (the generic TUI path). [text] overrides
@@ -1990,6 +2191,11 @@ class _PendingCommand {
 ///    resolution, …) stay silent for far longer than the idle
 ///    window before printing anything, and a fixed window used to
 ///    flush the command's echo and miss the real output entirely.
+///  - [_kQuietFlushStreaks] consecutive silent windows once real
+///    output (beyond the echo) has landed — shells whose next
+///    prompt render takes tens of seconds (WSL zsh + vcs/mise
+///    hooks on a /mnt drive) otherwise hold finished replies until
+///    the next command flushed them.
 ///  - [_kOutputMaxBytes] bytes (very verbose commands),
 ///  - [maxWindow] since the command was written — commands that
 ///    never finish, or shells whose prompt we don't recognize,
@@ -2034,6 +2240,10 @@ class _OutputCapture {
   Timer? _capTimer;
   bool _finished = false;
 
+  /// Consecutive idle windows observed with no prompt in sight —
+  /// see [_onIdle] for why a streak of them flushes real output.
+  int _quietStreak = 0;
+
   _OutputCapture({
     required this.stream,
     required this.chatId,
@@ -2066,6 +2276,7 @@ class _OutputCapture {
   void _onBytes(List<int> data) {
     if (_finished) return;
     _buffer.addAll(data);
+    _quietStreak = 0;
     // A TUI taking over the screen (DECSET 1049/1047/47) makes the
     // rest of the stream layout painting — end with the hint
     // instead of relaying its cleaning leftovers as garbage. (Not
@@ -2125,6 +2336,23 @@ class _OutputCapture {
     final lines = _cleanLines(_buffer);
     final tail = lines.isEmpty ? '' : lines.last;
     if (promptLike.hasMatch(tail)) {
+      flush();
+      return;
+    }
+    // Quiet but no prompt. When REAL output has already landed
+    // (beyond the command's own echo), a few consecutive quiet
+    // windows mean the command is done for any practical purpose:
+    // some shells take tens of seconds to render the next prompt
+    // (WSL zsh running git/vcs and mise hooks on a /mnt drive), and
+    // holding the reply that long made every message lag until the
+    // next one flushed it. Commands that have printed NOTHING yet
+    // still wait for their prompt: a cold toolchain stays silent
+    // for minutes before its first line, and flushing at the echo
+    // would lose the real output entirely.
+    _quietStreak++;
+    final stripped = [...lines];
+    _stripEcho(stripped, command);
+    if (_quietStreak >= _kQuietFlushStreaks && stripped.isNotEmpty) {
       flush();
       return;
     }
@@ -2327,4 +2555,12 @@ class _NullHostBridge implements FeishuHostBridge {
 
   @override
   Future<Uint8List?> snapshotPng(String? workspaceId) async => null;
+
+  @override
+  ({int rows, int columns})? terminalGeometry(String? workspaceId) => null;
+
+  @override
+  Future<List<String>?> captureFullTui(String? workspaceId,
+          {int rows = 400}) async =>
+      null;
 }

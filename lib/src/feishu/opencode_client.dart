@@ -478,13 +478,16 @@ class OpencodeLocalGateway implements OpencodeGateway {
   /// overlay) had the keyboard and swallowed the text.
   Future<String?> _awaitTuiSession(
       String base, String auth, String directory, int afterMs) async {
+    var sawCandidate = false;
     for (var round = 0; round < 15; round++) {
       final list = await _json('GET', '$base/api/session', auth, null);
       final data = list?['data'];
       if (data is List) {
         // Only sessions touched after our typing can hold the
         // message — the rest are pruned before any request.
-        for (final raw in _sessionsOf(data, directory)) {
+        final candidates = _sessionsOf(data, directory);
+        if (candidates.isNotEmpty) sawCandidate = true;
+        for (final raw in candidates) {
           if (_stamp(raw) < afterMs) continue;
           final id = raw['id'];
           if (id is! String) continue;
@@ -492,6 +495,16 @@ class OpencodeLocalGateway implements OpencodeGateway {
             return id;
           }
         }
+      }
+      // No session for this directory at all, several rounds in:
+      // the TUI talks to another opencode server (a WSL one, or a
+      // remote host's at any SSH hop) and polling the rest of the
+      // window is a silent toll on every message. The caller falls
+      // back to reading the reply off the TUI itself.
+      if (round >= 5 && !sawCandidate) {
+        _log.info('opencode: the local server has no session for this '
+            'directory — the TUI is likely served elsewhere');
+        return null;
       }
       await Future<void>.delayed(const Duration(milliseconds: 400));
     }

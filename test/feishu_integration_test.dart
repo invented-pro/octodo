@@ -250,6 +250,34 @@ class _RecordingBridge implements FeishuHostBridge {
   @override
   Future<Uint8List?> snapshotPng(String? workspaceId) async =>
       hasTerminal ? png : null;
+
+  /// The lines `captureFullTui` returns (null = capture impossible —
+  /// the model for a terminal that cannot be cloned).
+  List<String>? captureLines;
+
+  /// Per-call capture results for retry-loop tests: each call
+  /// consumes the next entry; the last one repeats. Null = plain
+  /// [captureLines] every call.
+  List<List<String>?>? captureSequence;
+
+  /// The rows the last `captureFullTui` call asked for.
+  int? lastCaptureRows;
+
+  @override
+  ({int rows, int columns})? terminalGeometry(String? workspaceId) =>
+      hasTerminal ? (rows: 30, columns: 100) : null;
+
+  @override
+  Future<List<String>?> captureFullTui(String? workspaceId,
+      {int rows = 400}) async {
+    if (!hasTerminal) return null;
+    lastCaptureRows = rows;
+    final seq = captureSequence;
+    if (seq != null && seq.isNotEmpty) {
+      return seq.length > 1 ? seq.removeAt(0) : seq.single;
+    }
+    return captureLines;
+  }
 }
 
 /// Server-side of the opencode path, faked: [ready] gates both
@@ -263,6 +291,10 @@ class _FakeGateway implements OpencodeGateway {
   String? lastDir;
   String? lastMsg;
   bool submits = true;
+
+  /// Models an unexpected internal error racing the turn — the
+  /// router must still answer the chat instead of going silent.
+  bool throwsOnTui = false;
 
   @override
   Future<bool> ensure() async => ready;
@@ -287,6 +319,9 @@ class _FakeGateway implements OpencodeGateway {
     lastMsg = message;
     if (!ready) return (sessionId: null, reply: null);
     type(message);
+    if (throwsOnTui) {
+      throw StateError('feed exploded');
+    }
     if (!submits) return (sessionId: null, reply: null);
     return (sessionId: 'ses_typed', reply: reply);
   }
@@ -656,6 +691,37 @@ void main() {
     expect(sent.length, 1);
     // Echo stripped, prompt stripped: just the output.
     expect(sent.single.$2, 'Flutter 3.47.9 • channel stable');
+  });
+
+  test('slow-prompt shells: finished output ships without a prompt '
+      '(WSL zsh renders its next prompt tens of seconds late)',
+      () async {
+    final bridge = _RecordingBridge();
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      outputWindow: const Duration(milliseconds: 40),
+      maxOutputWindow: const Duration(seconds: 5),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_slowprompt',
+      text: 'echo hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    // The output lands; the next prompt takes tens of seconds (vcs
+    // and mise hooks on a /mnt drive) and never arrives in this
+    // test. A few consecutive quiet windows must flush the reply
+    // instead of holding it until the next message did.
+    bridge.outputController.add(utf8.encode('hi\r\n'));
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+
+    expect(sent.length, 1, reason: 'quiet streaks beat the slow prompt');
+    expect(sent.single.$2, 'hi');
   });
 
   test('commands that never show a prompt get a partial reply at the cap',
@@ -1033,7 +1099,10 @@ void main() {
     final bridge = _RecordingBridge()
       ..cwd = 'E:\\proj'
       ..altScreen = true
-      ..screenLines = [' opencode  ⟨build⟩', ' > '];
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      // Capture unsupported (and would find no message anyway) —
+      // the honest hint stays the answer.
+      ..captureLines = null;
     final gateway = _FakeGateway()
       ..ready = true
       ..submits = false;
@@ -1052,9 +1121,226 @@ void main() {
       text: 'hello?',
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
-    await Future<void>.delayed(const Duration(milliseconds: 100));
+    // The router first waits out the capture quiet window before
+    // giving up (tuiCaptureIdle + capture + maxWait margins).
+    await Future<void>.delayed(const Duration(milliseconds: 500));
 
     expect(sent.single.$2, contains('nothing came back'));
+  });
+
+  test('a turn the server never saw is answered from an off-screen '
+      'capture of the TUI — the remote-host-over-SSH case', () async {
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      // The clone capture renders the TUI's whole screen: our
+      // message in the transcript, the reply after it, the composer
+      // frame below.
+      ..captureLines = [
+        ' opencode  ⟨build⟩  glm-5.3',
+        '',
+        '🧑 list the files',
+        'here they are:',
+        '  a.txt',
+        '  b.txt',
+        '🧑 status?',
+        'All green — 2 files tracked, nothing dirty.',
+        '',
+        '┌─ composer ─────────────┐',
+        '│ >                      │',
+        '└────────────────────────┘',
+        '',
+        ' ? for shortcuts  128 tokens',
+      ];
+    final gateway = _FakeGateway()
+      ..ready = true
+      // The server never sees the turn — the TUI talks to another
+      // opencode server (a remote host's, over SSH).
+      ..submits = false;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_remote',
+      text: 'status?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(bridge.lastCaptureRows, 400,
+        reason: 'the capture grows the PTY for the whole conversation');
+    expect(sent.single.$2,
+        'All green — 2 files tracked, nothing dirty.',
+        reason: 'the reply is the text between our message and the '
+            'composer frame');
+  });
+
+  test('a capture without our message answers with the hint — the '
+      'text never reached the app', () async {
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      // A session picker holds the keyboard: the message is nowhere.
+      ..captureLines = [
+        ' opencode  ⟨build⟩',
+        '┌─ sessions ────────────┐',
+        '│ ses_1  yesterday      │',
+        '│ ses_2  two days ago   │',
+        '└───────────────────────┘',
+      ];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = false;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_modal',
+      text: 'hello?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(sent.single.$2, contains('nothing came back'));
+  });
+
+  test('a capture that fires mid-turn retries until the reply renders',
+      () async {
+    final midTurn = [
+      ' opencode  ⟨build⟩  glm-5.3',
+      '',
+      '🧑 status?',
+      '',
+      '┌─ composer ─────────────┐',
+      '│ >                      │',
+      '└────────────────────────┘',
+      ' ? for shortcuts',
+    ];
+    final withReply = [
+      ' opencode  ⟨build⟩  glm-5.3',
+      '',
+      '🧑 status?',
+      'All green — 2 files tracked, nothing dirty.',
+      '',
+      '┌─ composer ─────────────┐',
+      '│ >                      │',
+      '└────────────────────────┘',
+      ' ? for shortcuts',
+    ];
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      // Capture 1: the turn is still running — our message is in the
+      // transcript but nothing below it yet. Capture 2: done.
+      ..captureSequence = [midTurn, withReply];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = false;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_retry',
+      text: 'status?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+
+    expect(sent.single.$2, 'All green — 2 files tracked, nothing dirty.',
+        reason: 'quiet is a checkpoint — the capture retried until the '
+            'reply rendered');
+  });
+
+  test('a typed-but-never-submitted message (empty region twice) gets '
+      'the hint without waiting out the cap', () async {
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      // The text reached the composer but nothing below it ever
+      // changes: the Enter was swallowed — no reply will follow.
+      ..captureLines = [
+        ' opencode  ⟨build⟩',
+        '┌─ composer ─────────────┐',
+        '│ > status?              │',
+        '└────────────────────────┘',
+        ' ? for shortcuts',
+      ];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = false;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_stuck',
+      text: 'status?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(sent.single.$2, contains('nothing came back'));
+  });
+
+  test('a gateway error mid-turn still answers the chat', () async {
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      ..captureLines = null;
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..throwsOnTui = true;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_err',
+      text: 'hello?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(sent.single.$2, contains('error relaying your message'),
+        reason: 'a thrown task used to be swallowed — silence');
   });
 
   test('/raw relays raw text into a TUI even when it is opencode',
@@ -2367,6 +2653,8 @@ Future<FeishuIntegration> _routerFor({
   Duration leasePoll = const Duration(seconds: 5),
   Duration outputWindow = const Duration(seconds: 5),
   Duration maxOutputWindow = const Duration(minutes: 5),
+  Duration tuiCaptureIdle = const Duration(milliseconds: 40),
+  Duration tuiCaptureMaxWait = const Duration(milliseconds: 200),
   OpencodeGateway? gateway,
   _FakeChannel? channel,
 }) async {
@@ -2403,6 +2691,8 @@ Future<FeishuIntegration> _routerFor({
     leasePoll: leasePoll,
     outputWindow: outputWindow,
     maxOutputWindow: maxOutputWindow,
+    tuiCaptureIdle: tuiCaptureIdle,
+    tuiCaptureMaxWait: tuiCaptureMaxWait,
     opencode: gateway ?? _FakeGateway(),
   );
   addTearDown(integration.dispose);

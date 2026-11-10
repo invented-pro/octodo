@@ -3020,4 +3020,14 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
   @override
   Future<Uint8List?> snapshotPng(String? workspaceId) async =>
       await _focusedTerminal(workspaceId)?.capturePng();
+
+  @override
+  ({int rows, int columns})? terminalGeometry(String? workspaceId) =>
+      _focusedTerminal(workspaceId)?.gridSize;
+
+  @override
+  Future<List<String>?> captureFullTui(String? workspaceId,
+          {int rows = 400}) =>
+      _focusedTerminal(workspaceId)?.captureTuiCloneText(rows: rows) ??
+      Future<List<String>?>.value();
 }

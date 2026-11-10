@@ -583,8 +583,19 @@ class TerminalViewState extends State<TerminalView> {
   /// Trailing blanks are trimmed; wide glyphs are joined through
   /// their leading cell with spacers skipped, mirroring the
   /// painter (`kFlagWideSpacer`).
-  List<String> visibleScreenLines() {
-    final grid = _engine.grid;
+  List<String> visibleScreenLines() => gridToLines(_engine.grid);
+
+  /// The visible engine's grid geometry — the PTY's size on the
+  /// normal path. The Feishu bridge uses it to size captures.
+  ({int rows, int columns}) get gridSize =>
+      (rows: _engine.grid.rows, columns: _engine.grid.columns);
+
+  /// A terminal grid's content as text lines, top row first —
+  /// trailing blanks trimmed; wide glyphs are joined through their
+  /// leading cell with spacers skipped, mirroring the painter
+  /// (`kFlagWideSpacer`). Shared by [visibleScreenLines] and the
+  /// off-screen clone capture.
+  static List<String> gridToLines(fa.TerminalGridView grid) {
     final lines = <String>[];
     for (var row = 0; row < grid.rows; row++) {
       final buf = StringBuffer();
@@ -597,6 +608,150 @@ class TerminalViewState extends State<TerminalView> {
       lines.add(buf.toString().trimRight());
     }
     return lines;
+  }
+
+  // ── Off-screen TUI capture ("resize to read") ────────────────────
+
+  /// While true, PTY output batches still reach the output tap (the
+  /// clone capture listens there) but skip the visible engine — the
+  /// view freezes instead of parsing the oversized frames the
+  /// capture's PTY resize produces. See [captureTuiCloneText].
+  bool _captureFreeze = false;
+
+  /// A clone capture is in flight — it owns the PTY size;
+  /// [_onViewportResize] stands down until it restores.
+  bool _captureActive = false;
+
+  /// Rows the capture grows the PTY to — room for a full-screen
+  /// TUI to re-render its whole conversation.
+  static const int _kCaptureRowsDefault = 400;
+
+  /// Off-screen full-content capture of a full-screen TUI — the
+  /// Feishu remote control's reply path when the TUI's opencode
+  /// server is not reachable (the classic case: the TUI runs on a
+  /// remote host over SSH, any number of hops, any auth).
+  ///
+  /// The TUI only renders what fits its PTY, so a long conversation
+  /// is NOT in the stream at the visible size. This briefly grows
+  /// the PTY to [rows] rows while the visible engine is frozen (it
+  /// skips feed — the user's view never sees a frame of it), lets a
+  /// private clone engine parse the oversized repaint from the same
+  /// byte stream, reads the clone's grid, then restores the PTY
+  /// size and resets the visible engine. ConPTY (and the remote TUI
+  /// over SSH) re-emit the whole buffer on every size change, so a
+  /// final 1-row wiggle forces a full repaint that re-converges the
+  /// visible engine at the unchanged size — invisible to the eye.
+  ///
+  /// TUI-agnostic: any full-screen app that repaints on SIGWINCH
+  /// works, and nothing is typed into it. Returns the clone grid's
+  /// lines, or null when capture is impossible (no PTY, not in alt
+  /// screen, another capture in flight).
+  Future<List<String>?> captureTuiCloneText({
+    int rows = _kCaptureRowsDefault,
+    Duration settle = const Duration(milliseconds: 400),
+    Duration maxWait = const Duration(seconds: 4),
+  }) async {
+    final pty = _pty;
+    if (pty == null || !inAltScreen || _captureActive) return null;
+    if (rows < 24) rows = 24;
+    _captureActive = true;
+    fa.TerminalEngine? clone;
+    StreamSubscription<Uint8List>? sub;
+    var restored = false;
+    final origRows = _engine.grid.rows;
+    final origCols = _engine.grid.columns;
+    try {
+      clone = fa.TerminalEngine(config: _buildConfig());
+      clone.resize(columns: origCols, rows: rows);
+      final c = clone;
+      // The clone sees the exact batches the visible engine would
+      // have parsed; its `output` (capability answers) is dropped.
+      // The guard matters: a throw inside a broadcast listener
+      // propagates out of `_outputTap.add` in [_flushOutput] and
+      // would abort the visible engine's feed for good.
+      sub = outputTap.listen(
+        (batch) {
+          try {
+            c.feed(batch);
+          } catch (e) {
+            _log.warning('captureTuiCloneText: clone feed threw: $e');
+          }
+        },
+        onError: (Object e) {
+          _log.warning('captureTuiCloneText: tap error: $e');
+        },
+      );
+      _captureFreeze = true;
+      if (_log.isLoggable(Level.FINE)) {
+        _log.fine('captureTuiCloneText: start ($origCols×$rows)');
+      }
+      pty.resize(rows, origCols);
+      // Wait for the TUI's repaint burst to settle, bounded.
+      final deadline = DateTime.now().add(maxWait);
+      var lastGen = -1;
+      var lastChange = DateTime.now();
+      while (DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        final gen = clone.grid.generation;
+        if (gen != lastGen) {
+          lastGen = gen;
+          lastChange = DateTime.now();
+        } else if (DateTime.now().difference(lastChange) >= settle) {
+          break;
+        }
+      }
+      final lines = gridToLines(clone.grid);
+      pty.resize(origRows, origCols);
+      restored = true;
+      // The restore repaint frames land while still frozen; give
+      // them a moment, then hand the stream back.
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      await sub.cancel();
+      sub = null;
+      _captureFreeze = false;
+      // Reset the visible engine: it missed every frame of the
+      // capture window. RIS clears any drift; the wiggle below makes
+      // the TUI repaint fully at the restored size.
+      _engine.feed(utf8.encode('\x1bc'));
+      var wiggleRows = origRows - 1;
+      if (wiggleRows < 1) wiggleRows = 1;
+      pty.resize(wiggleRows, origCols);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      pty.resize(origRows, origCols);
+      if (_log.isLoggable(Level.FINE)) {
+        _log.fine('captureTuiCloneText: ${lines.length} lines at '
+            '$origCols×$rows');
+      }
+      return lines;
+    } catch (e, st) {
+      _log.warning('captureTuiCloneText failed: $e\n$st');
+      return null;
+    } finally {
+      // Unblock the pipeline FIRST — viewport resizes and the Feishu
+      // queue must never wait on clone teardown, which crosses back
+      // into Rust and could stall on an in-flight drain.
+      _captureFreeze = false;
+      _captureActive = false;
+      if (!restored) {
+        try {
+          pty.resize(origRows, origCols);
+        } catch (_) {}
+        try {
+          _engine.feed(utf8.encode('\x1bc'));
+        } catch (_) {}
+      }
+      await sub?.cancel();
+      if (clone != null) {
+        try {
+          clone.dispose();
+          if (_log.isLoggable(Level.FINE)) {
+            _log.fine('captureTuiCloneText: clone disposed');
+          }
+        } catch (e) {
+          _log.warning('captureTuiCloneText: clone dispose threw: $e');
+        }
+      }
+    }
   }
 
   /// The terminal rendered to PNG — what the Feishu `/history`
@@ -1523,6 +1678,11 @@ class TerminalViewState extends State<TerminalView> {
     if (focusMode != null) {
       _onFocusReportMode(focusMode);
     }
+    // Off-screen clone capture in flight: the clone (listening on
+    // the tap above) parses this batch; the visible engine skips it
+    // — the frames belong to the capture's oversized PTY and would
+    // corrupt the frozen view. See [captureTuiCloneText].
+    if (_captureFreeze) return;
     _engine.feedWithKitty(batch);
   }
 
@@ -1779,6 +1939,9 @@ class TerminalViewState extends State<TerminalView> {
   // `_alacrittyShortcutsWithShiftVariants` below.
 
   void _onViewportResize(int cols, int rows) {
+    // A clone capture owns the PTY size right now; the next real
+    // viewport change re-syncs after it restores.
+    if (_captureActive) return;
     // Gate the three FFI getters — this fires on every drag-resize
     // tick (LayoutBuilder.postFrame → onViewportResize) and the
     // grid property reads cross the FFI boundary.
