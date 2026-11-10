@@ -124,6 +124,14 @@ Future<void> main() async {
   // Wire up the root logger before anything else runs, so startup
   // diagnostics land in the same handler as the rest of the app.
   configureLogging();
+  // WARNING+ diagnostics also go to a rotating file under
+  // `<home>/.config/Octodo/logs/`: the console handler is silent in
+  // release builds, and fallbacks (e.g. a stale `terminal.defaultShell`
+  // preference) are exactly the kind of thing users report with
+  // nothing else to look at. The file is created lazily on the first
+  // matching record; see `attachLogFileSink`.
+  final logFile = SettingsPaths.resolve().logFile;
+  if (logFile != null) attachLogFileSink(logFile);
   // flutter_alacritty is a flutter_rust_bridge wrapper; the bridge
   // must be initialized once at startup before any TerminalEngine is
   // constructed (otherwise the first surface throws

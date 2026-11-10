@@ -21,7 +21,15 @@ class SettingsPaths {
   /// (`<userHome>/.config/Octodo/settings.json`).
   final File file;
 
-  const SettingsPaths({required this.file});
+  /// Absolute path of the rotating WARNING+ diagnostics log
+  /// (`<userHome>/.config/Octodo/logs/octodo.log`), or `null` when no
+  /// user home could be resolved. Kept in a `logs/` subdirectory so a
+  /// dotfiles-synced config dir isn't churned by log writes; the file
+  /// itself is only created on the first WARNING+ record (see
+  /// [attachLogFileSink] in `lib/src/log.dart`).
+  final File? logFile;
+
+  const SettingsPaths({required this.file, this.logFile});
 
   /// Resolve the settings file location for the current host.
   ///
@@ -36,6 +44,9 @@ class SettingsPaths {
     final dir = Directory(p.join(home, '.config', 'Octodo'));
     return SettingsPaths(
       file: File(p.join(dir.path, 'settings.json')),
+      logFile: home.isEmpty
+          ? null
+          : File(p.join(dir.path, 'logs', 'octodo.log')),
     );
   }
 }
