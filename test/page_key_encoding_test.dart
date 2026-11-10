@@ -6,9 +6,9 @@
 // which lets `fa.TerminalView._onKeyFallback` fall through to its
 // `encodeKeyWithKitty` / `encodeKey` chain. This test pins the *payload* of
 // that fall-through — the seam that actually has to be right for a user in
-// `less`. `input/key_input.dart` isn't re-exported from the package barrel,
-// so it's imported by path; it only depends on `flutter/services` and
-// `input/term_mode.dart`, which keeps this test pure Dart (no Rust/FFI).
+// `less`. `encodeKey` is exported from the package barrel (upstream tag
+// 2026.11.10), so this test uses only the public API; the encoder is pure
+// Dart (no Rust/FFI), so it runs without an engine.
 //
 // What is NOT covered here: the key-event plumbing between the Flutter
 // embedder and `fa.TerminalView` (needs a real app + desktop).
@@ -16,7 +16,6 @@
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart' show SingleActivator;
 import 'package:flutter_alacritty/flutter_alacritty.dart' as fa;
-import 'package:flutter_alacritty/input/key_input.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -36,14 +35,14 @@ void main() {
   group('encodeKey — bare page keys are PTY input', () {
     test('PageUp encodes to ESC [ 5 ~', () {
       expect(
-        encodeKey(LogicalKeyboardKey.pageUp, null, modeFlags: 0),
+        fa.encodeKey(LogicalKeyboardKey.pageUp, null, modeFlags: 0),
         equals(pageUpBytes),
       );
     });
 
     test('PageDown encodes to ESC [ 6 ~', () {
       expect(
-        encodeKey(LogicalKeyboardKey.pageDown, null, modeFlags: 0),
+        fa.encodeKey(LogicalKeyboardKey.pageDown, null, modeFlags: 0),
         equals(pageDownBytes),
       );
     });
@@ -53,7 +52,7 @@ void main() {
       // don't depend on TermMode, so once nothing consumes the event the
       // alt-screen app receives them exactly like a plain shell would.
       expect(
-        encodeKey(
+        fa.encodeKey(
           LogicalKeyboardKey.pageUp,
           null,
           modeFlags: altScreenFlag,
@@ -61,7 +60,7 @@ void main() {
         equals(pageUpBytes),
       );
       expect(
-        encodeKey(
+        fa.encodeKey(
           LogicalKeyboardKey.pageDown,
           null,
           modeFlags: altScreenFlag,
@@ -72,7 +71,7 @@ void main() {
 
     test('Shift forms keep their xterm modifier parameter', () {
       expect(
-        encodeKey(
+        fa.encodeKey(
           LogicalKeyboardKey.pageUp,
           null,
           shift: true,
@@ -81,7 +80,7 @@ void main() {
         equals(shiftPageUpBytes),
       );
       expect(
-        encodeKey(
+        fa.encodeKey(
           LogicalKeyboardKey.pageDown,
           null,
           shift: true,
