@@ -144,19 +144,18 @@ void main() {
       expect(values, ['', 'pwsh', 'cmd', 'ubuntu-24.04', 'bash']);
     });
 
-    testWidgets('names the default entry after the first profile', (
-      tester,
-    ) async {
+    testWidgets('labels the factory default entry as Auto', (tester) async {
       await _pump(tester);
       final items = _items(tester);
       final defaultItem = items.firstWhere((i) => i.value == '');
       final text = ((defaultItem.child as SizedBox).child as Text).data;
       expect(
         text,
-        'First detected shell (PowerShell 7)',
+        'Auto',
         reason:
-            'the empty value means "detection order", so the row should say '
-            'which profile that resolves to instead of leaving it ambiguous',
+            'the empty value means "detection order"; naming the resolved '
+            'profile went stale when detection order changed across hosts, '
+            'and the resolved shell is always the first listed option',
       );
     });
 

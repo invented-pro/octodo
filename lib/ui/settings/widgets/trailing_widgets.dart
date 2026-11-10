@@ -1038,8 +1038,7 @@ class _FontFamilyDropdownTrailingState
 const double _kShellDropdownItemWidth = 200;
 
 /// Dropdown for `terminal.defaultShell`: the detected shell profiles in
-/// detection order, plus an explicit "first detected shell" entry for
-/// the empty (factory) value.
+/// detection order, plus an "Auto" entry for the empty (factory) value.
 ///
 /// Persists [ShellProfile.shortName] rather than `label` — WSL distros
 /// get a sanitized, unique `shortName`, while `label` carries a display
@@ -1088,17 +1087,16 @@ class _DefaultShellDropdownTrailingState
   }
 
   /// `(persisted value, display text)` pairs. The empty value is the
-  /// factory default — "whatever detection picked first" — and is named
-  /// after that profile so the row answers "so which one do I get?".
+  /// factory default — "whatever detection picks first" — labeled
+  /// "Auto" (the Windows Terminal wording): naming the resolved
+  /// profile went stale the moment detection order changed across
+  /// hosts, and the resolved one is always listed right below anyway.
   ///
   /// Deduped by value: two profiles can share a `shortName` (e.g. two
   /// `bash` installs at different paths), and a `DropdownButton` asserts
   /// when its `value` matches more than one item.
   List<(String, String)> get _options {
-    final first = widget.shells.isEmpty
-        ? 'First detected shell'
-        : 'First detected shell (${widget.shells.first.label})';
-    final options = <(String, String)>[('', first)];
+    final options = <(String, String)>[('', 'Auto')];
     final seen = <String>{''};
     for (final shell in widget.shells) {
       if (!seen.add(shell.shortName)) continue;

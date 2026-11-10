@@ -68,9 +68,7 @@ class TerminalSettingsSection {
     'terminal.defaultShell',
     defaultValue: '',
     title: 'Default shell',
-    subtitle:
-        'Shell for new workspaces and the next launch. '
-        'Empty = the first detected shell.',
+    subtitle: 'Default shell for new workspaces and new launches.',
     icon: Icons.terminal,
   );
 
