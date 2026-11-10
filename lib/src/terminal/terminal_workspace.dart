@@ -332,9 +332,20 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
     );
     final profiles = widget.availableShells;
     final index = resolveDefaultShellIndex(profiles, preferred);
-    if (preferred.trim().isNotEmpty &&
-        (profiles.isEmpty ||
-            !shellProfileMatchesPreference(profiles[index], preferred))) {
+    // No warning for the factory default: an empty setting means
+    // "detection order", not "profile 0 requested" — every default
+    // start lands here.
+    if (preferred.trim().isEmpty) return index;
+    if (profiles.isEmpty) {
+      // Detection found nothing at all; [_defaultShell] synthesizes an
+      // empty-program profile and the PTY layer falls back to $SHELL.
+      // A different message from the miss case, which has a first
+      // profile to fall back to.
+      _log.warning(
+        'terminal.defaultShell "$preferred" ignored: no shells detected; '
+        'falling back to the host shell',
+      );
+    } else if (!shellProfileMatchesPreference(profiles[index], preferred)) {
       _log.warning(
         'terminal.defaultShell "$preferred" matched no detected shell; '
         'falling back to the first profile',
