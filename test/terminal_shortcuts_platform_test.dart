@@ -13,6 +13,12 @@
 // through `primary(...)` (Cmd+… on macOS, Ctrl+… elsewhere). These tests
 // pin the platform-correct activators so the hardcoded-Ctrl regression
 // can't silently return.
+//
+// The map shipped to `fa.TerminalView` is also where the PageUp/PageDown
+// policy lives (GitHub issue #14): bare page keys must NOT appear here, so
+// the encoder can turn them into `ESC [ 5 ~` / `ESC [ 6 ~` for the running
+// program, while the Shift forms stay bound to the local scrollback. See
+// `page_key_encoding_test.dart` for the payload side of that contract.
 
 import 'dart:io' show Platform;
 
@@ -142,26 +148,104 @@ void main() {
     });
   });
 
-  group('alacrittyShortcutsForTest — map shape', () {
-    test('stock PageUp/PageDown scroll bindings survive the re-bind', () {
+  group('alacrittyShortcutsForTest — page keys', () {
+    // GitHub issue #14: bare PageUp/PageDown must reach the PTY as
+    // `ESC [ 5 ~` / `ESC [ 6 ~`, so nothing in the map may claim them.
+    // Shift+PageUp/Down stays local (scrollback, 5 pages per press).
+    test('bare PageUp/PageDown are NOT bound (they are PTY input)', () {
+      final barePageActivators = map.keys
+          .whereType<SingleActivator>()
+          .where(
+            (a) =>
+                (a.trigger == LogicalKeyboardKey.pageUp ||
+                    a.trigger == LogicalKeyboardKey.pageDown) &&
+                !a.control &&
+                !a.meta &&
+                !a.alt &&
+                !a.shift,
+          )
+          .toList();
+      expect(
+        barePageActivators,
+        isEmpty,
+        reason:
+            'A bare page-key binding here short-circuits '
+            "fa.TerminalView's encodeKey path and the running app never "
+            'sees the key — the exact bug in issue #14.',
+      );
+    });
+
+    test('Shift+PageUp/PageDown stay bound to the fast local scroll', () {
       final pageUp = intentFor(
         (a) =>
             a.trigger == LogicalKeyboardKey.pageUp &&
+            a.shift &&
             !a.control &&
             !a.meta &&
-            !a.alt &&
-            !a.shift,
+            !a.alt,
       );
       final pageDown = intentFor(
         (a) =>
             a.trigger == LogicalKeyboardKey.pageDown &&
+            a.shift &&
             !a.control &&
             !a.meta &&
-            !a.alt &&
-            !a.shift,
+            !a.alt,
       );
-      expect(pageUp, isA<fa.ScrollPageIntent>());
-      expect(pageDown, isA<fa.ScrollPageIntent>());
+      expect(pageUp, isNotNull);
+      expect(pageDown, isNotNull);
+      // Not the stock 1-page intent: the Shift forms are 5 pages, carried
+      // by octodo's private `_ScrollFastIntent` (hence no `isA<...>` here).
+      expect(pageUp, isNot(isA<fa.ScrollPageIntent>()));
+      expect(pageDown, isNot(isA<fa.ScrollPageIntent>()));
+    });
+  });
+
+  group('shiftPageScrollPages — fallback policy', () {
+    // Mirrors the shortcut map for the `_handleKeyFallback` safety net, so
+    // the two layers can't drift apart.
+    test('bare PageUp/PageDown are never consumed', () {
+      expect(
+        TerminalViewState.shiftPageScrollPages(
+          LogicalKeyboardKey.pageUp,
+          shiftPressed: false,
+        ),
+        isNull,
+      );
+      expect(
+        TerminalViewState.shiftPageScrollPages(
+          LogicalKeyboardKey.pageDown,
+          shiftPressed: false,
+        ),
+        isNull,
+      );
+    });
+
+    test('Shift+PageUp scrolls +5 pages, Shift+PageDown -5', () {
+      expect(
+        TerminalViewState.shiftPageScrollPages(
+          LogicalKeyboardKey.pageUp,
+          shiftPressed: true,
+        ),
+        equals(5),
+      );
+      expect(
+        TerminalViewState.shiftPageScrollPages(
+          LogicalKeyboardKey.pageDown,
+          shiftPressed: true,
+        ),
+        equals(-5),
+      );
+    });
+
+    test('other keys are unaffected by Shift', () {
+      expect(
+        TerminalViewState.shiftPageScrollPages(
+          LogicalKeyboardKey.arrowUp,
+          shiftPressed: true,
+        ),
+        isNull,
+      );
     });
   });
 }
