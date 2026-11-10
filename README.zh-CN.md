@@ -92,7 +92,7 @@
 
 ---
 
-## 从源码构建
+<details><summary><b>从源码构建</b></summary>
 
 ### 前置要求
 * **Flutter SDK**（`>= 3.44.0`）
@@ -115,9 +115,11 @@ flutter run -d macos      # macOS 主机
 ```
 单元测试、lint 规范与 fork 补丁工作流请见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
+</details>
+
 ---
 
-## 键盘快捷键
+<details><summary><b>键盘快捷键</b></summary>
 
 ### 工作区（侧边栏）
 
@@ -166,9 +168,11 @@ flutter run -d macos      # macOS 主机
 | `Ctrl+-`                       | `Cmd+-`                      | 缩小字体           |
 | `Ctrl+0`                       | `Cmd+0`                      | 重置字体缩放       |
 
+</details>
+
 ---
 
-## 桌面通知
+<details><summary><b>桌面通知</b></summary>
 
 Octodo 会监听每个终端发出的「需要关注」信号，并在你未注视该终端时推送一条带 Octodo 图标的原生桌面通知。点击通知可直接跳回发出通知的工作区 → 窗格 → 标签。该功能由 **设置 → 通用 → 桌面通知** 控制（默认开启），并包含一个用于设置最小任务时长的子项。
 
@@ -246,9 +250,11 @@ Windows、macOS 与 Linux 都会在数秒后自动关闭原生横幅。Octodo �
 - **Dock 弹跳（macOS）**——在 Octodo 处于后台时发出的横幅会同时弹跳 Dock 图标，直到你切回应用。
 - **「提醒」样式（macOS）**——如果希望横幅永不自动关闭，可在系统设置 → 通知中将 Octodo 切换为*提醒*样式。**设置 → 通用 → 打开系统通知设置** 可一键直达。
 
+</details>
+
 ---
 
-## 移动端访问
+<details><summary><b>移动端访问</b></summary>
 
 在手机上驱动 Octodo：与机器人聊天，它就会在你的终端里执行命令——包括全屏 TUI。飞书（Lark）是首个移动端应用；更多应用陆续支持中。
 
@@ -263,13 +269,17 @@ Octodo 同一时刻只保留 **一条** 飞书连接。抽屉的手机图标在�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/status` | 当前位置：本会话正在驱动的标签，以及所有可切换的标签 |
-| `/attach` | 选择要驱动的工作区（卡片）；`/attach 1.2.3` 按地址绑定 |
+| `/status` | 当前位置：本会话正在驱动的标签、所有可切换的标签，以及 `/newtab` 可用的 shell |
+| `/attach` | 选择要驱动的工作区（卡片） |
+| `/attach <ws>[.<pane>[.<tab>]]` | 按 `/status` 打印的编号绑定（`/attach 1.2.3`） |
 | `/detach` | 解除绑定——会话重新跟随桌面焦点 |
-| `/newtab` / `/closetab` | 在绑定的窗格中打开或关闭标签 |
+| `/newtab [shell]` | 在绑定的窗格中打开新标签，使用默认或指定 shell（如 `/newtab ubuntu`）；并重新绑定到新标签 |
+| `/closetab` | 关闭聚焦的标签并跟随接替它的标签（绝不关闭最后一个） |
 | `/raw <keys>` | 向终端发送原始按键——包括全屏 TUI（`/raw /quit`） |
 | `/history` | 回放终端上一屏内容 |
-| 纯文本 | 在绑定的终端中执行，并以输出作为回复 |
+| 纯文本 | 在绑定的终端中执行，并以输出作为回复——包括全屏 TUI |
+
+</details>
 
 ---
 

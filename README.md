@@ -92,7 +92,7 @@ English | [中文简体](./README.zh-CN.md)
 
 ---
 
-## Build From Source
+<details><summary><b>Build From Source</b></summary>
 
 ### Prerequisites
 * **Flutter SDK** (`>= 3.44.0`)
@@ -115,9 +115,11 @@ flutter run -d macos      # For macOS hosts
 ```
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for unit tests, lint policies, and our fork-patch workflow.
 
+</details>
+
 ---
 
-## Keyboard Shortcuts
+<details><summary><b>Keyboard Shortcuts</b></summary>
 
 ### Workspaces (Sidebar)
 
@@ -166,9 +168,11 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for unit tests, lint policies, and our 
 | `Ctrl+-`                       | `Cmd+-`                      | Decrease font scale         |
 | `Ctrl+0`                       | `Cmd+0`                      | Reset font scale to default |
 
+</details>
+
 ---
 
-## Desktop Notifications
+<details><summary><b>Desktop Notifications</b></summary>
 
 Octodo watches every terminal for "needs attention" signals and posts a native desktop notification (with the Octodo icon) when you're not looking at that terminal. Clicking the notification jumps straight back to the workspace → pane → tab that raised it. Controlled by **Settings → General → Desktop notifications** (on by default), with a sub-item for the minimum task duration.
 
@@ -246,9 +250,11 @@ Windows, macOS, and Linux all auto-dismiss native banners after a few seconds. O
 - **Dock bounce (macOS)** — a banner posted while Octodo is backgrounded also bounces the dock icon until you switch over.
 - **"Alerts" style (macOS)** — for a banner that literally never auto-dismisses, switch Octodo to *Alerts* in System Settings → Notifications. **Settings → General → Open system notification settings** takes you there directly.
 
+</details>
+
 ---
 
-## Mobile App Access
+<details><summary><b>Mobile App Access</b></summary>
 
 Drive Octodo from your phone: chat with a bot and it runs commands in your terminals — full-screen TUIs included. Feishu (Lark) is the first mobile app; more are on the way.
 
@@ -263,13 +269,17 @@ Octodo keeps **one** Feishu connection at a time. The drawer's phone icon shows 
 
 | Command | What it does |
 | --- | --- |
-| `/status` | Where you are: the tab this chat drives and every tab you can switch to |
-| `/attach` | Pick the workspace to drive (a card); `/attach 1.2.3` binds by address |
+| `/status` | Where you are: the tab this chat drives, every tab you can switch to, and the shells `/newtab` accepts |
+| `/attach` | Pick the workspace to drive (a card) |
+| `/attach <ws>[.<pane>[.<tab>]]` | Bind by the numbers `/status` prints (`/attach 1.2.3`) |
 | `/detach` | Unbind — the chat follows the desktop focus again |
-| `/newtab` / `/closetab` | Open or close a tab in the bound pane |
+| `/newtab [shell]` | Open a tab in the bound pane with the default or a named shell (e.g. `/newtab ubuntu`); re-binds to it |
+| `/closetab` | Close the focused tab and follow what takes its place (never the last one) |
 | `/raw <keys>` | Raw keystrokes into the terminal — TUIs included (`/raw /quit`) |
 | `/history` | Replay the terminal's last screen |
-| plain text | Runs in the bound terminal and answers with its output |
+| plain text | Runs in the bound terminal and answers with its output — full-screen TUIs included |
+
+</details>
 
 ---
 
