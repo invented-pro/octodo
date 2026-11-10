@@ -27,6 +27,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:meta/meta.dart';
+
 import '../log.dart';
 
 /// What the Feishu router needs from the opencode integration —
@@ -69,6 +71,16 @@ abstract class OpencodeGateway {
 class OpencodeLocalGateway implements OpencodeGateway {
   OpencodeLocalGateway({Duration? startupTimeout})
       : _startupTimeout = startupTimeout ?? const Duration(seconds: 45);
+
+  /// A gateway pointed at a server we did not discover ourselves —
+  /// tests drive a fake one. [baseUrl]/[authHeader] must already be
+  /// healthy (`GET /api/info` → 200); `ensure()` then never falls
+  /// back to spawning or attaching anything.
+  @visibleForTesting
+  OpencodeLocalGateway.forServer(String baseUrl, String authHeader)
+      : _baseUrl = baseUrl,
+        _authHeader = authHeader,
+        _startupTimeout = const Duration(seconds: 45);
 
   final Logger _log = moduleLogger('feishu.opencode');
   final Duration _startupTimeout;
@@ -842,6 +854,13 @@ class _EventFeed {
     _sub = null;
     _client?.close();
     _client = null;
-    if (!_controller.isClosed) await _controller.close();
+    // Never await the controller's close: a single-subscription
+    // controller's close future only completes once its done event
+    // is delivered to a listener — and when the server never saw
+    // the session (the TUI is served elsewhere, e.g. inside WSL)
+    // no collector ever listens. Awaiting it parked tuiTurn's
+    // finally forever, wedging the whole serialized tui-chat
+    // queue. Nobody consumes the done future; drop it.
+    if (!_controller.isClosed) unawaited(_controller.close());
   }
 }
