@@ -69,7 +69,8 @@ class TerminalSettingsSection {
     defaultValue: '',
     title: 'Default shell',
     subtitle:
-        'Shell a new workspace starts with. Empty = the first detected shell.',
+        'Shell for new workspaces and the next launch. '
+        'Empty = the first detected shell.',
     icon: Icons.terminal,
   );
 
