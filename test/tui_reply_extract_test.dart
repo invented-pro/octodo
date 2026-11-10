@@ -99,7 +99,8 @@ void main() {
       expect(reply, 'Hello!');
     });
 
-    test('a rule inside the reply (markdown separator) survives', () async {
+    test('a rule inside the reply (markdown separator) is decoration '
+        'and drops', () async {
       final reply = extractTuiReply([
         '🧑 compare',
         'A — fast',
@@ -109,9 +110,9 @@ void main() {
         '│ >                       │',
         '└─────────────────────────┘',
       ], 'compare');
-      // The table rule sits mid-reply (not within the bottom chrome
-      // window) and stays.
-      expect(reply, 'A — fast\n────────\nB — safe');
+      // Symbol-only rows carry no content — they are the TUI's own
+      // decoration, whatever their position.
+      expect(reply, 'A — fast\nB — safe');
     });
 
     test('oversized replies are capped with a truncation note',
@@ -154,6 +155,219 @@ void main() {
         '└─────────────────────────┘',
       ], 'hello?');
       expect(reply, isNull);
+    });
+  });
+
+  group('extractTuiReply — opencode block layout', () {
+    // The shapes opencode's TUI actually renders: USER, reasoning
+    // and tool blocks carry the thick left rail, assistant text is
+    // un-railed Glamour markdown, metadata footers open with a meta
+    // glyph, and the whole thing sits between a header/tab strip
+    // above and a status bar below.
+
+    test('railed reasoning and tool blocks drop; assistant text stays',
+        () async {
+      final reply = extractTuiReply([
+        ' opencode   normal·build·plan   tabs: 2', // header/tabs
+        '',
+        '┃  fix the login bug', // USER block (railed)
+        '',
+        '┃  The token cache never invalidates, so…', // reasoning
+        '',
+        '┃  Read  lib/auth.dart  8 lines', // tool call (railed)
+        '┃  (no output)', // tool output (railed)
+        '',
+        'Fixed: the cache now invalidates on refresh.', // reply
+        '',
+        '▣ build · glm-5.3 · 4s', // metadata footer
+        '',
+        ' esc to interrupt   12/200K', // status bar
+      ], 'fix the login bug');
+      expect(reply, 'Fixed: the cache now invalidates on refresh.');
+    });
+
+    test(' Glamour code fences inside the reply survive, rails stripped',
+        () async {
+      final reply = extractTuiReply([
+        '┃  show the config',
+        '',
+        'Set it like this:',
+        '│ final port = 4096; │', // fence interior (light rails)
+        '',
+        '▣ build · glm-5.3 · 2s',
+      ], 'show the config');
+      expect(reply, 'Set it like this:\nfinal port = 4096;');
+    });
+
+    test('collapsed thought rows and spinner frames drop', () async {
+      final reply = extractTuiReply([
+        '┃  summarize',
+        '+ Thought', // collapsed reasoning toggle
+        '',
+        '⠋ Thinking', // spinner frame (also a busy signal)
+        '',
+        'Two sentences, one idea.',
+        '▣ build · glm-5.3 · 9s',
+      ], 'summarize');
+      expect(reply, 'Two sentences, one idea.');
+    });
+
+    test('runs of identical rows collapse to one', () async {
+      final reply = extractTuiReply([
+        '┃  run it',
+        'ok',
+        'ok',
+        'ok',
+        'done',
+      ], 'run it');
+      expect(reply, 'ok\ndone');
+    });
+
+    test('a wrapped USER block continuation is not mistaken for the reply',
+        () async {
+      final reply = extractTuiReply([
+        '┃  please review the auth refactor',
+        '┃  before I continue', // wrapped under the same rail
+        '',
+        'Reviewed — looks good.',
+      ], 'please review the auth refactor before I continue');
+      expect(reply, 'Reviewed — looks good.');
+    });
+
+    test('prose hard-wrapped at the render width re-joins', () async {
+      // columns=100 → Glamour wraps at ~92; both rows fill that, so
+      // they were one sentence before the TUI wrapped them.
+      final long1 = 'a' * 92;
+      final long2 = 'b' * 92;
+      final reply = extractTuiReply([
+        '┃  go',
+        long1,
+        long2,
+        '',
+        '▣ build · glm-5.3 · 2s',
+      ], 'go', columns: 100);
+      expect(reply, '$long1 $long2');
+    });
+
+    test('markdown structure keeps its line breaks under re-flow',
+        () async {
+      final full = 'x' * 92;
+      final reply = extractTuiReply([
+        '┃  go',
+        full,
+        '- bullet one', // starts a list item — never a continuation
+        full,
+        '## Heading', // starts a heading
+      ], 'go', columns: 100);
+      expect(reply, '$full\n- bullet one\n$full\n## Heading');
+    });
+  });
+
+  group('opencode 2.x tab layout (field-captured shapes)', () {
+    // The exact shapes a user's WSL opencode 2.x rendered: a tab
+    // strip with SESSION titles instead of the brand header, thick
+    // message rails, glyph-less metadata footers with tok/s, a
+    // right sidebar with a scrollbar column, and the busy status
+    // bar at the bottom.
+
+    test('sniffAppFromScreen detects opencode without the brand', () {
+      expect(
+        sniffAppFromScreen([
+          'Greeting                Greeting               ⠹ Greeting'
+              '                  +',
+          '  ┃',
+          '  ┃  hi',
+          '  ┃',
+          '',
+          '     Hi! 👋 I am here and ready.',
+          '',
+          '     Build · MiniMax-M3.1-Flash · 17.6s · 6.0 tok/s',
+          '  ┃',
+          '  ┃  hi there',
+          '  ┃',
+          ' ⬝⬝⬝■■■■■ esc interrupt'
+              '                                7.0K (1%)  ctrl+p commands',
+        ]),
+        'opencode',
+        reason: 'status-bar hints + structural rails must identify the '
+            'app when tabs hide the brand',
+      );
+    });
+
+    test('sniffAppFromScreen leaves other full-screen apps alone', () {
+      expect(sniffAppFromScreen([
+        '~/.config/octodo/src/main.rs',
+        'pub fn main() {',
+        '  println("hi") once;',
+        '~                     1,1          All',
+      ]), isNull);
+      // An interrupt hint without opencode structure is not enough.
+      expect(sniffAppFromScreen(['some app', ' esc to interrupt']), isNull);
+    });
+
+    test('the reply region comes out clean from a 2.x capture', () {
+      final reply = extractTuiReply([
+        'Greeting              Greeting             ⠹ Greeting'
+            '                +',
+        '  ┃',
+        '  ┃  what is your name',
+        '  ┃',
+        '',
+        '     I am GLM, an AI assistant.                          █',
+        '                                                          █',
+        '     Build · MiniMax-M3.1-Flash · 1.7s · 32.9 tok/s      █',
+        '  ┃  Build · MiniMax-M3.1-Flash MiniMax Token Plan'
+            ' (minimax.cn)',
+        '  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+            '▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀',
+        ' ⬝⬝⬝■■■■■ esc interrupt'
+            '                              7.0K (1%)  ctrl+p commands',
+      ], 'what is your name');
+      expect(reply, 'I am GLM, an AI assistant.',
+          reason: 'rails, sidebar, scrollbar column, metadata, and the '
+              'status bar all drop');
+    });
+
+    test('the glyph-less 2.x metadata footer is busy-free decoration',
+        () {
+      expect(screenShowsBusy([
+        'Build · MiniMax-M3.1-Flash · 17.6s · 6.0 tok/s',
+      ]), isFalse,
+          reason: 'a finished message footer is not a busy indicator');
+    });
+  });
+
+  group('screenShowsBusy / busySignature', () {    test('a spinner frame row means busy', () {
+      expect(
+        screenShowsBusy([
+          '┃  go',
+          '⠙ Thinking',
+          ' esc to interrupt',
+        ]),
+        isTrue,
+      );
+    });
+
+    test('an interrupt hint without a spinner means busy', () {
+      expect(screenShowsBusy([' esc to interrupt   12/200K']), isTrue);
+    });
+
+    test('an idle screen (shortcuts hint, meters) is not busy', () {
+      expect(screenShowsBusy([' ? for shortcuts   128 tokens']), isFalse);
+    });
+
+    test('prose that merely contains phase words is not busy', () {
+      expect(screenShowsBusy(['Working with the registry took hours.']),
+          isFalse);
+    });
+
+    test('the signature tracks the animating indicator', () {
+      final a = busySignature(['⠋ Thinking']);
+      final b = busySignature(['⠙ Thinking']);
+      final c = busySignature(['⠙ Thinking']);
+      expect(a, isNotNull);
+      expect(a, isNot(b), reason: 'the spinner frame moved — still alive');
+      expect(b, c, reason: 'frozen frame — the same signature repeats');
     });
   });
 

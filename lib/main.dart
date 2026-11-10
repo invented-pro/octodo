@@ -3018,6 +3018,14 @@ class _AppShellFeishuBridge implements FeishuHostBridge {
   }
 
   @override
+  String? terminalWslDistro(String? workspaceId) {
+    final surface =
+        _entryFor(workspaceId)?.key.currentState?.getFocusedSurface();
+    final profile = surface?.profile;
+    return profile?.isWsl == true ? profile?.wslDistro : null;
+  }
+
+  @override
   Future<Uint8List?> snapshotPng(String? workspaceId) async =>
       await _focusedTerminal(workspaceId)?.capturePng();
 

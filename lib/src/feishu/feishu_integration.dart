@@ -204,6 +204,11 @@ abstract class FeishuHostBridge {
   /// the height grows).
   ({int rows, int columns})? terminalGeometry(String? workspaceId);
 
+  /// The WSL distro of the focused terminal's shell profile, or
+  /// null when it is not a WSL terminal. Routes opencode TUIs in
+  /// WSL to their distro's own opencode server.
+  String? terminalWslDistro(String? workspaceId);
+
   /// Off-screen full-content capture of the focused terminal's
   /// full-screen TUI ("resize to read"): the PTY briefly grows under
   /// a frozen view while a private engine parses the full repaint,
@@ -242,22 +247,25 @@ const int _kOutputMaxBytes = 15 * 1024;
 /// when the shell takes much longer to draw its next prompt.
 const int _kQuietFlushStreaks = 4;
 
-/// Quiet period that ends the wait for a TUI's reply before the
-/// off-screen capture (injectable via [FeishuIntegration]).
+/// Quiet period before the off-screen capture probes the screen
+/// (injectable via [FeishuIntegration]). A probe is a checkpoint,
+/// never a finish line — sending is gated on stability (see
+/// [_captureTuiReply]).
 const Duration _kTuiCaptureIdleDefault = Duration(seconds: 5);
 
-/// Hard ceiling on the same wait (injectable via
-/// [FeishuIntegration]).
-const Duration _kTuiCaptureMaxWaitDefault = Duration(minutes: 2);
+/// Full-stall give-up window: when the output stream has been
+/// silent AND the screen unchanged for this long, the turn is
+/// wedged or unextractable and the cleaned screen tail ships
+/// instead. There is deliberately NO total-time cap — agent turns
+/// legitimately run for arbitrarily long, and any progress evidence
+/// (output bytes, an animating busy indicator, a changing reply
+/// region) extends the wait indefinitely. Injectable via
+/// [FeishuIntegration].
+const Duration _kTuiCaptureStallDefault = Duration(minutes: 3);
 
 /// Rows the capture grows the PTY to — room for the whole
 /// conversation to re-render (width is kept, so wrapping stays).
 const int _kTuiCaptureRows = 400;
-
-/// Hard cap on one serialized TUI chat task (typing + server poll +
-/// reply wait + off-screen capture). A task that exceeds it is
-/// abandoned by the queue so later messages still flow.
-const Duration _kTuiChatTaskCap = Duration(minutes: 4);
 
 /// One page of a long output — the size of one chat message the
 /// pager splits an oversized reply into (design doc §5).
@@ -325,21 +333,32 @@ class FeishuIntegration {
   /// into one submission).
   Future<void> _tuiChatQueue = Future<void>.value();
 
+  /// The capture wait currently running inside the TUI chat queue,
+  /// if any. A newly queued message supersedes it (flush the
+  /// partial, free the queue) instead of sitting behind a long
+  /// agent turn — see [_supersedeActiveTuiWait].
+  _ActiveTuiWait? _activeTuiWait;
+
+  /// Gateways for opencode servers living inside WSL distros, keyed
+  /// by distro name (the local Windows gateway stays [opencode]).
+  /// A TUI running in WSL shares the WSL-side server's session
+  /// database, so THAT server — reached from Windows through WSL's
+  /// localhost forwarding — is the one that can see its turns.
+  /// Pre-seeded for tests; production creates entries lazily.
+  final Map<String, OpencodeGateway> _wslGateways;
+
   /// Idle window that ends a command's output capture (injectable).
   final Duration outputWindow;
 
   /// Hard ceiling on one command's output capture (injectable).
   final Duration maxOutputWindow;
 
-  /// Quiet period that ends the wait for a TUI's reply before the
-  /// off-screen capture: a model streams tokens continuously, so
-  /// silence means the turn is done. Injectable for tests.
+  /// Idle window before the capture probes the screen (injectable).
   final Duration tuiCaptureIdle;
 
-  /// Hard ceiling on the same wait — a silent turn (a long tool run
-  /// with no TUI output) still gets captured at the cap: a partial
-  /// reply beats none. Injectable for tests.
-  final Duration tuiCaptureMaxWait;
+  /// Full-stall give-up window for the same wait (injectable). No
+  /// total-time cap exists — see [_kTuiCaptureStallDefault].
+  final Duration tuiCaptureStall;
 
   /// The opencode client-server gateway (path 1): `/ai` and
   /// opencode-TUI terminals chat through it with pure text
@@ -406,9 +425,11 @@ class FeishuIntegration {
     this.outputWindow = _kOutputWindowDefault,
     this.maxOutputWindow = _kOutputMaxWindowDefault,
     this.tuiCaptureIdle = _kTuiCaptureIdleDefault,
-    this.tuiCaptureMaxWait = _kTuiCaptureMaxWaitDefault,
+    this.tuiCaptureStall = _kTuiCaptureStallDefault,
     OpencodeGateway? opencode,
+    Map<String, OpencodeGateway>? wslGateways,
   })  : opencode = opencode ?? OpencodeLocalGateway(),
+        _wslGateways = wslGateways ?? {},
         channel = channel ?? FeishuWsChannel(),
         api = api ?? FeishuApiClient(),
         credentialStore =
@@ -418,9 +439,9 @@ class FeishuIntegration {
         lease = lease ?? FeishuConnectionLease.resolve() {
     _bindings.addAll(initialBindings ?? const {});
     // Build marker: field logs must be attributable to a code state —
-    // this line proves the running app has the off-screen capture
-    // path (resize-to-read) and the queue watchdog.
-    _log.info('feishu: integration ready (capture+watchdog build)');
+    // this line proves the running app has the stability-gated
+    // capture path and WSL gateway routing.
+    _log.info('feishu: integration ready (capture-stability+wsl build)');
   }
 
   static FeishuIntegration? _instance;
@@ -840,16 +861,28 @@ class FeishuIntegration {
     //    through their server — same session the desktop TUI
     //    shows, pure text replies. Any other TUI gets the text
     //    relayed and its screen mirrored back.
-    if (bridge.inAltScreen(workspaceId) == true) {
+    //
+    //    The alt-screen flag is the primary signal, but screen
+    //    SHAPE backs it up: the flag lives in the visible engine's
+    //    mode state and has been observed stale after capture
+    //    restores — a misroute then relays the TUI's layout bytes
+    //    as if they were command output. A screen that looks like a
+    //    known server-backed TUI routes through it whatever the
+    //    flag says.
+    final screenNow = bridge.snapshotScreen(workspaceId);
+    final tuiOwned = bridge.inAltScreen(workspaceId) == true ||
+        _sniffScreenApp(screenNow) != null;
+    if (tuiOwned) {
       final termId = bridge.terminalId(workspaceId);
-      final app =
-          _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotScreen(workspaceId));
-      final gateway = _gatewayFor(app);
+      final app = _tuiApps[termId] ?? _sniffScreenApp(screenNow);
+      final gateway = _gatewayFor(app, workspaceId);
       if (gateway != null) {
         // Serialized: the messages go into the TUI's composer one
-        // after the other. The cap keeps one wedged task (a hung
-        // capture, a stuck server) from silencing every later
-        // message forever — the queue advances without it.
+        // after the other. A newer message first supersedes any
+        // still-running capture wait (a long agent turn must not
+        // hold the queue hostage); the wait itself is bounded by
+        // its own stall window, not by a task timer.
+        _supersedeActiveTuiWait();
         _log.info('feishu: tui-chat ${event.messageId} queued');
         final task = _tuiChatQueue.then((_) async {
           try {
@@ -866,10 +899,6 @@ class FeishuIntegration {
                     'the TUI: $e')
                 .catchError((_) {}));
           }
-        }).timeout(_kTuiChatTaskCap, onTimeout: () {
-          _log.warning('feishu: tui-chat ${event.messageId} '
-              'exceeded the ${_kTuiChatTaskCap.inMinutes}-minute '
-              'cap — the queue advances without it');
         }).catchError((_) {});
         _tuiChatQueue = task.then<void>((_) {}, onError: (_) {});
         return;
@@ -1845,22 +1874,33 @@ class FeishuIntegration {
 
   /// Recognize a server-backed TUI from its rendered screen — the
   /// fallback for TUIs started locally at the desktop (no router
-  /// capture saw the launch). The opencode TUI carries its brand
-  /// in the header lines.
+  /// capture saw the launch). Shape-based: the brand header is the
+  /// classic signal, but opencode 2.x tabs replace it with session
+  /// titles, so the status bar + block rails are read instead (see
+  /// [sniffAppFromScreen] — a raw mirror was shipped for WSL
+  /// opencode TUIs for exactly this reason).
   static String? _sniffScreenApp(List<String>? screen) {
     if (screen == null) return null;
-    for (final line in screen.take(6)) {
-      if (line.toLowerCase().contains('opencode')) return 'opencode';
-    }
-    return null;
+    return sniffAppFromScreen(screen);
   }
 
   /// Server-backed TUI adapters, keyed by the app names the
   /// sniffers produce. This is the registry point for other
   /// headless-capable TUIs (claude-code, gemini, …) — the routing
   /// itself is app-agnostic.
-  OpencodeGateway? _gatewayFor(String? app) =>
-      app == 'opencode' ? opencode : null;
+  ///
+  /// opencode terminals running inside a WSL distro get a gateway
+  /// pointed at THAT distro's opencode server (reached from Windows
+  /// through WSL's localhost forwarding): the TUI shares the
+  /// WSL-side server's session database, so only that server can
+  /// see its turns — the Windows-side server never will.
+  OpencodeGateway? _gatewayFor(String? app, String? workspaceId) {
+    if (app != 'opencode') return null;
+    final distro = bridge.terminalWslDistro(workspaceId);
+    if (distro == null) return opencode;
+    return _wslGateways.putIfAbsent(
+        distro, () => OpencodeLocalGateway.forWsl(distro));
+  }
 
   /// `/history` — what the conversation/screen shows, best source
   /// first:
@@ -1874,7 +1914,7 @@ class FeishuIntegration {
     final termId = bridge.terminalId(workspaceId);
     final app =
         _tuiApps[termId] ?? _sniffScreenApp(bridge.snapshotScreen(workspaceId));
-    final gateway = _gatewayFor(app);
+    final gateway = _gatewayFor(app, workspaceId);
     if (gateway != null) {
       final cwd = bridge.terminalCwd(workspaceId);
       if (cwd != null) {
@@ -1923,13 +1963,28 @@ class FeishuIntegration {
       FeishuInboundEvent event, OpencodeGateway gateway, String? workspaceId)
       async {
     final cwd = bridge.terminalCwd(workspaceId);
-    if (cwd == null || !await gateway.ensure()) {
+    if (cwd == null) {
+      _log.info('feishu: tui-chat ${event.messageId} fell back to mirror');
+      _mirrorIntoTui(event, workspaceId: workspaceId);
+      return;
+    }
+    // A WSL terminal's gateway points into its distro. When that
+    // server cannot be reached, the Windows-side server still gets
+    // a chance before the screen-capture fallback — a distro
+    // without opencode must not downgrade a locally-served TUI.
+    var gw = gateway;
+    if (!await gw.ensure() && gw != opencode && await opencode.ensure()) {
+      _log.info('feishu: tui-chat ${event.messageId} fell back to the '
+          'local opencode server');
+      gw = opencode;
+    }
+    if (!await gw.ensure()) {
       _log.info('feishu: tui-chat ${event.messageId} fell back to mirror');
       _mirrorIntoTui(event, workspaceId: workspaceId);
       return;
     }
     _capture?.flush();
-    final result = await gateway.tuiTurn(
+    final result = await gw.tuiTurn(
       cwd,
       _oneLine(event.text),
       (line) => _writeTuiLine(line, workspaceId),
@@ -1976,15 +2031,27 @@ class FeishuIntegration {
   static String _oneLine(String text) =>
       text.replaceAll(RegExp(r'\s*\n+\s*'), ' ').trim();
 
-  /// Wait for the TUI to go quiet, then read its full rendered
-  /// content off-screen and extract the reply to the message we
-  /// typed. Quiet is a checkpoint, not a finish line: agent TUIs
-  /// pause mid-turn (thinking, tool runs) longer than any idle
-  /// window, so a capture without a reply is retried on the next
-  /// quiet period until the cap. Null when the message is provably
-  /// not in the app (a modal held the keyboard) or the capture is
-  /// impossible. At the cap the screen tail is sent instead of
-  /// leaving the chat silent.
+  /// Read the reply off the TUI itself (the WSL/remote-server case:
+  /// the TUI talks to a server this desktop cannot see, so the
+  /// screen is the only source). The wait has NO total-time cap —
+  /// agent turns think and execute for arbitrarily long. It ends on
+  /// STATE, not on a clock:
+  ///
+  ///  - progress evidence (output bytes, an animating busy
+  ///    indicator, a changing reply region) extends the wait
+  ///    indefinitely;
+  ///  - the reply ships only when it is STABLE: identical across
+  ///    two probes one idle window apart, with no busy indicator on
+  ///    screen — silence alone stopped being a finish line after it
+  ///    shipped thinking text as the reply (mid-turn quiet gaps are
+  ///    longer than any idle window);
+  ///  - a full stall (see [tuiCaptureStall]) gives up and ships the
+  ///    cleaned screen tail, clearly labeled partial;
+  ///  - a newer Feishu message supersedes the wait (see
+  ///    [_supersedeActiveTuiWait]).
+  ///
+  /// Null when the message provably never reached the app (a modal
+  /// held the keyboard) or the capture is impossible.
   Future<String?> _captureTuiReply(
       FeishuInboundEvent event, String? workspaceId) async {
     final sent = _oneLine(event.text);
@@ -1994,99 +2061,156 @@ class FeishuIntegration {
       _log.info('feishu: capture ${event.messageId}: no output stream');
       return null;
     }
+    final columns = bridge.terminalGeometry(workspaceId)?.columns;
+    final wait = _ActiveTuiWait();
+    _activeTuiWait = wait;
     final watch = Stopwatch()..start();
+
+    // Output bookkeeping. Bytes during (and briefly after) a probe
+    // are the resize-to-read repaint, not progress — the probe owns
+    // the PTY for that window and replays the whole screen.
+    var lastOutputAt = DateTime.now();
+    var probeGraceUntil = DateTime.now();
+    StreamSubscription<List<int>>? sub;
+    sub = stream.listen((_) {
+      if (DateTime.now().isBefore(probeGraceUntil)) return;
+      lastOutputAt = DateTime.now();
+    }, onError: (_) {}, onDone: () {});
+
+    String? lastReply; // last probe's extraction
+    String? lastBusy; // last probe's busy signature
+    String? candidate; // reply candidate awaiting one confirming probe
     List<String>? lastLines;
     var emptyRegions = 0;
-    while (true) {
-      final remaining = tuiCaptureMaxWait - watch.elapsed;
-      if (remaining <= Duration.zero) break;
-      final quiet = await _waitOutputQuiet(stream,
-          idle: tuiCaptureIdle, cap: remaining);
-      _log.info('feishu: capture ${event.messageId}: quiet=$quiet after '
-          '${watch.elapsedMilliseconds}ms');
-      if (!quiet) {
-        _log.info('feishu: tui ${event.messageId} still streaming at '
-            'the cap — capturing anyway');
+    var lastChangeAt = DateTime.now();
+
+    try {
+      while (true) {
+        if (wait.superseded) {
+          _log.info('feishu: capture ${event.messageId} superseded at '
+              '${watch.elapsedMilliseconds}ms');
+          return _labeledPartial(lastLines, sent, watch,
+              'superseded by a newer message');
+        }
+        final now = DateTime.now();
+        final quietFor = now.difference(lastOutputAt);
+        final unchangedFor = now.difference(lastChangeAt);
+        if (quietFor > tuiCaptureStall && unchangedFor > tuiCaptureStall) {
+          _log.warning('feishu: capture ${event.messageId}: stalled after '
+              '${watch.elapsedMilliseconds}ms — sending the screen tail');
+          break;
+        }
+        if (quietFor < tuiCaptureIdle) {
+          final tickMs = tuiCaptureIdle.inMilliseconds.clamp(40, 250) ~/ 4;
+          await Future<void>.delayed(Duration(milliseconds: tickMs));
+          continue;
+        }
+
+        // Quiet checkpoint: probe the full screen.
+        probeGraceUntil = DateTime.now().add(const Duration(seconds: 10));
+        final lines = await bridge.captureFullTui(
+            workspaceId, rows: _kTuiCaptureRows);
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        probeGraceUntil =
+            DateTime.now().add(const Duration(milliseconds: 800));
+        if (lines == null) {
+          _log.info('feishu: capture ${event.messageId}: unavailable at '
+              '${watch.elapsedMilliseconds}ms');
+          return null;
+        }
+        lastLines = lines;
+        final busy = busySignature(lines);
+        final reply = extractTuiReply(lines, sent, columns: columns);
+        if (_log.isLoggable(Level.FINE)) {
+          final replyDesc =
+              reply == null ? '-' : '${reply.length} chars';
+          _log.fine('feishu: capture ${event.messageId}: '
+              '${lines.length} lines, reply=$replyDesc, '
+              'busy=${busy != null} at ${watch.elapsedMilliseconds}ms');
+        }
+        if (reply != lastReply || busy != lastBusy) {
+          // The screen moved since the last probe — progress.
+          lastReply = reply;
+          lastBusy = busy;
+          lastChangeAt = DateTime.now();
+        }
+        if (!captureHasMessage(lines, sent)) {
+          // The text is nowhere on screen: a modal had the keyboard
+          // and no reply will ever follow — report immediately.
+          _log.info('feishu: capture ${event.messageId}: message not on '
+              'screen (modal?) at ${watch.elapsedMilliseconds}ms');
+          return null;
+        }
+        if (reply != null && busy == null) {
+          // Stability gate: the same extraction on the NEXT quiet
+          // probe (≥ one idle window later) sends it. A mid-turn
+          // quiet gap produces a different (growing) extraction and
+          // keeps waiting.
+          if (reply == candidate) {
+            _log.info('feishu: capture ${event.messageId}: stable reply at '
+                '${watch.elapsedMilliseconds}ms');
+            return reply;
+          }
+          candidate = reply;
+        } else {
+          candidate = null; // still working — nothing to confirm yet
+          // A busy screen means work in progress; probing it again
+          // after every idle window just replays the resize cycle.
+          // Back off a little — output bytes still end the pause
+          // early.
+          await Future<void>.delayed(
+              tuiCaptureIdle * 2 > const Duration(seconds: 10)
+                  ? const Duration(seconds: 10)
+                  : tuiCaptureIdle * 2);
+        }
+        // An empty region only counts while the app is idle: busy
+        // screens legitimately show nothing extractable (thinking
+        // and tool rows are excluded from the region by contract).
+        emptyRegions = busy == null && replyRegionTail(lines, sent).isEmpty
+            ? emptyRegions + 1
+            : 0;
+        if (emptyRegions >= 2) {
+          // Two consecutive idle captures show the message but
+          // nothing readable below it — the text sits in the
+          // composer, the Enter was swallowed. Waiting longer only
+          // adds silence.
+          _log.info('feishu: capture ${event.messageId}: message never '
+              'submitted (empty region twice) at '
+              '${watch.elapsedMilliseconds}ms');
+          return null;
+        }
       }
-      final lines = await bridge.captureFullTui(
-          workspaceId, rows: _kTuiCaptureRows);
-      if (lines == null) {
-        _log.info('feishu: capture ${event.messageId}: unavailable at '
-            '${watch.elapsedMilliseconds}ms');
-        return null;
-      }
-      lastLines = lines;
-      _log.info('feishu: capture ${event.messageId}: ${lines.length} '
-          'lines at ${watch.elapsedMilliseconds}ms');
-      final reply = extractTuiReply(lines, sent);
-      if (reply != null) return reply;
-      if (!captureHasMessage(lines, sent)) {
-        // The text is nowhere on screen: a modal had the keyboard
-        // and no reply will ever follow — report immediately.
-        _log.info('feishu: capture ${event.messageId}: message not on '
-            'screen (modal?) at ${watch.elapsedMilliseconds}ms');
-        return null;
-      }
-      emptyRegions =
-          replyRegionTail(lines, sent).isEmpty ? emptyRegions + 1 : 0;
-      if (emptyRegions >= 2) {
-        // Two consecutive captures show the message but nothing
-        // readable below it — the text sits in the composer, the
-        // Enter was swallowed. Waiting longer only adds silence.
-        _log.info('feishu: capture ${event.messageId}: message never '
-            'submitted (empty region twice) at '
-            '${watch.elapsedMilliseconds}ms');
-        return null;
-      }
-      if (_log.isLoggable(Level.FINE)) {
-        _log.fine('feishu: capture ${event.messageId}: no reply yet at '
-            '${watch.elapsedMilliseconds}ms — continuing');
-      }
+      return _labeledPartial(lastLines, sent, watch, 'stalled — partial');
+    } finally {
+      await sub.cancel();
+      if (_activeTuiWait == wait) _activeTuiWait = null;
     }
-    // Cap reached with the message on screen but no extracted reply:
-    // the screen tail tells the user where the turn stands.
-    _log.warning('feishu: capture ${event.messageId}: no reply after '
-        '${watch.elapsedMilliseconds}ms — sending the screen tail');
-    final tail =
-        lastLines == null ? const <String>[] : replyRegionTail(lastLines, sent);
-    if (tail.isEmpty) return null;
-    return '(no reply extracted from the TUI after '
-        '${(watch.elapsedMilliseconds / 1000).round()}s — its last '
-        'screen lines)\n${tail.join('\n')}';
   }
 
-  /// Resolves once [stream] has been silent for [idle] (every chunk
-  /// restarts the clock), at latest after [cap] — true when genuinely
-  /// quiet, false when the cap cut a still-active stream. Silence
-  /// from the start (the reply finished before we subscribed) also
-  /// resolves as quiet after one [idle] period.
-  static Future<bool> _waitOutputQuiet(
-    Stream<List<int>> stream, {
-    required Duration idle,
-    required Duration cap,
-  }) {
-    final done = Completer<bool>();
-    void complete(bool quiet) {
-      if (!done.isCompleted) done.complete(quiet);
+  /// The labeled partial screen tail for give-up paths (stall,
+  /// supersession) — cleaned by the same rules as the reply, and
+  /// honestly labeled so a partial is never mistaken for the turn's
+  /// answer.
+  String? _labeledPartial(List<String>? lines, String sent, Stopwatch watch,
+      String reason) {
+    final tail = lines == null ? const <String>[] : replyRegionTail(lines, sent);
+    final elapsed = (watch.elapsedMilliseconds / 1000).round();
+    if (tail.isEmpty) {
+      return '($reason after ${elapsed}s — nothing readable on screen yet)';
     }
+    return '($reason after ${elapsed}s — the TUI\'s last screen lines)\n'
+        '${tail.join('\n')}';
+  }
 
-    Timer? idleTimer = Timer(idle, () => complete(true));
-    final capTimer = Timer(cap, () => complete(false));
-    late final StreamSubscription<List<int>> sub;
-    sub = stream.listen(
-      (_) {
-        idleTimer?.cancel();
-        idleTimer = Timer(idle, () => complete(true));
-      },
-      onError: (_) {},
-      onDone: () => complete(true),
-    );
-    return done.future.whenComplete(() {
-      idleTimer?.cancel();
-      idleTimer = null;
-      capTimer.cancel();
-      sub.cancel();
-    });
+  /// Flag the running capture wait (if any) as superseded: it flushes
+  /// its partial on its next tick and frees the TUI chat queue for
+  /// the message that just arrived. Without this, a long agent turn
+  /// would hold every later message hostage.
+  void _supersedeActiveTuiWait() {
+    final wait = _activeTuiWait;
+    if (wait == null || wait.superseded) return;
+    wait.superseded = true;
+    _log.info('feishu: superseding the active TUI capture wait');
   }
 
   /// Relay the text into the TUI and mirror its rendered screen
@@ -2160,6 +2284,14 @@ class FeishuIntegration {
     }
     api.dispose();
   }
+}
+
+/// The capture wait currently inside the TUI chat queue — its
+/// superseded flag is how a newly arrived Feishu message cuts a
+/// still-running agent turn's wait short (flush the partial, free
+/// the queue) instead of queueing behind it.
+class _ActiveTuiWait {
+  bool superseded = false;
 }
 
 /// A dangerous command waiting for the user's confirmation — the
@@ -2308,6 +2440,38 @@ class _OutputCapture {
   static final RegExp _altScreenEnter =
       RegExp('\x1b\\[\\?(?:1049|1047|47)h');
 
+  /// Spinner/progress braille runes — TUI working indicators.
+  static final RegExp _kSpinnerGlyph =
+      RegExp('[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠛⠟⠯⠷⠿⡿⢿⣟⣿■⬝]');
+
+  /// Does this "command output" look like a full-screen TUI's
+  /// layout painting instead: spinner frames and short torn
+  /// fragments (positioned redraws with the escape sequences
+  /// stripped), almost no prose? Field shape observed when a stale
+  /// alt-screen flag misrouted a TUI message into the byte path.
+  /// Conservative on purpose — a build log with a progress spinner
+  /// has long text lines and never trips it.
+  static bool _looksLikeTuiPainting(List<String> lines) {
+    final nonEmpty =
+        lines.where((l) => l.trim().isNotEmpty).toList(growable: false);
+    if (nonEmpty.length < 12) return false;
+    var spinners = 0;
+    var fragmentish = 0;
+    for (final line in nonEmpty) {
+      final bare = line.replaceAll(_kSpinnerGlyph, '').trim();
+      if (bare.isEmpty) {
+        spinners++;
+        fragmentish++;
+        continue;
+      }
+      if (_kSpinnerGlyph.hasMatch(line)) spinners++;
+      // A torn fragment of a positioned redraw: a few visible chars
+      // left after the cursor movement around them was stripped.
+      if (bare.length <= 4) fragmentish++;
+    }
+    return spinners >= 4 && fragmentish / nonEmpty.length >= 0.7;
+  }
+
   /// Guess which server-backed TUI just launched from the echoed
   /// command line right before the alt-screen switch (the shell
   /// echoes what the user typed). The app must be the command's
@@ -2373,6 +2537,16 @@ class _OutputCapture {
     final bytes = _buffer.toList();
     _buffer.clear();
     var lines = _cleanLines(bytes);
+    // A full-screen TUI's repaints are absolute-cursor layout
+    // painting; with escapes stripped they read as spinner frames
+    // and torn fragments. When the "output" is dominated by that
+    // shape, it is a misrouted TUI (a stale alt-screen flag), not a
+    // command's answer — say so instead of shipping garbage.
+    if (_looksLikeTuiPainting(lines)) {
+      final app = sniffAppFromScreen(lines);
+      _reply(app == 'opencode' ? _kOpencodeTuiHint : _kTuiHint);
+      return;
+    }
     // The shell's echo of the command itself is noise on the phone.
     _stripEcho(lines, command);
     // So is the fresh prompt that told us the command finished
@@ -2558,6 +2732,9 @@ class _NullHostBridge implements FeishuHostBridge {
 
   @override
   ({int rows, int columns})? terminalGeometry(String? workspaceId) => null;
+
+  @override
+  String? terminalWslDistro(String? workspaceId) => null;
 
   @override
   Future<List<String>?> captureFullTui(String? workspaceId,

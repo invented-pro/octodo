@@ -89,4 +89,78 @@ void main() {
     // would be ~7s+.
     expect(sw.elapsed, lessThan(const Duration(seconds: 6)));
   }, timeout: const Timeout(Duration(seconds: 30)));
+
+  group('WSL gateway (forWsl)', () {
+    test('parseServiceUrl normalizes wildcard hosts to localhost', () {
+      expect(OpencodeLocalGateway.parseServiceUrl(
+          '● running at http://[::]:4096'), 'http://127.0.0.1:4096');
+      expect(OpencodeLocalGateway.parseServiceUrl(
+          'http://0.0.0.0:4096/x'), 'http://127.0.0.1:4096/x');
+      expect(OpencodeLocalGateway.parseServiceUrl('http://127.0.0.1:4096'),
+          'http://127.0.0.1:4096');
+      expect(OpencodeLocalGateway.parseServiceUrl('no url here'), isNull);
+    });
+
+    test('parseServicePassword reads the password out of service.json',
+        () {
+      expect(
+        OpencodeLocalGateway.parseServicePassword('{"password":"pw-1"}'),
+        'pw-1',
+      );
+      expect(OpencodeLocalGateway.parseServicePassword('{"other":1}'), isNull);
+      expect(OpencodeLocalGateway.parseServicePassword('not json'), isNull);
+    });
+
+    test('ensure() attaches through wsl.exe to the distro-side service',
+        () async {
+      final server = await _fakeServer();
+      addTearDown(() => server.close(force: true));
+      final statusUrl = 'http://127.0.0.1:${server.port}';
+
+      final calls = <List<String>>[];
+      Future<ProcessResult?> fakeWsl(List<String> argv) async {
+        calls.add(argv);
+        if (argv.isNotEmpty && argv.first == 'opencode') {
+          return ProcessResult(1, 0, '● running at $statusUrl', '');
+        }
+        if (argv.isNotEmpty && argv.first == 'cat') {
+          return ProcessResult(1, 0, '{"password":"wsl-pw"}', '');
+        }
+        return ProcessResult(1, 0, '', '');
+      }
+
+      final gateway = OpencodeLocalGateway.forWsl('Ubuntu', runWsl: fakeWsl);
+      addTearDown(gateway.dispose);
+
+      expect(await gateway.ensure(), isTrue,
+          reason: 'status URL + service.json password + healthy /api/info');
+
+      // The service flow ran inside the distro…
+      expect(
+          calls, anyElement(equals(['opencode', 'service', 'status'])));
+      // …and the password came from the distro's own home.
+      expect(
+          calls,
+          anyElement(predicate<List<String>>(
+              (argv) => argv.any((a) => a.contains('service.json')))));
+
+      // The attached server carries the turn: tuiTurn types locally
+      // and polls the distro-side session list (empty here — served
+      // elsewhere — but it RETURNED, against the fake server above).
+      final result = await gateway.tuiTurn('/home/user/proj', 'hi', (_) {});
+      expect(result.sessionId, isNull);
+    }, timeout: const Timeout(Duration(seconds: 30)));
+
+    test('a distro without a service never spawns a Windows-side serve',
+        () async {
+      Future<ProcessResult?> fakeWsl(List<String> argv) async =>
+          ProcessResult(1, 0, 'not running', '');
+      final gateway = OpencodeLocalGateway.forWsl('Ubuntu', runWsl: fakeWsl);
+      addTearDown(gateway.dispose);
+
+      expect(await gateway.ensure(), isFalse,
+          reason: 'no service in the distro → give up; the router falls '
+              'back to the screen-capture path');
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  });
 }

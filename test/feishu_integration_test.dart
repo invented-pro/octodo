@@ -238,8 +238,25 @@ class _RecordingBridge implements FeishuHostBridge {
   }
 
   @override
-  List<String>? snapshotScreen(String? workspaceId) =>
-      hasTerminal ? screenLines : null;
+  List<String>? snapshotScreen(String? workspaceId) {
+    if (!hasTerminal) return null;
+    // With a layout, the screen follows the FOCUSED tab — one tab
+    // may run a full-screen TUI while another shows a shell, and
+    // routing (shape sniffing) must see the bound tab's screen.
+    if (panes.isNotEmpty) {
+      String? focused = focusedSurfaceId;
+      if (focused == null) {
+        for (final p in panes) {
+          for (final t in p.tabs) {
+            if (t.focused) focused = t.id;
+          }
+        }
+      }
+      final screen = screenBySurface[focused];
+      if (screen != null) return screen;
+    }
+    return screenLines;
+  }
 
   @override
   String? terminalId(String? workspaceId) => hasTerminal ? termId : null;
@@ -260,12 +277,19 @@ class _RecordingBridge implements FeishuHostBridge {
   /// [captureLines] every call.
   List<List<String>?>? captureSequence;
 
+  /// What `terminalWslDistro` reports — null (not WSL) by default.
+  String? wslDistro;
+
   /// The rows the last `captureFullTui` call asked for.
   int? lastCaptureRows;
 
   @override
   ({int rows, int columns})? terminalGeometry(String? workspaceId) =>
       hasTerminal ? (rows: 30, columns: 100) : null;
+
+  @override
+  String? terminalWslDistro(String? workspaceId) =>
+      hasTerminal ? wslDistro : null;
 
   @override
   Future<List<String>?> captureFullTui(String? workspaceId,
@@ -1094,6 +1118,146 @@ void main() {
     expect(sent.single.$2, 'the answer');
   });
 
+  test('a 2.x opencode TUI whose tab strip hides the brand is still '
+      'recognized — no raw screen mirror (field regression)', () async {    // Field capture from a WSL opencode 2.x: tabs show session
+    // titles ("Greeting … +"), the brand is nowhere, and the bottom
+    // bar carries the busy hints. The old header-only sniffer
+    // missed it and the chat got the raw screen mirrored back —
+    // layout noise and a partial reply while still thinking.
+    final bridge = _RecordingBridge()
+      ..cwd = '/home/s1'
+      ..altScreen = true
+      ..wslDistro = 'Ubuntu'
+      ..screenLines = [
+        'Greeting              Greeting             ⠹ Greeting'
+            '                +',
+        '  ┃',
+        '  ┃  hi',
+        '  ┃',
+        '     Build · MiniMax-M3.1-Flash · 17.6s · 6.0 tok/s',
+        ' ⬝⬝⬝■■■■■ esc interrupt'
+            '                              7.0K (1%)  ctrl+p commands',
+      ];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = true
+      ..reply = 'the clean server-side answer';
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+      wslGateways: {'Ubuntu': gateway},
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_tabs',
+      text: 'hello?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+
+    expect(gateway.lastMsg, 'hello?',
+        reason: 'the tab layout must still route through the server');
+    expect(sent.single.$2, 'the clean server-side answer',
+        reason: 'a gateway reply is pure text — never the mirrored '
+            'screen');
+  });
+
+  test('a stale alt-screen flag does not misroute: the screen SHAPE '
+      'still sends opencode through its gateway (field regression)',
+      () async {
+    // After a capture probe, RIS can leave the visible engine's
+    // alt-screen flag false while the TUI keeps running. The next
+    // message must not fall into the plain byte-capture path (which
+    // relayed spinner frames and torn fragments as text).
+    final bridge = _RecordingBridge()
+      ..cwd = '/home/s1'
+      ..altScreen = false // the stale flag
+      ..wslDistro = 'Ubuntu'
+      ..screenLines = [
+        'Greeting              Greeting             ⠹ Greeting'
+            '                +',
+        '  ┃',
+        '  ┃  hello',
+        '  ┃',
+        ' ⬝⬝⬝■■■■■ esc interrupt'
+            '                              7.0K (1%)  ctrl+p commands',
+      ];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = true
+      ..reply = 'the server-side answer';
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+      wslGateways: {'Ubuntu': gateway},
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_staleflag',
+      text: 'hello?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+
+    expect(gateway.lastMsg, 'hello?',
+        reason: 'screen shape, not the mode flag, decides the route');
+    expect(sent.single.$2, 'the server-side answer');
+  });
+
+  test('byte output that is TUI layout painting gets the hint, never '
+      'the garbage (field regression)', () async {
+    // The raw shape observed when a misroute let a TUI's repaints
+    // into the plain byte path: spinner frames, torn tab-title
+    // fragments, progress bars — no prose.
+    final bridge = _RecordingBridge()
+      ..altScreen = false
+      // A plain shell screen: no TUI shape, so routing takes the
+      // plain byte path this test exercises.
+      ..screenLines = ['user@host:~\$'];
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      outputWindow: const Duration(milliseconds: 40),
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_garbage',
+      text: 'hi',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    final junk = <String>[
+      '⠋', '┃', '┃  hello', '┃', '⠋', ' ⠙ Greeting',
+      for (var i = 0; i < 14; i++) ...[
+        '⠙', '■■⬝⬝⬝⬝⬝⬝',
+        '⠹', 'etin',
+        '⠸', 'G',
+        '⠼', 'ting',
+      ],
+      ' ⠴ Greeting', 'esc interrupt',
+    ].join('\n');
+    bridge.outputController.add(utf8.encode(junk));
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+
+    expect(sent.single.$2, contains('opencode detected'),
+        reason: 'spinner frames and torn fragments are layout '
+            'painting — the hint, not the bytes');
+  });
+
   test('a message the TUI never submits gets a hint, not silence',
       () async {
     final bridge = _RecordingBridge()
@@ -1121,8 +1285,8 @@ void main() {
       text: 'hello?',
       createTime: DateTime.now().millisecondsSinceEpoch,
     ));
-    // The router first waits out the capture quiet window before
-    // giving up (tuiCaptureIdle + capture + maxWait margins).
+    // The router first waits out the capture idle window before
+    // giving up (probe + confirmation margins).
     await Future<void>.delayed(const Duration(milliseconds: 500));
 
     expect(sent.single.$2, contains('nothing came back'));
@@ -1311,6 +1475,197 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 500));
 
     expect(sent.single.$2, contains('nothing came back'));
+  });
+
+  test('a busy screen never ships early — the reply waits for stability',
+      () async {
+    // The turn pauses mid-thinking longer than the idle window: the
+    // old code read that quiet as "done" and shipped the partial.
+    final thinking1 = [
+      ' opencode  ⟨build⟩  glm-5.3',
+      '┃  status?',
+      '⠋ Thinking',
+      ' esc to interrupt',
+    ];
+    final thinking2 = [
+      ' opencode  ⟨build⟩  glm-5.3',
+      '┃  status?',
+      '⠙ Thinking', // the spinner frame moved — the turn is alive
+      ' esc to interrupt',
+    ];
+    final done = [
+      ' opencode  ⟨build⟩  glm-5.3',
+      '┃  status?',
+      'All green — 2 files tracked, nothing dirty.',
+      '▣ build · glm-5.3 · 4s',
+      ' ? for shortcuts   128 tokens',
+    ];
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      ..captureSequence = [thinking1, thinking2, done];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = false;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_busy',
+      text: 'status?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+
+    expect(sent.single.$2, 'All green — 2 files tracked, nothing dirty.',
+        reason: 'busy screens and unstable extractions never ship; only '
+            'the stable final reply does');
+  });
+
+  test('a frozen turn gives up at the stall window with a labeled partial',
+      () async {
+    // The busy indicator is on screen but never moves again and no
+    // output flows: wedged. No total-time cap exists — the stall is
+    // what gives up.
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      ..captureLines = [
+        ' opencode  ⟨build⟩  glm-5.3',
+        '┃  status?',
+        '⠿ stuck mid-run',
+        ' esc to interrupt',
+      ];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = false;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_stall',
+      text: 'status?',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(sent.single.$2, contains('partial'),
+        reason: 'a stalled turn ships an honestly labeled partial, '
+            'never silence');
+  });
+
+  test('a newer message supersedes the running wait instead of queueing',
+      () async {
+    // Message A walks into a frozen-busy turn (would stall at
+    // 200 ms). Message B arrives first — A flushes its partial
+    // immediately and B's own turn proceeds.
+    final bridge = _RecordingBridge()
+      ..cwd = 'E:\\proj'
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      ..captureLines = [
+        ' opencode  ⟨build⟩  glm-5.3',
+        '┃  first question',
+        '⠿ Thinking',
+        ' esc to interrupt',
+      ];
+    final gateway = _FakeGateway()
+      ..ready = true
+      ..submits = false;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: gateway,
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_a',
+      text: 'first question',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    // B's captures: a stable, finished screen.
+    bridge.captureSequence = [
+      [
+        ' opencode  ⟨build⟩  glm-5.3',
+        '┃  second question',
+        'Answer to the second question.',
+        ' ? for shortcuts',
+      ],
+    ];
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_b',
+      text: 'second question',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    // Generous on purpose: B waits out A's in-flight probe, then
+    // needs two of its own — real timers stretch under suite load.
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+
+    expect(sent.length, 2, reason: 'A flushed, then B answered');
+    expect(sent.first.$2, contains('superseded'));
+    expect(sent.last.$2, 'Answer to the second question.');
+  });
+
+  test('an opencode TUI in a WSL distro routes through that distro\'s '
+      'gateway', () async {
+    final bridge = _RecordingBridge()
+      ..cwd = '/home/user/proj' // POSIX — the distro-side view
+      ..altScreen = true
+      ..screenLines = [' opencode  ⟨build⟩', ' > ']
+      ..wslDistro = 'Ubuntu';
+    final wslGateway = _FakeGateway()
+      ..ready = true
+      ..submits = true
+      ..reply = 'From inside WSL.';
+    final localGateway = _FakeGateway()..ready = true;
+    final sent = <(String, String)>[];
+    final integration = await _routerFor(
+      creds: _ownerCreds(),
+      bridge: bridge,
+      onSend: (chat, text) => sent.add((chat, text)),
+      gateway: localGateway,
+      wslGateways: {'Ubuntu': wslGateway},
+    );
+
+    integration.handleEvent(FeishuInboundEvent(
+      senderOpenId: 'ou_owner',
+      chatId: 'oc_chat',
+      messageId: 'om_wsl',
+      text: 'hello from Feishu',
+      createTime: DateTime.now().millisecondsSinceEpoch,
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    expect(wslGateway.lastDir, '/home/user/proj',
+        reason: 'the WSL gateway saw the turn, keyed by the distro-side '
+            'cwd');
+    expect(wslGateway.lastMsg, 'hello from Feishu');
+    expect(localGateway.lastMsg, isNull,
+        reason: 'the Windows-side server must not be asked');
+    expect(sent.single.$2, 'From inside WSL.');
   });
 
   test('a gateway error mid-turn still answers the chat', () async {
@@ -1826,7 +2181,10 @@ void main() {
         ]),
       ]
       ..altScreenSurfaces.add('tab_op')
-      ..screenLines = const ['opencode tui screen'];
+      // Only the TUI tab shows that screen; the bound shell tab
+      // shows a plain prompt (per-tab, like the real bridge).
+      ..screenBySurface['tab_op'] = const ['opencode tui screen']
+      ..screenLines = const ['user@host:~\$'];
     final sent = <(String, String)>[];
     final integration = await _routerFor(
       creds: _ownerCreds(),
@@ -2654,8 +3012,9 @@ Future<FeishuIntegration> _routerFor({
   Duration outputWindow = const Duration(seconds: 5),
   Duration maxOutputWindow = const Duration(minutes: 5),
   Duration tuiCaptureIdle = const Duration(milliseconds: 40),
-  Duration tuiCaptureMaxWait = const Duration(milliseconds: 200),
+  Duration tuiCaptureStall = const Duration(milliseconds: 200),
   OpencodeGateway? gateway,
+  Map<String, OpencodeGateway>? wslGateways,
   _FakeChannel? channel,
 }) async {
   final dir = Directory.systemTemp.createTempSync('feishu_router');
@@ -2692,7 +3051,8 @@ Future<FeishuIntegration> _routerFor({
     outputWindow: outputWindow,
     maxOutputWindow: maxOutputWindow,
     tuiCaptureIdle: tuiCaptureIdle,
-    tuiCaptureMaxWait: tuiCaptureMaxWait,
+    tuiCaptureStall: tuiCaptureStall,
+    wslGateways: wslGateways,
     opencode: gateway ?? _FakeGateway(),
   );
   addTearDown(integration.dispose);

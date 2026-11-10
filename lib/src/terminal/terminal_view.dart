@@ -712,7 +712,17 @@ class TerminalViewState extends State<TerminalView> {
       // Reset the visible engine: it missed every frame of the
       // capture window. RIS clears any drift; the wiggle below makes
       // the TUI repaint fully at the restored size.
-      _engine.feed(utf8.encode('\x1bc'));
+      //
+      // RIS also drops the engine out of the alternate screen — and
+      // a running TUI never re-emits `?1049h` (it believes it never
+      // left), so the mode MUST be re-asserted here. Without this,
+      // `inAltScreen` reads false after the first capture and the
+      // Feishu router misroutes the next message into the plain
+      // byte-capture path, relaying layout painting as text; the
+      // next clone capture also refuses to run (`!inAltScreen`).
+      // The hidden cursor is re-asserted for the same reason — TUIs
+      // only hide it once at startup.
+      _engine.feed(utf8.encode('\x1bc\x1b[?1049h\x1b[?25l'));
       var wiggleRows = origRows - 1;
       if (wiggleRows < 1) wiggleRows = 1;
       pty.resize(wiggleRows, origCols);
@@ -737,7 +747,8 @@ class TerminalViewState extends State<TerminalView> {
           pty.resize(origRows, origCols);
         } catch (_) {}
         try {
-          _engine.feed(utf8.encode('\x1bc'));
+          // Same re-assertion as the happy path — see there.
+          _engine.feed(utf8.encode('\x1bc\x1b[?1049h\x1b[?25l'));
         } catch (_) {}
       }
       await sub?.cancel();

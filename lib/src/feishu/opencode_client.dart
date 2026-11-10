@@ -82,8 +82,32 @@ class OpencodeLocalGateway implements OpencodeGateway {
         _authHeader = authHeader,
         _startupTimeout = const Duration(seconds: 45);
 
+  /// A gateway for the opencode server inside a WSL [distro]. The
+  /// TUI running in that distro shares the distro-side server's
+  /// session database, so THAT server — not the Windows one — sees
+  /// its turns. Everything resolves through `wsl.exe` (service
+  /// status for the URL, the distro's own
+  /// `~/.config/opencode/service.json` for the password), and the
+  /// server is reached from Windows through WSL's localhost
+  /// forwarding. [runWsl] lets tests fake the `wsl.exe` calls.
+  OpencodeLocalGateway.forWsl(String distro,
+      {Duration? startupTimeout,
+      Future<ProcessResult?> Function(List<String> args)? runWsl})
+      : _startupTimeout = startupTimeout ?? const Duration(seconds: 45) {
+    _wslDistro = distro;
+    _runWsl = runWsl;
+  }
+
   final Logger _log = moduleLogger('feishu.opencode');
   final Duration _startupTimeout;
+
+  /// WSL distro this gateway resolves inside, null for the local
+  /// Windows machine. See [OpencodeLocalGateway.forWsl].
+  String? _wslDistro;
+
+  /// Injectable `wsl.exe` runner for tests; null = run the real
+  /// `wsl.exe -d <distro> -- <args>`.
+  Future<ProcessResult?> Function(List<String> args)? _runWsl;
 
   /// Slack between our clock and the server's when comparing event
   /// stamps — the window that decides which events belong to the
@@ -121,6 +145,7 @@ class OpencodeLocalGateway implements OpencodeGateway {
     // 1. Attach to the shared background service — the server
     //    every locally-running opencode TUI connects to. Chatting
     //    through IT is what keeps the desktop TUI in sync live.
+    //    Inside WSL the same flow resolves through wsl.exe.
     if (await _tryAttachBackgroundService()) return true;
     if (_starting) return false;
     _starting = true;
@@ -131,6 +156,13 @@ class OpencodeLocalGateway implements OpencodeGateway {
       for (var i = 0; i < 8; i++) {
         if (await _tryAttachBackgroundService()) return true;
         await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+      if (_wslDistro != null) {
+        // No own-serve fallback inside a distro: spawning Windows
+        // processes there is not ours to do, and the caller falls
+        // back to the TUI screen-capture path instead.
+        _log.warning('opencode: no server in WSL $_wslDistro');
+        return false;
       }
       // 3. Last resort: our own serve instance (sessions still
       //    share through the common database).
@@ -149,8 +181,10 @@ class OpencodeLocalGateway implements OpencodeGateway {
     }
   }
 
-  /// Run the opencode CLI (npm .cmd shim → runInShell).
+  /// Run the opencode CLI (npm .cmd shim → runInShell). Inside a
+  /// WSL distro the call routes through `wsl.exe -d <distro> --`.
   Future<ProcessResult?> _runCli(List<String> args) async {
+    if (_wslDistro != null) return await _wslRun(['opencode', ...args]);
     try {
       return await Process.run('opencode', args, runInShell: true)
           .timeout(const Duration(seconds: 20));
@@ -162,32 +196,68 @@ class OpencodeLocalGateway implements OpencodeGateway {
   /// Attach to the background service when one is reachable:
   /// URL from `opencode service status`, password from the user's
   /// opencode config (`~/.config/opencode/service.json`), auth
-  /// Basic("opencode:" + password) — verified against 2.2.5.
+  /// Basic("opencode:" + password) — verified against 2.2.5. Inside
+  /// a WSL distro both resolve through `wsl.exe` (the distro's own
+  /// files and service, reached from Windows via localhost
+  /// forwarding).
   Future<bool> _tryAttachBackgroundService() async {
     try {
-      final password = _servicePassword();
+      final password = await _servicePassword();
       if (password == null) return false;
       final status = await _runCli(['service', 'status']);
       final out = status == null ? '' : '${status.stdout}';
-      final m = RegExp(r'https?://\S+').firstMatch(out);
-      if (m == null) return false;
-      final url = m.group(0)!;
+      final url = parseServiceUrl(out);
+      if (url == null) return false;
       final auth =
           'Basic ${base64Encode(utf8.encode('opencode:$password'))}';
       if (!await _probe('$url/api/info', auth)) return false;
       _baseUrl = url;
       _authHeader = auth;
       _ownsServe = false;
-      _log.info('opencode: attached to the background service');
+      _log.info(_wslDistro == null
+          ? 'opencode: attached to the background service'
+          : 'opencode: attached to the service in WSL $_wslDistro');
       return true;
     } catch (_) {
       return false;
     }
   }
 
+  /// The first `http(s)://…` URL in a `service status` output, with
+  /// wildcard bind hosts (`[::]`, `0.0.0.0`) normalized to
+  /// localhost — the address a Windows client reaches a WSL-side
+  /// listener through. Public for tests.
+  static String? parseServiceUrl(String output) {
+    final m = RegExp(r'https?://\S+').firstMatch(output);
+    if (m == null) return null;
+    return m
+        .group(0)!
+        .replaceFirst(RegExp(r'//(\[::\]|0\.0\.0\.0)(?=:)'), '//127.0.0.1');
+  }
+
+  /// The password field of a `service.json` payload. Public for
+  /// tests.
+  static String? parseServicePassword(String output) {
+    try {
+      final j = jsonDecode(output);
+      if (j is Map<String, dynamic>) {
+        final pw = j['password'];
+        if (pw is String && pw.isNotEmpty) return pw;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   /// The background service's password from the opencode config
-  /// (checked against the standard XDG and Windows layouts).
-  static String? _servicePassword() {
+  /// (checked against the standard XDG and Windows layouts); inside
+  /// a WSL distro, from the distro's own home via `wsl.exe`.
+  Future<String?> _servicePassword() async {
+    if (_wslDistro != null) {
+      final res = await _wslRun(
+          ['cat', r'$HOME/.config/opencode/service.json']);
+      final out = res == null ? '' : '${res.stdout}';
+      return parseServicePassword(out);
+    }
     final home = Platform.environment['USERPROFILE'] ??
         Platform.environment['HOME'];
     if (home == null) return null;
@@ -201,14 +271,25 @@ class OpencodeLocalGateway implements OpencodeGateway {
         final f = File(
             '$dir${Platform.pathSeparator}service.json');
         if (!f.existsSync()) continue;
-        final j = jsonDecode(f.readAsStringSync());
-        if (j is Map<String, dynamic>) {
-          final pw = j['password'];
-          if (pw is String && pw.isNotEmpty) return pw;
-        }
+        final pw = parseServicePassword(f.readAsStringSync());
+        if (pw != null) return pw;
       } catch (_) {}
     }
     return null;
+  }
+
+  /// Run a command inside the gateway's WSL distro (no opencode
+  /// prefix); the injectable runner stands in for `wsl.exe` in
+  /// tests.
+  Future<ProcessResult?> _wslRun(List<String> argv) async {
+    final runWsl = _runWsl;
+    if (runWsl != null) return await runWsl(argv);
+    try {
+      return await Process.run('wsl.exe', ['-d', _wslDistro!, '--', ...argv])
+          .timeout(const Duration(seconds: 20));
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<bool> _healthy() async {
