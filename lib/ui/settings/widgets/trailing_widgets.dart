@@ -11,6 +11,7 @@ import '../../../src/settings/setting_codec.dart';
 import '../../../src/settings/settings_catalog.dart';
 import '../../../src/settings/settings_store.dart';
 import '../../../src/terminal/font_family_options.dart';
+import '../../../src/terminal/shell_profiles.dart';
 import '../../../src/theme/palette_context.dart';
 import '../../../src/theme/palettes.dart';
 import '../../common/color_picker_dialog.dart';
@@ -1028,6 +1029,136 @@ class _FontFamilyDropdownTrailingState
           ),
         ],
       ],
+    );
+  }
+}
+
+// ── Default shell dropdown ──────────────────────────────────────────
+
+const double _kShellDropdownItemWidth = 200;
+
+/// Dropdown for `terminal.defaultShell`: the detected shell profiles in
+/// detection order, plus an explicit "first detected shell" entry for
+/// the empty (factory) value.
+///
+/// Persists [ShellProfile.shortName] rather than `label` — WSL distros
+/// get a sanitized, unique `shortName`, while `label` carries a display
+/// suffix that can drift between versions, and `program` can't tell two
+/// distros apart at all. Displays `label` so the row reads like the
+/// pane dropdown.
+class DefaultShellDropdownTrailing extends StatefulWidget {
+  final StringSetting setting;
+  final SettingsStore store;
+
+  /// Detected profiles, in the same order the workspace's pane dropdown
+  /// shows them. Empty (detection failed, or a host with no detector)
+  /// degrades to a default-only dropdown so the row still renders.
+  final List<ShellProfile> shells;
+
+  const DefaultShellDropdownTrailing({
+    super.key,
+    required this.setting,
+    required this.store,
+    this.shells = const <ShellProfile>[],
+  });
+
+  @override
+  State<DefaultShellDropdownTrailing> createState() =>
+      _DefaultShellDropdownTrailingState();
+}
+
+class _DefaultShellDropdownTrailingState
+    extends State<DefaultShellDropdownTrailing> {
+  late String _value = widget.store.get(widget.setting);
+  late final StreamSubscription<String> _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = widget.store.watch(widget.setting).listen((v) {
+      if (!mounted || v == _value) return;
+      setState(() => _value = v);
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub.cancel();
+    super.dispose();
+  }
+
+  /// `(persisted value, display text)` pairs. The empty value is the
+  /// factory default — "whatever detection picked first" — and is named
+  /// after that profile so the row answers "so which one do I get?".
+  ///
+  /// Deduped by value: two profiles can share a `shortName` (e.g. two
+  /// `bash` installs at different paths), and a `DropdownButton` asserts
+  /// when its `value` matches more than one item.
+  List<(String, String)> get _options {
+    final first = widget.shells.isEmpty
+        ? 'First detected shell'
+        : 'First detected shell (${widget.shells.first.label})';
+    final options = <(String, String)>[('', first)];
+    final seen = <String>{''};
+    for (final shell in widget.shells) {
+      if (!seen.add(shell.shortName)) continue;
+      options.add((shell.shortName, shell.label));
+    }
+    // A stale value (distro uninstalled, profile renamed) stays visible
+    // instead of silently snapping the dropdown to another shell — the
+    // workspace falls back to the first profile at startup, and the user
+    // should see *why* that happened.
+    if (!seen.contains(_value)) {
+      options.add((_value, '$_value (not detected)'));
+    }
+    return options;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Semantics(
+      label: widget.setting.title,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: palette.dialogSurface,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: palette.outline, width: 1),
+        ),
+        child: DropdownButton<String>(
+          value: _value,
+          isDense: true,
+          underline: const SizedBox.shrink(),
+          isExpanded: false,
+          dropdownColor: palette.popupSurface,
+          style: TextStyle(color: palette.textPrimary, fontSize: 12),
+          items: [
+            for (final (value, text) in _options)
+              DropdownMenuItem<String>(
+                value: value,
+                child: SizedBox(
+                  width: _kShellDropdownItemWidth,
+                  child: Text(
+                    text,
+                    overflow: TextOverflow.ellipsis,
+                    softWrap: false,
+                    maxLines: 1,
+                    style: TextStyle(
+                      color: palette.textPrimary,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+          onChanged: (v) {
+            if (v == null || v == _value) return;
+            setState(() => _value = v);
+            widget.store.set(widget.setting, v);
+          },
+        ),
+      ),
     );
   }
 }

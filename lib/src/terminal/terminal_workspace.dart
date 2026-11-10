@@ -308,11 +308,39 @@ class TerminalWorkspaceState extends State<TerminalWorkspace>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Resolve the preferred shell BEFORE _initRootPane: the first surface
+    // is built from [_defaultShell], which is read before [_makeSurface]'s
+    // first `await` — i.e. earlier than _initSettings() finishes.
+    _defaultShellIndex = _resolveDefaultShellIndex();
     // _initRootPane is async (it awaits the WSL `$HOME` query for
     // WSL surfaces); fire-and-forget from initState. The setState
     // inside it triggers a rebuild once the root pane is ready.
     unawaited(_initRootPane());
     _initSettings();
+  }
+
+  /// Index of the shell named by the `terminal.defaultShell` setting in
+  /// [TerminalWorkspace.availableShells], or `0` (the detection order's
+  /// first profile) when the setting is empty or matches nothing. The
+  /// setting holds a profile `shortName`; a miss — distro uninstalled or
+  /// renamed since the setting was written — falls back silently but
+  /// leaves one WARNING in the log.
+  int _resolveDefaultShellIndex() {
+    final runtime = SettingsRuntime.instance;
+    final preferred = runtime.store.get<String>(
+      runtime.catalog.terminal.defaultShell,
+    );
+    final profiles = widget.availableShells;
+    final index = resolveDefaultShellIndex(profiles, preferred);
+    if (preferred.trim().isNotEmpty &&
+        (profiles.isEmpty ||
+            !shellProfileMatchesPreference(profiles[index], preferred))) {
+      _log.warning(
+        'terminal.defaultShell "$preferred" matched no detected shell; '
+        'falling back to the first profile',
+      );
+    }
+    return index;
   }
 
   @override
@@ -1807,8 +1835,12 @@ function prompt {
   }
 
   /// Called when the user picks a shell from the per-pane dropdown.
-  /// Sets it as the new default and immediately opens a tab in the
-  /// focused container running that shell.
+  /// Sets it as the new default **for this session** and immediately
+  /// opens a tab in the focused container running that shell.
+  ///
+  /// Deliberately not persisted: this dropdown is a transient action,
+  /// and the durable preference lives in Settings (`terminal.defaultShell`,
+  /// same model as Windows Terminal's per-profile vs. default dropdown).
   void _openShellFromSelector(int index) {
     setState(() => _defaultShellIndex = index);
     _newSurfaceInFocusedContainer();
